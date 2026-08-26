@@ -1,0 +1,16 @@
+# Python bytecode cache -- regenerated on run, not source.
+__pycache__/
+*.pyc
+
+# Local MAME config and screenshots -- machine-specific / transient, made by
+# whatever cartridge you last pointed a tool at, not toolkit content.
+/cfg/
+/snap/
+
+# Any ROM someone drops in to test against -- never distribute a cartridge
+# dump from this repo. Every tool here takes a ROM path as an argument; none
+# is bundled.
+*.a78
+*.bin
+
+.DS_Store
