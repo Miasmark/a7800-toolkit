@@ -216,6 +216,73 @@ Two specific ways this bites:
   "proven" unreferenced twice turned out to be reached through a page register
   loaded from a different table entirely.
 
+## Live churn confirms activity, not what a byte means
+
+Two RAM arrays lit up on nearly every one-second snapshot across a whole
+recording, twelve bytes each, right where a twelve-segment centipede would
+put its position. Concluded: row array, column array. Both got named and
+committed that way, live evidence and all.
+
+They were a status-bits byte and a direction/graphics-offset byte for an
+18-slot general object table (every enemy type plus the player's own shot),
+not coordinates at all -- caught later, independently, by finding the exact
+instruction sequence for a poison-mushroom collision check operating on one
+of them with `AND`/`ORA` against bit-pattern constants (`$40`, `$E7`), not
+`ADC`/`SBC` against anything coordinate-shaped. Live data proves a byte is
+*doing something every frame*; it says nothing about *what kind of thing* --
+a status/flags byte that toggles state on every collision check churns just
+as continuously as a position that updates every frame, and from a
+snapshot-diff alone the two are indistinguishable.
+
+The check that would have caught it directly, and the reason it wasn't run:
+**a 6502 idiom for testing or setting bits almost never puts a bitwise
+mnemonic on the address itself.** `AND`/`ORA`/`EOR` do have direct memory
+addressing modes, but real code overwhelmingly loads the value into A first
+(`LDA addr,X`) and masks with an immediate afterward (`AND #$40`) -- so
+grepping the generated listing for which mnemonics reference an address
+directly (the `most-referenced RAM addresses` report's own address column,
+or any `xrefs:` line) will show mostly `LDA`/`STA`/`CMP` regardless of
+whether the byte is a coordinate or a bitfield, because the bitwise op that
+would give it away is one line down, working on the accumulator, with no
+operand naming the address at all. (A version of this was tried as an
+automatic classifier in `disasm.py` itself -- tally bitwise vs. arithmetic
+mnemonics referencing each address, print a verdict. It mis-classified the
+exact motivating byte, because the same byte also had a 2-bit sub-counter
+packed into it and `DEC`'d directly, which is memory-direct and *does* show
+up this way -- a packed byte can legitimately be mixed. Reverted rather than
+shipped, since a wrong automatic verdict here is worse than no verdict: it
+would have produced the same false confidence as the original mistake, just
+with a tool's name on it instead of a human's.)
+
+The manual check that does work: for a byte suspected of being a coordinate
+or counter, grep the listing for every `LDA <name>` (or the indexed form)
+and read the one or two lines immediately after each hit. Bit-pattern
+constants there (especially ones that aren't round numbers -- `$40`, `$E7`,
+not `$05` or `$0A`) mean bitfield, regardless of how the byte behaves live.
+
+## A small-range index doesn't have to mean "player slot"
+
+Four evenly-spaced fields, seven bytes apart, each three bytes long, each
+touched by `LDA/STA field,X` with X ranging 0-2. The obvious read: three
+players' worth of some four-part value. Four *separate* three-byte BCD
+numbers -- player one's score, player two's, a team score for co-op mode,
+and a spare block belonging to something else entirely -- with X selecting
+a byte *within* one number, not a player.
+
+Both readings explain the exact same access pattern equally well from the
+code alone; nothing about `LDA field,X` distinguishes "X indexes a
+digit-place shared by three players" from "X indexes a byte within this one
+independent field, and the four fields are unrelated to each other except
+by being the same shape." The tell, when there is one, is usually external
+to the indexed instructions themselves: what other code treats the *whole
+field* as a single unit (a 3-byte BCD add with carry chained across exactly
+those three bytes and no further, for instance, is a strong sign of "one
+number," and if there are four such adds at four different base addresses
+rather than one parameterized loop over three player slots, that is itself
+the answer). Don't let "a loop variable that happens to range over a small
+number matches the number of players" stand in for actually checking what
+happens at each value of that variable.
+
 ## Cross-bank references need a bank, not just an address
 
 In a banked cart the same address means different bytes depending on which bank
