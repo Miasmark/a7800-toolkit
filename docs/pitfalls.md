@@ -355,6 +355,24 @@ contradicts a specific, testable prediction (like "this address should
 change at this exact frame"), reach for a write-tap on that one prediction
 before trusting the snapshot's silence.
 
+A second, distinct way to reach the same wrong conclusion: a candidate BCD
+score-add routine (right shape on paper -- carry-chained accumulator add,
+selected by an index, a near-exact structural match for an already-confirmed
+score finding in a sibling project) showed zero net change in six candidate
+bytes across a whole ~10-minute recording, and was written up as a rejected,
+probably-inactive finding. It was live *every frame*, unconditionally --
+just usually adding zero, because most frames have no scoring event to
+apply. No other routine was overwriting anything here; the accumulator
+simply spends nearly all of its life not moving, by design, and a coarse
+sample can't tell "runs constantly, net-zero most of the time" apart from
+"never runs" without also checking a narrow, high-activity window where a
+real change is expected (here, a window already known from a *different*
+confirmed live event happening at the same moment). Same fix as the case
+above -- a narrow, unthrottled, frame-exact write-tap -- but a different
+root cause worth naming on its own: the write target doesn't have to be
+shared scratch space for coarse sampling to lie; a legitimately-quiet
+accumulator does it just as well.
+
 ## A computed jump table can be wider than its first N entries suggest
 
 A table built as `LDA lo_table,Y` / `LDA hi_table,Y` / `JMP (ptr)` was
