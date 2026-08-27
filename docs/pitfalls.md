@@ -483,3 +483,37 @@ orders of magnitude larger than any current guess), before trusting any
 "traced across the whole recording" claim -- and treat "the game kept
 progressing with no further input given" as a direct, load-bearing signal
 that a recording is longer than assumed, not as something to explain away.
+
+## A screenshot sweep only proves what you actually opened
+
+A probe captured a fine-grained screenshot sequence across an event
+window -- fine enough, in fact, that the frame which would have shown the
+real outcome was sitting right there in the output directory. The
+write-up, though, was built from a sparser subset of that same sequence:
+a handful of frames opened by hand, spaced widely enough that every one
+of them landed just before or just after the actual event. Nothing in
+those frames showed the thing that had happened, so the conclusion
+written up was "it didn't happen" -- confidently, and with real
+screenshots cited as evidence, because the frames genuinely had been
+looked at. They just weren't the right ones, and the ones that were right
+were never opened.
+
+The tell, when the correction arrived, was blunt: a person who'd actually
+watched the session said plainly that the thing the write-up called
+absent was visible in the very images being cited. Going back and opening
+*every* frame in the already-captured sequence (not capturing new data --
+the old data already had the answer) settled it in minutes.
+
+The lesson: capturing enough data and looking at enough of it are two
+different steps, and a probe finishing with "N screenshots written" says
+nothing about how many of them a person or an agent actually opened
+before drawing a conclusion. A sparse, hand-picked viewing of a dense
+capture can systematically straddle a brief event -- especially a scored
+transition, a text pop-up, a state change that only holds for a few dozen
+frames -- and still look like due diligence, because every frame that
+*was* opened really did support the conclusion. Before writing up a
+negative result ("X never happens," "the state never changes") from a
+screenshot sequence, either view the sequence in full, or narrow
+mechanically first (binary-search the transition, diff the underlying
+state, grep for the on-screen text's tile pattern) so that "not found in
+what I checked" and "not found" are actually the same claim.
