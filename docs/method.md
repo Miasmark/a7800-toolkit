@@ -181,6 +181,46 @@ actually checking instead of trusting the summary. A "pending" label freezes
 whatever effort was or wasn't spent at the moment it was written; it is not
 evidence that the effort was sufficient.
 
+**Before building a new probe, reread the data an old one already captured --
+at a finer grain than the first pass used.** A causal link between two RAM
+counters (one crossing a threshold, the other starting a multi-hundred-frame
+countdown) looked like it would need a dedicated write-tap to confirm. It
+didn't: an existing once-a-second snapshot capture, taken for an unrelated
+question earlier in the same project, already had both counters in it end to
+end -- the first pass had only ever looked at aggregate change counts, never
+walked the actual per-sample sequence side by side. Five minutes of rereading
+settled it. A capture that answered question A is not exhausted once A is
+answered; check what it says about B before spending an emulator run to find
+out.
+
+**When a shared, low-level routine is called from many places, `PC` alone
+cannot tell you which caller fired this time -- but the stack usually still
+can.** Immediately after a `JSR`, the 6502 return address (pushed as
+target-1) sits at `$0100 + SP + 1` (low byte) and `$0100 + SP + 2` (high
+byte), and nothing has touched the stack yet if the tap fires early in the
+callee. Reading those two bytes back inside the tap and adding 1 recovers the
+real call site -- turning "every write to this shared accumulator looks
+identical" into "these five distinct call sites each award a different
+amount," without needing to trace every caller by hand first. Stops working
+the moment something between the `JSR` and the tap pushes more onto the
+stack, so keep the tapped address as close to the routine's entry as
+possible.
+
+**To verify a live indirect *read* (pointer built from a runtime value, not a
+compile-time table) without risking a MARIA-DMA-misattributed ROM read: tap
+the RAM writes that follow it instead.** Reads from ROM can be misattributed
+the way `pitfalls.md` already documents for display-list walks; writes to
+ordinary RAM cannot. If the code under study writes the base pointer, the
+consumed value, and the advanced index each into their own RAM array right
+after the read (a common pattern for a per-object interpreter loop), tap all
+three, and reconstruct (base, index, value) triples from write order alone --
+program order guarantees which write belongs to which read. Checking each
+reconstructed triple against the actual ROM byte at the predicted address
+turns "the shape looks like a table read" into a specific, falsifiable,
+per-instance pass/fail count (93.5% exact matches across ~16,000
+reconstructed reads, in one case) -- strong evidence, and it never touched a
+ROM read tap at all.
+
 ### 6. Change one byte and see it
 
 Once the disassembly is trustworthy the payoff is that you can edit with
