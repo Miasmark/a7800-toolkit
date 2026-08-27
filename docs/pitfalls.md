@@ -382,3 +382,36 @@ a hardcoded small set, don't assume the table's width from "how many entries
 look plausible" -- check what value range the index variable actually reaches
 live, and treat unreachable-looking table slots as a hint to keep reading
 past the declared boundary, not as proof the table stops there.
+
+## A private reference can be right about the game and still wrong about your ROM
+
+Cross-checking a project against a privately-consulted, unlicensed
+historical source for the same game (never quoted or copied in -- used
+strictly to generate hypotheses to re-derive independently) mostly
+corroborated existing findings, including one case where the outside
+source's own constants matched two threshold values this project had
+already found by reading its own code, which was enough on its own to
+settle what a mysterious ~600-frame counter climb actually represented.
+
+But two other subsystems -- a monster-movement table and a level-counter
+readout -- were described by that source as built a structurally
+*different* way than what this project's own live-verified bytes showed:
+one direction-computed-live where this ROM reads a table, one
+arithmetic-per-frame where this ROM writes from a table. The instinct to
+resolve the mismatch by re-reading this project's own code for the
+missing piece (a matching arithmetic routine) came up empty -- and rather
+than force a fit either direction, both findings were left honestly
+un-reconciled, with the project's own mechanism kept as confirmed and its
+*identity* downgraded back to an open question.
+
+The general lesson: a reference source for "the same game" is not
+automatically a reference for *this specific build* of it -- ports
+routinely restructure a subsystem (table-driven here, computed-live
+there) or change specific constants (a scoring table came out with
+different absolute values, indexed differently, in the same
+cross-check) without changing what the player experiences. Treat
+disagreement as data, not as an error to resolve in either direction:
+keep whatever this project already independently verified against its
+own ROM, note the mismatch, and don't let an outside source talk you out
+of live-confirmed evidence -- but also don't let it talk you into
+over-claiming an identity your own bytes haven't actually settled.
