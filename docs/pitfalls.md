@@ -433,3 +433,53 @@ keep whatever this project already independently verified against its
 own ROM, note the mismatch, and don't let an outside source talk you out
 of live-confirmed evidence -- but also don't let it talk you into
 over-claiming an identity your own bytes haven't actually settled.
+
+## MAME's "Total playback frames" line reports where the script stopped, not where the recording ends
+
+Building a probe against a `.inp` recording, an early exploratory run's
+own printed summary (`Total playback frames: N`) was taken at face value
+as the file's true length and used to size every later probe's own
+`MACHINE:exit()` threshold. Every subsequent probe in the project then
+"confirmed" a number in that same neighborhood -- because each one was,
+by construction, incapable of running past its own threshold to find
+out otherwise. A live-vs-real-time determinism check even passed cleanly
+against this same wrong boundary: both runs agreed with each other, which
+felt like confirmation, but they were agreeing about a boundary neither
+of them was free to cross.
+
+The actual file was close to three times longer than every probe had
+been reading. A byte-pair that tracked cleanly against the true range
+(and against independently-supplied ground truth: specific score/value
+checkpoints from the person who made the recording) had been rejected
+outright one project-day earlier, on the grounds that live data showed it
+"only reaching 5" -- true, for the ~35,900 frames the probe actually
+looked at, and irrelevant to what the byte did across the other roughly
+70,000 frames nobody had asked it about yet.
+
+The fix came from a plain domain-expert observation, not from re-reading
+any log more carefully: told that watching the recording play back
+*without giving it any further input* still showed the game progressing
+well past where every probe had been stopping, the only honest
+conclusion was that the recording's own content extended further than
+assumed -- a `.inp` playback tool doesn't invent input, so continued
+progress with no live input pending means there was still recorded input
+left to consume. Removing the artificial threshold and setting a generous
+one purely as a safety cap (not a length estimate) confirmed the real
+figure directly from MAME's own end-of-playback message, this time
+because the run was actually allowed to reach it.
+
+The lesson: MAME's own "Total playback frames" summary line is not a
+property of the `.inp` file -- it's a property of *this particular
+process's own execution*, printed at whatever frame the process (your
+script's exit condition, a crash, a manual kill) happened to stop at. It
+looks like file metadata and reads like file metadata, but treating it as
+a fact about the recording rather than a fact about the last run is a
+silent, compounding trap: every probe that inherits the same threshold
+"independently confirms" the same wrong boundary, and cross-checks against
+those probes (determinism tests, behavioral comparisons) can pass cleanly
+while both sides are simply agreeing about where they were told to stop.
+Establish the real length once, with no exit condition at all (or a cap
+orders of magnitude larger than any current guess), before trusting any
+"traced across the whole recording" claim -- and treat "the game kept
+progressing with no further input given" as a direct, load-bearing signal
+that a recording is longer than assumed, not as something to explain away.
