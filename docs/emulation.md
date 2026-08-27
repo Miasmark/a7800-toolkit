@@ -77,6 +77,16 @@ holds while your edits do not change timing or input handling -- a patch that
 shifts a frame count will desynchronise a recording, and the divergence is
 usually obvious (the player walks into a wall).
 
+**`-playback`/`-record` silently resolve through `input_directory`, not your
+given path.** MAME's `input_directory` setting (default `inp`, persisted in a
+generated `mame.ini` you may not know exists) gets prepended to whatever you
+pass `-playback`/`-record` -- including an absolute path, at least on the
+version this was checked against. A recording sitting right where you pointed
+still fails with `Input file ... not found` for no visible reason. Fix by
+passing `-input_directory .` (or wherever the file actually lives) explicitly;
+don't waste time re-checking the path itself once you've already confirmed the
+file exists on disk.
+
 ## Watching the right thing
 
 Three probe shapes cover most needs:
