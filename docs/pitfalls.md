@@ -326,3 +326,59 @@ turned the last thirteen bare operands into labels.
 
 Both of these were found by reading DiStella's source and asking what it does
 that this does not.
+
+## A periodic RAM snapshot can miss a real, frequent write
+
+A "sample every N frames, keep only bytes that ever changed" probe (cheap,
+and generally a good first tool) reported three RAM cells as constant across
+an entire ~26,000-frame recording, spanning eleven confirmed level
+transitions of a level-indexed table write that should have changed each
+time. Read as "this code path doesn't actually run per level" and the whole
+finding was downgraded on that basis.
+
+It was wrong. A *different*, unrelated routine (an in-flight projectile's
+position setup) wrote to the exact same three cells constantly during normal
+play, because the game reused them as shared scratch space between distinct
+subsystems. The level-indexed write did fire, every time, exactly as
+expected -- but its value was overwritten by the unrelated routine within a
+frame or two, and the once-a-second snapshot essentially never landed on the
+narrow window where it was visible. A dedicated PC-tagged write-tap on the
+exact three addresses, unthrottled, caught all of it immediately and matched
+every value against the source table by hand.
+
+The general form: **absence of change in a coarse periodic snapshot is
+evidence about that snapshot's sampling rate, not about whether writes are
+happening** -- especially for any RAM address that shows up as a write target
+from more than one place in earlier probing (a strong hint it's reused
+scratch space, not dedicated state). When a snapshot-based finding
+contradicts a specific, testable prediction (like "this address should
+change at this exact frame"), reach for a write-tap on that one prediction
+before trusting the snapshot's silence.
+
+## A computed jump table can be wider than its first N entries suggest
+
+A table built as `LDA lo_table,Y` / `LDA hi_table,Y` / `JMP (ptr)` was
+computed by hand from its declared bytes for `Y=0..7` (an apparent 8-entry
+table, lo and hi arrays 8 bytes each, back to back in ROM). Two of the eight
+looked like garbage addresses (outside plausible code space) and were
+written off as unused table slots; the other six were declared as trial
+entry points and traced cleanly. Case closed, or so it seemed -- except live
+PC-tagged probing kept finding real, executing code a few bytes past where
+the sixth entry's routine returned, with no static cross-reference pointing
+at it from anywhere in the traced program.
+
+The actual index (a state/stage counter, not a fixed small enum) ran higher
+than 7 during real play. Reading the lo table at `Y=8` walks past its own
+8-byte declared end and *into the hi table's first byte* -- which is exactly
+where it needs to be, because the hi table sits immediately after the lo
+table with no gap, and the two "garbage" `Y=0`/`Y=1` entries' hi-bytes double
+as `Y=8`/`Y=9`'s lo-bytes once the low byte for the corresponding target
+address happens to match. The matching hi byte for the overrun entries comes
+from ROM bytes immediately past the hi table's own declared end. Both
+"overrun" targets turned out to be real, live-confirmed code.
+
+The lesson: when a table-driven dispatch's index is a *counter* rather than
+a hardcoded small set, don't assume the table's width from "how many entries
+look plausible" -- check what value range the index variable actually reaches
+live, and treat unreachable-looking table slots as a hint to keep reading
+past the declared boundary, not as proof the table stops there.
