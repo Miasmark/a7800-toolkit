@@ -74,6 +74,18 @@ and MARIA forms each character's graphics address as:
 Character sets are therefore line-planar too: page `CHARBASE+0` is line 0 of all
 256 characters, `CHARBASE+1` is line 1, and so on.
 
+That is how the set must be laid out *at the address CHARBASE names* -- it is
+not necessarily how the cartridge stores it. A ROM is free to keep its font
+**linearly**, each glyph's scanlines in consecutive bytes, and de-interleave
+into the line-planar form while copying the set into RAM at init. One shipped
+game does exactly that, storing 4x5-pixel glyphs six bytes apart (five
+scanlines plus a pad byte) and interleaving two pointers a fixed distance apart
+as it copies. Rendered with the line-planar reader, such a font is noise at
+every base and every `--lines` value, because the grid slices across glyph
+cells instead of along them. `gfx.py --linear CELL` reads the linear form; if a
+charset render is unrecoverable noise everywhere, try it before concluding the
+region isn't graphics.
+
 This is why game text is so often not ASCII. The character number is an index
 into whatever order the artist drew the alphabet in, and a game that only needs
 capitals, digits and a few punctuation marks will pack them however it likes.
@@ -152,7 +164,12 @@ pointing at RAM:
 That is correct, and it is the whole shape of graphics on this machine: the
 display list is **built in RAM every frame**, so it does not exist until the
 game runs. A static trace has nowhere further to go. What it *can* find
-statically is CHARBASE, because a character set is a fixed page in ROM.
+statically is CHARBASE -- though note that CHARBASE names *an address*, not
+necessarily a ROM one. A game that copies its character set into RAM at init
+will have CHARBASE pointing into RAM, and a static read of it tells you where
+the set ends up rather than where it is stored. If CHARBASE resolves to RAM,
+the set is being relocated from somewhere in the cartridge and the copy routine
+is what leads back to the source.
 
 To get the rest, capture a live list and feed it back:
 

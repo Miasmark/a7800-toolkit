@@ -122,6 +122,38 @@ def render_charset(cart, space, base, lines, pal, scale=4, cols=16,
     return img.resize((img.width * scale, img.height * scale), Image.NEAREST)
 
 
+def render_linear(cart, space, base, cell, lines, gw, count, pal, scale=4,
+                  cols=16):
+    """A *linear* character set: each glyph is `cell` consecutive bytes.
+
+    MARIA's own indirect mode wants character data line-planar (page
+    CHARBASE+0 is line 0 of every character), and `render_charset` reads
+    that layout. But a cartridge is free to *store* its font linearly --
+    glyph 0's scanlines, then glyph 1's, and so on -- and convert to the
+    line-planar form when it copies the set into RAM at init. A ROM that
+    does this renders as pure noise under `render_charset` at every base
+    and `--lines` you try, because the grid is slicing across glyph cells
+    instead of along them.
+
+    `gw` is bytes per scanline (glyph width; 1 byte = 4 pixels at 2bpp),
+    `lines` is scanlines actually drawn, and any remainder of `cell` is
+    per-glyph padding that is read but not shown -- a real layout: a font
+    of 4x5-pixel glyphs stored 6 bytes apart, the 6th byte unused.
+    """
+    rows = (count + cols - 1) // cols
+    img = Image.new("RGB", (cols * gw * 4, rows * lines), pal[0])
+    px = img.load()
+    for c in range(count):
+        cx, cy = (c % cols) * gw * 4, (c // cols) * lines
+        for l in range(lines):
+            for w in range(gw):
+                b = cart.byte(space, base + c * cell + l * gw + w)
+                for p in range(4):
+                    idx = (b >> (6 - 2 * p)) & 3
+                    px[cx + w * 4 + p, cy + l] = pal[idx]
+    return img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+
+
 def grid(img, cols, rows, cell_w, cell_h, colour=(70, 70, 90)):
     px = img.load()
     for i in range(1, cols):
@@ -152,6 +184,20 @@ def main():
                          "zone offset down, so descending is right for zones")
     ap.add_argument("--side", choices=["sally", "maria"], default="sally",
                     help="bankset cartridges: which parallel set to read")
+    ap.add_argument("--linear", type=int, metavar="CELL",
+                    help="render a LINEAR character set: each glyph is CELL "
+                         "consecutive bytes, rather than MARIA's line-planar "
+                         "layout. Use when a charset render is noise at every "
+                         "base -- some ROMs store the font linearly and "
+                         "convert it when copying to RAM. Pair with --lines "
+                         "(scanlines drawn) and --gw (bytes per scanline); "
+                         "any remainder of CELL is per-glyph padding.")
+    ap.add_argument("--gw", type=int, default=1, metavar="BYTES",
+                    help="--linear only: bytes per scanline (default 1 = 4 "
+                         "pixels wide at 2bpp)")
+    ap.add_argument("--count", type=int, default=256, metavar="N",
+                    help="--linear only: how many glyphs to render "
+                         "(default 256)")
     ap.add_argument("--grid", action="store_true")
     ap.add_argument("-o", "--out", default="gfx.png")
     args = ap.parse_args()
@@ -163,7 +209,14 @@ def main():
     else:
         pal = GREY
 
-    if args.direct:
+    if args.linear:
+        lines = args.lines if args.lines != 8 else args.linear
+        img = render_linear(cart, args.space, int(args.base, 0), args.linear,
+                            lines, args.gw, args.count, pal, args.scale)
+        if args.grid:
+            img = grid(img, 16, (args.count + 15) // 16,
+                       args.gw * 4 * args.scale, lines * args.scale)
+    elif args.direct:
         img = render_direct(cart, args.space, int(args.base, 0), args.direct,
                             args.lines, pal, args.scale,
                             descending=not args.ascending)

@@ -589,3 +589,85 @@ checked in minutes instead of adopted on the strength of a plausible
 label. Treat a match as corroboration worth keeping and a mismatch as
 data worth recording, in either direction, but never let the reference's
 own confidence substitute for this project's own verification step.
+
+## A scan for absolute operands cannot see an indirect load
+
+A 2,592-byte graphics block had no obvious consumer, so the ROM was scanned
+byte-by-byte for every `LDA`/`STA` absolute and absolute-indexed opcode whose
+operand landed inside it. The scan came back with exactly zero real hits (the
+one apparent hit was the scanner decoding a `JMP`'s operand bytes as though
+they were an opcode). That was written up as "no 6502 code ever touches this
+region, consistent with MARIA DMA-ing it directly."
+
+It was wrong, and the scan could never have found the answer. The block is read
+by `LDA (ptr),Y` -- an indirect load through a zero-page pointer, whose
+instruction bytes contain a *zero-page* address, not the ROM address being
+read. The actual ROM address only ever exists as two immediate bytes somewhere
+else entirely (`LDA #$C0` / `STA $B1`), possibly pages away from the load. A
+scan keyed on absolute operands is structurally blind to this, and returns a
+confident, clean zero.
+
+**A zero result from an absolute-operand scan means "not reached absolutely",
+never "not reached".** Before concluding a region is unreferenced, also search
+for its *page* as an immediate (`A9 <page>` followed by a zero-page store), and
+for its address as a little-endian word sitting in a pointer table. The
+give-away that an indirect path exists at all is a routine that reads through
+`(zp),Y` with the pointer set by a caller.
+
+## A read tap that reports zero needs a positive control
+
+Read taps were installed on three sub-ranges of a graphics block to answer "do
+the recordings actually read this?". All three reported zero reads after boot.
+The tempting conclusion -- that the region is dead weight -- was avoided only
+because one of the three ranges had already been *proved* to be live: its bytes
+had been decoded into a legible font, and strings built from it appear on
+screen. A definitely-used range reporting zero reads meant the measurement was
+wrong, not the data.
+
+Two things were happening. The graphics are copied ROM-to-RAM once during
+init, so all reads fall inside the boot window and none occur later; and the
+copy uses an indirect load, so a frame-window filter chosen to exclude the
+BIOS checksum sweep excluded the game's own copy along with it.
+
+**Put a known-live range in the same tap run as the range you are asking
+about.** If the control reports zero, the run proves nothing about either.
+This costs one extra tap and converts a confident false negative into an
+obvious instrument failure.
+
+## Patching a ROM desynchronises `.inp` playback from the first frame
+
+Fault injection is a good instinct: zero out a region, replay a recording, diff
+the screenshots, see what disappeared. Applied to a cartridge it silently
+invalidates itself. The patched ROM boots on a different timeline -- the same
+recording that produced one score at frame 2250 in the original produced a
+different score at frame 2250 in every patched build. From then on, a
+"screenshot at frame N" comparison is comparing two unrelated moments of play,
+and the changed-pixel percentages it yields are noise dressed as measurement.
+
+One result did survive: zeroing the maze-wall tiles removed every wall from the
+screen while dots, actors, score and text still rendered. That held because it
+is *structural* -- an entire class of element absent regardless of when the
+frame was taken -- not because the two frames lined up.
+
+**Compare patched and unpatched runs at a matched game state, never a matched
+frame number** -- detect the state from RAM and screenshot on that condition.
+Failing that, only trust findings of the form "this whole category of thing is
+gone", which no amount of timing drift can manufacture.
+
+## Text in a tile-based game is not ASCII, and greps for it come back empty
+
+A day-one check recorded a real anomaly: unlike its sibling cartridges, this
+ROM appeared to contain no `GCC(c)1984`-style developer signature. Both halves
+of that were wrong. The signature is present in plain ASCII -- the original
+check only scanned the *leading* bytes of the block it lives near, and the
+string sits close to that block's end. And the game's own visible credit,
+`COPYRIGHT ATARI 1984`, is genuinely not ASCII at all: it is stored as
+*character codes* for the game's tile set, where `A` is `$5E` and `0` is `$54`,
+so no text search of any kind will surface it.
+
+**Search a tile-based ROM for strings twice: once as ASCII, once re-encoded
+into its own character set.** The tile encoding is usually recoverable from a
+message table -- decode one known on-screen string (a menu item, a fruit name)
+and the whole alphabet's offset falls out. And when a signature search comes
+back empty, confirm the search actually covered the whole region before
+recording the absence as a finding.
