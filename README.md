@@ -58,7 +58,8 @@ emulator section is worth reading before you write any probe.
 | `init.py` | Starts a game: reads the header, takes the vectors as entry points, writes the annotations file and reports what the disassembler reached with it. Refuses to overwrite an existing one. |
 | `survey.py` | First look: layout, per-bank entropy, strings, where the vectors point. |
 | `disasm.py` | Bank-aware recursive-descent 6502 disassembler. `--cycles` annotates timings, `gfx` blocks draw their bits, `--low`/`--mapper` override a header that understates the mapping. Carries constants through so `LDA #n / STA $8000` resolves by itself; reports every switch it could not resolve. `--gaps` reports byte ranges that are neither code nor a declared data block -- the true unexplained set, not just "not code" (which includes every table and tile sheet you've already annotated) -- sorted largest-first so the next annotation to write is obvious. `--map` renders the same picture as a `coverage-<bank>.png` heatmap, one pixel per byte (green code, blue declared data, red gap) -- a glance instead of a read; needs Pillow, the one dependency this tool has and only if you ask for it. |
-| `asm.py` | The assembler that closes the loop. |
+| `newgame.py` | **Starts a game.** Writes a project that assembles, boots and puts a moving sprite on screen: the two-level display list, the vblank-synced main loop, and a sprite stored the way MARIA actually reads one -- bottom-up, a page per scanline. Every other tool here reads a cartridge somebody else wrote; this one writes the smallest cartridge that is still a real one. The register values come from shipping 1987 code, and the source is commented to be edited. |
+| `asm.py` | The assembler that closes the loop. `.res` fills, `#<label`/`#>label` and `label+n` make it usable for source written by hand, not just for round-tripping a listing. |
 | `verify.py` | Reassembles every listing and compares to the ROM, byte for byte. |
 | `build.py` | Rebuilds a complete image from listings. |
 | `dlwalk.py` | Decodes MARIA display lists — including the five-byte entries that put the palette in a different byte. `--selftest` demonstrates the failure mode. |
@@ -109,6 +110,7 @@ announce itself.
 | | |
 |---|---|
 | [`method.md`](docs/method.md) | The order of work, and why byte-identity is the discipline everything rests on. |
+| [`making-a-game.md`](docs/making-a-game.md) | The other direction: bringing a screen up from nothing, in the order MARIA needs it, and why a sprite is not a bitmap. |
 | [`pitfalls.md`](docs/pitfalls.md) | Traps that each produced a wrong answer in real work. |
 | [`hardware.md`](docs/hardware.md) | Memory map, MARIA, display lists, TIA, RIOT, PAL vs NTSC. |
 | [`cartridges.md`](docs/cartridges.md) | Header format, mapper flags with the evidence for each, mapper layouts. |

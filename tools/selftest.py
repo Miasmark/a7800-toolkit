@@ -135,6 +135,48 @@ def t_check_gaps():
     return "found code hidden behind an indirect jump; dismissed a decoy"
 
 
+def t_newgame():
+    """The scaffold must assemble to a real 16K cartridge, sprite included.
+
+    Checked here rather than by eye because the failure this guards against
+    is silent: store a direct-mode sprite as a flat bitmap and it still
+    assembles, still boots, and draws one row of your art repeated eight
+    times. So the test asserts the layout MARIA actually reads -- rows one
+    page apart, bottom row at the address the display list names, top row
+    at the highest page.
+    """
+    import newgame
+    tmpdir = tempfile.mkdtemp(prefix="selftest-newgame-")
+    out = run_tool("newgame.py", tmpdir, "--title", "Selftest", "--build",
+                   "--force")
+    a78 = os.path.join(tmpdir, "game.a78")
+    if not os.path.exists(a78):
+        raise AssertionError("no cartridge written:\n" + out)
+    blob = io.open(a78, "rb").read()
+    if len(blob) != 128 + 0x4000:
+        raise AssertionError("cartridge is %d bytes, not 128 + 16K" % len(blob))
+    rom = blob[128:]
+
+    rows = newgame.sprite_rows()
+    top, bottom = rows[0], rows[-1]
+    base = newgame.GFX_PAGE << 8
+    hi = base + (newgame.SPRITE_LINES - 1) * 0x100      # highest page
+    at = lambda addr, n: rom[addr - 0xC000:addr - 0xC000 + n]
+    if at(base, len(bottom)) != bottom:
+        raise AssertionError("bottom row is not at the DL's own address")
+    if at(hi, len(top)) != top:
+        raise AssertionError("top row is not at the highest page -- the "
+                             "sprite is stored the wrong way up")
+    if top == bottom:
+        raise AssertionError("test art is symmetric, so it cannot detect "
+                             "an inverted sprite")
+
+    reset = rom[0x3FFC - 0x0000] | (rom[0x3FFD] << 8)
+    if reset != 0xC000:
+        raise AssertionError("RESET vector is $%04X, not $C000" % reset)
+    return "assembles to 16K; sprite stored bottom-up, a page per scanline"
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -1070,6 +1112,7 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("game scaffold", t_newgame)
     r.check("gap checker", t_check_gaps)
     r.check("6502 cycle table", t_cycles)
     r.check("example songs", t_examples)
