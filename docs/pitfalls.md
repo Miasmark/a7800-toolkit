@@ -517,3 +517,38 @@ screenshot sequence, either view the sequence in full, or narrow
 mechanically first (binary-search the transition, diff the underlying
 state, grep for the on-screen text's tile pattern) so that "not found in
 what I checked" and "not found" are actually the same claim.
+
+## Two "different" bytes can be the same array slot, hit two ways
+
+Two zero-page-adjacent addresses looked like independent scratch bytes:
+one project's own code read and wrote them directly by name throughout a
+whole animation routine, with no `,X`/`,Y` in sight. A live write-tap on
+those two exact addresses, though, kept catching hits from a completely
+unrelated-looking instruction -- `STA some_other_base,Y` -- which made no
+sense until the tap's own frame log was checked against what `Y` actually
+held at that moment: it was a fixed, special-cased index used elsewhere
+in the same project for one specific entity. `some_other_base + Y`
+landed exactly on the two "independent" addresses. They weren't
+independent at all -- they were `some_array[that one entity's index]`,
+and the animation routine was just hitting that one array slot through a
+hardcoded absolute address instead of going through `,Y` like everything
+else touching the same array does.
+
+Once seen, the rest followed fast: a second flat-looking byte the same
+routine gated on turned out to be `a_third_array[that same index]`, and
+an earlier conclusion -- "these bytes are shared scratch, reused by an
+unrelated enemy's animation, so any observation about them can't be
+trusted" -- had to be retracted. The "unrelated" routine wasn't
+unrelated; it was the *same* entity, in a different phase of its own
+state machine, and the two addresses were never shared with anything
+else at all.
+
+The lesson: when a live write-tap on a fixed address keeps getting hit
+by indexed instructions whose base doesn't match, don't write off the
+coincidence -- solve for the index (`target = base + index`) and check
+what that index means elsewhere in the project. A hardcoded address
+inside dedicated, single-entity code is frequently just an indexed array
+access with the index already known and inlined, not a genuinely
+separate variable -- and mistaking it for one can produce a confident,
+plausible-sounding "these are unrelated, shared scratch bytes" reading
+that sends the next several hours in the wrong direction.
