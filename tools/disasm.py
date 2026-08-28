@@ -713,6 +713,11 @@ def main():
                     help="override the mapper the header declares")
     ap.add_argument("--cycles", action="store_true",
                     help="note each instruction's cycle count")
+    ap.add_argument("--check-gaps", action="store_true",
+                    help="for every apparent JSR/JMP into a gap, say whether "
+                         "it is a real instruction the tracer reached (so the "
+                         "gap holds missed code) or just the opcode byte "
+                         "occurring inside data. Implies --gaps.")
     ap.add_argument("--gaps", action="store_true",
                     help="report byte ranges reached as neither code nor a "
                          "declared data block -- the true unexplained set, "
@@ -838,6 +843,9 @@ def main():
         nm = cfg.ram.get(a_) or a7800.HW.get(a_) or ""
         print("  $%04X  %3d refs  %s" % (a_, len(refs), nm))
 
+    if args.check_gaps:
+        args.gaps = True
+
     if args.gaps or args.map:
         status = coverage_status(an, cart, spaces)
 
@@ -865,6 +873,9 @@ def main():
                 print("    $%04X-$%04X  (%d bytes)" % (lo, hi, hi - lo + 1))
         if total_gap == 0:
             print("  none -- every byte is either code or a declared block")
+
+    if args.check_gaps:
+        check_gaps(an, cart, spaces, status)
 
     if args.map:
         try:
@@ -895,6 +906,103 @@ def main():
             path = os.path.join(args.outdir, "coverage-%s.png" % space)
             img.save(path)
             print("  %s -> %s" % (space, path))
+
+
+def check_gaps(an, cart, spaces, status):
+    """Are the gaps really free of missed code?
+
+    A gap is a byte range reached as neither code nor a declared block, so
+    the worry is that it holds a routine the trace never entered. The
+    obvious check -- scan the ROM for a JSR/JMP whose operand lands in a gap
+    -- is misleading on its own, and reliably so: the $20/$4C/$6C byte
+    values occur constantly inside data and in the middle of longer
+    instructions, and in practice those coincidences are ALL you find. In
+    two 16K titles checked with this, every apparent direct branch into a
+    gap was a coincidence.
+
+    Two things make the raw scan trustworthy:
+
+    1. The tracer already knows every address that is the first byte of an
+       instruction. A candidate whose opcode byte is not one of those is not
+       an instruction at all, and can be dismissed.
+
+    2. A direct JSR/JMP that the tracer DID reach was also followed, so its
+       target is code by construction and cannot still be a gap. A real hit
+       there means the annotations changed under the trace -- worth saying
+       out loud, not worth expecting.
+
+    The case that genuinely escapes the tracer is `JMP ($xxxx)`, which it
+    cannot follow. For those the operand is the POINTER, not the target, so
+    the pointer is dereferenced here; when it lives in RAM the target is not
+    knowable statically at all, and those sites are listed separately
+    because they are exactly what an annotations `ram_vectors` entry exists
+    to resolve.
+    """
+    real, bogus, ramind = [], [], []
+    for space in spaces:
+        base, size = cart.base_of(space), cart.size_of(space)
+        st = status[space]
+        in_rom = lambda x: base <= x < base + size
+        for a in range(base, base + size - 2):
+            op = cart.byte(space, a)
+            if op not in (0x20, 0x4C, 0x6C):
+                continue
+            operand = cart.byte(space, a + 1) | (cart.byte(space, a + 2) << 8)
+            traced = (space, a) in an.code
+            if op == 0x6C:
+                if not in_rom(operand):
+                    if traced:
+                        ramind.append((space, a, operand))
+                    continue
+                if not in_rom(operand + 1):
+                    continue
+                target = (cart.byte(space, operand)
+                          | (cart.byte(space, operand + 1) << 8))
+                name = "JMP ($%04X) ->" % operand
+            else:
+                target = operand
+                name = "JSR" if op == 0x20 else "JMP"
+            if not in_rom(target) or st.get(target) != 0:
+                continue
+            (real if traced else bogus).append((space, a, target, name))
+
+    print("\ngap entry points (apparent JSR/JMP into a gap):")
+    if not (real or bogus or ramind):
+        print("  none -- no byte pattern anywhere in the ROM even looks like "
+              "a call into a gap")
+        return 0
+    if bogus:
+        print("  %d coincidence%s -- the $20/$4C/$6C byte is not an instruction "
+              "start, so it is data or a mid-instruction byte, not a call:"
+              % (len(bogus), "" if len(bogus) == 1 else "s"))
+        for space, a, t, nm in bogus[:12]:
+            print("    %s:%04X  %-16s $%04X   (not traced as code)"
+                  % (space, a, nm, t))
+        if len(bogus) > 12:
+            print("    ... and %d more" % (len(bogus) - 12))
+    if real:
+        print("  %d REAL call site%s -- a traced instruction branching into a "
+              "gap. The gap holds code, or the annotations changed under the "
+              "trace; either way investigate:"
+              % (len(real), "" if len(real) == 1 else "s"))
+        for space, a, t, nm in real:
+            print("    %s:%04X  %-16s $%04X   <-- MISSED CODE" % (space, a, nm, t))
+    elif bogus:
+        print("  no real call site among them: every apparent branch into a "
+              "gap is a byte coincidence, so no traced code enters any gap.")
+    if ramind:
+        print("  %d traced JMP ($xxxx) through a RAM pointer -- the target is "
+              "not knowable statically, so no gap claim covers these. If a "
+              "gap is suspected to be a handler, this is how it gets reached; "
+              "resolve with a 'ram_vectors' entry or a live probe:"
+              % len(ramind))
+        for space, a, ptr in ramind[:8]:
+            nm = an.ram.get(ptr) if hasattr(an, "ram") else None
+            print("    %s:%04X  JMP ($%04X)%s" % (space, a, ptr,
+                                                 "  " + nm if nm else ""))
+        if len(ramind) > 8:
+            print("    ... and %d more" % (len(ramind) - 8))
+    return len(real)
 
 
 def coverage_status(an, cart, spaces):

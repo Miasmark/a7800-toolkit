@@ -93,6 +93,48 @@ def t_dlwalk():
     return "5-byte display-list entry decoded correctly"
 
 
+def t_check_gaps():
+    """--check-gaps must find real missed code, not just say "all clear".
+
+    A checker that can only ever report "nothing found" is worthless, which
+    is the toolkit's own read-tap pitfall in a different costume. So this
+    builds a 16K image with exactly one hidden routine, reachable only
+    through `JMP ($C900)` -- an indirect the tracer cannot follow -- and
+    requires that the tool both flags it AND resolves the pointer to the
+    real target. It also plants a $20 byte inside data, which must be
+    dismissed as a coincidence rather than reported.
+    """
+    rom = bytearray([0xFF] * 16384)
+
+    def put(addr, bs):
+        rom[addr - 0xC000:addr - 0xC000 + len(bs)] = bytes(bs)
+
+    put(0xC000, [0x6C, 0x00, 0xC9])                    # traced: JMP ($C900)
+    put(0xC900, [0x00, 0xCF])                          # the pointer -> $CF00
+    put(0xCF00, [0xA9, 0x01, 0x8D, 0x00, 0x20, 0x60])  # the hidden routine
+    put(0xFFFA, [0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0])
+
+    tmpdir = tempfile.mkdtemp(prefix="selftest-gaps-")
+    rom_path = os.path.join(tmpdir, "synthetic.a78")
+    cfg_path = os.path.join(tmpdir, "annotations.json")
+    io.open(rom_path, "wb").write(bytes(rom))
+    json.dump({"entries": ["rom:C000"], "labels": {}, "ram": {},
+               "comments": {}, "blocks": []},
+              io.open(cfg_path, "w", encoding="utf-8"))
+
+    out = run_tool("disasm.py", rom_path, "-c", cfg_path,
+                   "-o", os.path.join(tmpdir, "src"), "--check-gaps")
+    if "MISSED CODE" not in out:
+        raise AssertionError("did not flag the hidden routine:\n" + out)
+    if "$CF00" not in out:
+        raise AssertionError("did not dereference the pointer to $CF00:\n" + out)
+    if "1 REAL call site" not in out:
+        raise AssertionError("expected exactly one real call site:\n" + out)
+    if "coincidence" not in out:
+        raise AssertionError("did not dismiss the planted $20 byte:\n" + out)
+    return "found code hidden behind an indirect jump; dismissed a decoy"
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -1028,6 +1070,7 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("gap checker", t_check_gaps)
     r.check("6502 cycle table", t_cycles)
     r.check("example songs", t_examples)
     r.check("note tables", t_notes)

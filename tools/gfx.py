@@ -96,6 +96,31 @@ def render_direct(cart, space, base, width, lines, pal, scale=4,
     return img.resize((img.width * scale, img.height * scale), Image.NEAREST)
 
 
+def render_sheet(cart, space, base, width, lines, count, pal, scale=4,
+                 descending=True, cols=8, gap=1):
+    """`count` direct-mode objects packed end to end, laid out as a contact sheet.
+
+    Sprite sheets in the page-strided layout pack consecutive frames at a
+    stride equal to the object's own width, so frame i starts `i * width`
+    bytes along -- the same `base + line * 256 + col` addressing as one
+    object, just walked. Rendering them one at a time works and is how this
+    was first done by hand, but a rotation set is 30-odd frames and the
+    thing you actually need to see is all of them together: the frame count,
+    where one bank ends and the next begins, and whether the width guess
+    from the display list is right (a wrong width shears the sheet
+    diagonally, which is obvious across 30 frames and invisible in one).
+    """
+    rows = (count + cols - 1) // cols
+    cw, ch = width * 4, lines
+    img = Image.new("RGB", (cols * (cw + gap) - gap, rows * (ch + gap) - gap),
+                    (40, 40, 48))
+    for i in range(count):
+        one = render_direct(cart, space, base + i * width, width, lines, pal,
+                            scale=1, descending=descending)
+        img.paste(one, ((i % cols) * (cw + gap), (i // cols) * (ch + gap)))
+    return img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+
+
 def render_charset(cart, space, base, lines, pal, scale=4, cols=16,
                    descending=True):
     """256 characters, each 4px wide by `lines` tall, laid out in a grid.
@@ -177,6 +202,13 @@ def main():
                          "use for a single display-list sprite, not a "
                          "character set. Get WIDTH and --lines from the "
                          "live display list (dlwalk.py), not a guess.")
+    ap.add_argument("--sheet", type=int, metavar="N",
+                    help="with --direct, render N consecutive objects packed "
+                         "at a stride equal to their width, as a contact "
+                         "sheet. What a sprite sheet in the page-strided "
+                         "layout actually looks like.")
+    ap.add_argument("--sheet-cols", type=int, default=8, metavar="N",
+                    help="objects per row in a --sheet (default 8)")
     ap.add_argument("--scale", type=int, default=4)
     ap.add_argument("--palette", help="three hex colour bytes, e.g. 36,13,0D")
     ap.add_argument("--ascending", action="store_true",
@@ -216,6 +248,11 @@ def main():
         if args.grid:
             img = grid(img, 16, (args.count + 15) // 16,
                        args.gw * 4 * args.scale, lines * args.scale)
+    elif args.direct and args.sheet:
+        img = render_sheet(cart, args.space, int(args.base, 0), args.direct,
+                           args.lines, args.sheet, pal, args.scale,
+                           descending=not args.ascending,
+                           cols=args.sheet_cols)
     elif args.direct:
         img = render_direct(cart, args.space, int(args.base, 0), args.direct,
                             args.lines, pal, args.scale,

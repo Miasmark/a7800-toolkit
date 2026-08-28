@@ -671,3 +671,73 @@ message table -- decode one known on-screen string (a menu item, a fruit name)
 and the whole alphabet's offset falls out. And when a signature search comes
 back empty, confirm the search actually covered the whole region before
 recording the absence as a finding.
+
+## Scanning for a JSR into a gap finds coincidences, not code
+
+Every gap in a disassembly raises the same question -- is there a routine in
+there the trace never entered? -- and the same answer suggests itself: scan the
+ROM for a `JSR`/`JMP` whose operand lands inside the gap. That scan is close to
+pure noise. `$20`, `$4C` and `$6C` are ordinary byte values that occur
+constantly inside graphics and tables and as the second or third byte of longer
+instructions, and each one is followed by two more bytes that form some address.
+Across two 16K titles checked this way, **every single apparent direct branch
+into a gap was a coincidence** -- 16 in one, 19 in the other, zero real. Being
+taken in by that hit list three times in one project is what produced this
+entry.
+
+Two structural facts make the raw scan almost meaningless, and both are easy to
+miss because they argue in opposite directions:
+
+* **A direct `JSR`/`JMP` the tracer reached, it also followed.** Its target is
+  therefore already code, and cannot still be a gap. So for direct calls the
+  scan is looking for something that by construction should not exist -- a real
+  hit means the annotations changed under the trace, not that a routine is
+  hiding.
+* **For `JMP ($xxxx)` the operand is the pointer, not the target.** This is the
+  one form the tracer genuinely cannot follow, so it is the one worth scanning
+  for -- and comparing its operand against the gap list, as the obvious scan
+  does, checks the wrong address entirely. Dereference the pointer first. If the
+  pointer is in RAM the target is not knowable statically at all, which is what
+  an annotations `ram_vectors` entry is for.
+
+`disasm.py --check-gaps` does all of this: it classifies each candidate as a
+real call site or a coincidence by asking whether the opcode byte is an address
+the tracer reached as an instruction start, dereferences indirect jumps, and
+lists RAM-pointer indirects separately. The point is to make "no missed code" a
+checked claim rather than an asserted one.
+
+## Before blaming the random generator, measure it
+
+A run of six consecutive "rare" outcomes looked impossible, so the generator
+became the suspect: a short period, a bad seed, a correlation between draws.
+Measuring it took one probe and 4,027 samples, and the distribution was uniform
+to within a point. The generator was fine.
+
+The real cause was upstream and much duller: a `BMI` early-out taken before the
+random draw ever happened, making the outcome unconditional while a bias byte
+stayed negative. The sequence was not improbable, because it was not random.
+
+The lesson is about order of operations. A biased-looking result implicates the
+whole path from decision to output, and the generator is the most interesting
+suspect but almost never the guilty one -- it is also the cheapest thing on that
+path to test. **Measure the generator first precisely because it is cheap and
+boring**, then spend the saved effort re-reading the branch structure above the
+draw. An unconditional early-out and a broken PRNG produce identical-looking
+output, and only one of them is likely.
+
+## An array ends where the code stops indexing, not where the data looks like it stops
+
+An object table was read as running past its real end, and the slots "beyond"
+it held plausible-looking values that supported a wrong theory about spare
+object types. The correction was wrong too, in the same way: it was also about
+bytes outside the array. Two rounds of reasoning, both about data that was
+never part of the structure.
+
+Nothing in the bytes marks the boundary. What marks it is the code: the
+comparison that bounds the index (`CPX #n / BCS done`), the loop's own start
+value, the width of the stride when several parallel tables share an index.
+**Get the bound from the indexing code before interpreting any entry**, and be
+most careful when the first byte past the end looks meaningful -- adjacent
+variables are as likely to hold plausible values as the array is, and a theory
+built on them will fit the data comfortably while being about the wrong bytes
+entirely.

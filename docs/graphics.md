@@ -96,13 +96,30 @@ beats any amount of frequency analysis on the text bytes.
 
 ## Finding graphics in an unknown ROM
 
-1. `survey.py` flags banks whose entropy runs above about 7 bits/byte. Bitmap
+1. **If the game runs, walk the live display list first.** `dlwalk.py` reports
+   what MARIA is actually being pointed at, with the width and line count
+   already decoded -- which beats inferring them, and is sometimes the only
+   thing that works at all. In one 16K title the 4K sprite block had **zero**
+   absolute references anywhere in the ROM: no `LDA #$Cx / STA ptr` pointer
+   setup, no pointer table, nothing a static search could find, because the
+   display list is built in RAM and the addresses only ever exist there. Every
+   static search for it was guaranteed to fail before it was run.
+2. `survey.py` flags banks whose entropy runs above about 7 bits/byte. Bitmap
    graphics use the full byte range fairly evenly; code does not.
-2. Render candidate pages with `gfx.py` and look. Human pattern recognition is
+3. Render candidate pages with `gfx.py` and look. Human pattern recognition is
    the best tool available here and it is not close.
-3. Once you find one object, its neighbours are usually adjacent -- artwork is
+4. Once you find one object, its neighbours are usually adjacent -- artwork is
    laid out in blocks, and finding the block boundaries tells you the frame
-   count of an animation.
+   count of an animation. For a direct-mode sheet the frames are usually packed
+   at a stride equal to the object's own width, so `gfx.py --direct W --sheet N`
+   lays the whole set out at once. Do that before trying to read any single
+   frame: a wrong `W` shears the sheet diagonally, which is unmistakable across
+   thirty frames and invisible in one, and the bank boundaries and the frame
+   count both fall out of the same picture.
+
+The ordering matters. Steps 2 and 3 are a search of the cartridge; step 1 is a
+question put to the running machine, and it answers directly what the others
+only narrow down.
 
 ## Palettes
 
