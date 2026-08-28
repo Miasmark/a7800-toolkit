@@ -552,3 +552,40 @@ access with the index already known and inlined, not a genuinely
 separate variable -- and mistaking it for one can produce a confident,
 plausible-sounding "these are unrelated, shared scratch bytes" reading
 that sends the next several hours in the wrong direction.
+
+## A reference-suggested identity is a hypothesis to test, not an answer to adopt
+
+A project held off consulting its private historical reference until its
+independent work was substantially done, precisely so a later comparison
+would mean something. When the comparison came, the reference offered a
+specific, plausible-sounding identity for a byte this project had been
+carrying as an open mystery for a while: a named accumulator, described
+as tracking progress toward a bonus unrelated to the thing this project
+had already ruled the byte out as being. It fit everything already known
+about the byte's behavior -- live every frame, BCD, the right general
+shape.
+
+It was still wrong. A direct check -- a live write-tap on the byte's
+own high-order digits, fired only at its rare boundary-crossings, each
+one matched frame-for-frame against a screenshot of the real on-screen
+value -- showed the byte tracking something else entirely, at a fixed
+numeric scale, matching exactly at both crossings checked. The
+reference's own suggested label never made it into any file; the
+byte's real identity did, and it happened to be the very thing an
+*earlier* pass of this same project had already ruled it out as being --
+a conclusion that turned out to be a casualty of an unrelated bug
+(a probe silently reading only a fraction of a long recording, see the
+`.inp` playback-length pitfall above) rather than anything to do with
+the reference at all.
+
+The lesson: a private reference earns exactly the same treatment as any
+other unverified source in this methodology -- a source of testable
+guesses, not settled facts, however specific or confident-sounding its
+naming is. The value of holding off on consulting one until independent
+work is done isn't just avoiding bias in the *findings* -- it's having
+strong-enough independent tooling already built (write-taps,
+frame-exact screenshot correlation) that a reference's suggestion can be
+checked in minutes instead of adopted on the strength of a plausible
+label. Treat a match as corroboration worth keeping and a mismatch as
+data worth recording, in either direction, but never let the reference's
+own confidence substitute for this project's own verification step.
