@@ -1,3 +1,41 @@
+### Where the fault actually is
+
+Diffed instruction by instruction against MAME's debugger trace (with
+`noloop` -- see pitfalls.md), from the moment the BIOS hands the cartridge
+control. **The first 427,399 instructions are identical**, about 124 frames.
+The 6502 core, the mapper, the memory map and the RAM model are all correct
+over that span.
+
+The first divergence is a vertical-blank wait, and it is **not** the fault:
+it re-synchronises 1,160 instructions later when MAME finishes the same
+spin, and sweeping this simulator's VBLANK phase across a whole frame
+changes the score by nothing at all (98 matched rows at every offset tried).
+Phase is not it.
+
+What follows is 1,086 further re-synchronisations, almost all of the same
+shape: MAME executes about 36 instructions that this does not, over and
+over. That is an interrupt handler running on hardware and not here.
+
+The chain, as far as it is now understood:
+
+1. Ballblazer spends 94% of its time in a wait at `$FCBC` -- `STA $66 /
+   LDA $66 / BNE` -- for a counter its interrupt handler clears.
+2. Interrupts do work. Early on the simulation raises 16 a frame and the
+   game's other counter, at `$40`, counts down exactly once per frame as
+   designed. An earlier reading of this as "the handler never runs" was
+   simply wrong.
+3. But by frame 400 the display list this simulator is walking contains
+   **no zones with the interrupt bit set at all**, where MAME's has 19. No
+   interrupts can then be raised, and every wait becomes permanent.
+
+So the question is why the DLL goes flat here and not on hardware. The
+untested hypothesis is double buffering: if the game keeps two display
+lists and points MARIA at the next one part-way through a frame, then
+reading `DPPH`/`DPPL` once at frame start -- which is what `run()` does --
+can consistently read the buffer being written rather than the one being
+shown. MARIA latches that pointer at a particular point in the frame, and
+this does not model when.
+
 #!/usr/bin/env python3
 """
 Run a cartridge's own code, and listen to what it writes to the sound chip.
@@ -103,6 +141,8 @@ it.
   state it never initialised. Disproven: execution matches MAME exactly for
   427,399 instructions after handover. Had inherited state mattered, they
   would have parted company immediately.
+* **VBLANK phase.** Sweeping the flag's position across a whole frame moves
+  the score by nothing, and the one divergence it causes re-synchronises.
 * **The mapper and the memory map.** The two agree byte for byte on the
   vectors and on the code at the reset address, and now for most of half a
   million instructions of execution.
