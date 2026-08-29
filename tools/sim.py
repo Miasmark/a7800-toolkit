@@ -43,51 +43,37 @@ bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
 fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 `$40` counts down exactly once per frame, as its author intended.
 
-## Where the fault is: MARIA's DMA is not charged for
+## MARIA's DMA, and what the score is worth
 
-The simulation gives the game far more CPU than hardware does, because it
-never pays for MARIA's cycle stealing. Measured against MAME's instruction
-trace, interrupts arrive every **65 instructions** on hardware and every
-**151** here -- the interrupts are at the same points on the screen, and this
-simply executes 2.3x more code between them. Everything then runs with the
-balance between the main loop and the interrupt handlers badly wrong, which
-is not a crash and not obviously a timing bug: it just quietly stops sounding
-like the game.
+The simulation gave the game more CPU than hardware does, because it never
+paid for MARIA's cycle stealing. `--dma-steal` charges it, using the cost
+model in `dmabudget.py` -- including holey DMA, which matters enormously
+here: Ballblazer's interrupt-bearing zones set the holey bit and keep their
+graphics at `$1C00`, which bit 12 suppresses, so almost all of their apparent
+cost is not paid at all. Modelling that took the charge from 12% of a frame
+to 8%, and took `--dma-steal` from scoring 0.1% to scoring the same 6.3% as
+without it.
 
-`--dma-steal` charges each zone using the measured cost model (the same
-numbers as `dmabudget.py`). It moves the metric the right way, 151 down to
-97 instructions, and it is off by default because **it still under-charges
-and it currently scores worse** -- 0.1% against 6.3%.
+**And then a more faithful version scored 0.1% again.** MARIA steals a
+scanline at a time, not a zone at a time; spreading the identical total across
+each zone's scanlines instead of charging it in one lump at the zone boundary
+is unambiguously closer to the hardware, and it moves the score by a factor of
+sixty. The two distributions differ by 17 cycles a frame out of 2,350.
 
-The arithmetic of what is missing, for whoever picks this up. Ballblazer's
-interrupt-bearing zones are four scanlines apart, so 456 CPU cycles:
+That is the useful finding, and it is about the instrument rather than the
+simulator: **the score is chaotic with respect to timing.** 6.3% does not mean
+six per cent of the way there. It means a particular arrangement of a broken
+simulation happens to keep 98 rows in step before drifting, and a small timing
+change moves which rows those are. `--compare` can be trusted to say "not
+trustworthy". It cannot be trusted to rank two near-misses, and it must not be
+used to tune.
 
-    hardware leaves ~195 of those 456 for the CPU   (65 instructions)
-    this model leaves  296                          (97 instructions)
-    -> hardware is losing about 65 cycles per scanline, the model charges 40
-
-So the shape is right and the magnitude is not, and one of the two candidates
-for that is now settled. **The display lists are identical.** Read straight
-out of MAME's memory at a matched frame -- a read, not a tap -- the game's
-list at `$26EE` matches this simulator's byte for byte, all 45 bytes of it.
-The two are drawing the same screen.
-
-Which leaves the cost model, and its error is now measured rather than
-guessed. The zones in question hold two 20-byte objects; MARIA takes 70.3
-cycles a scanline on them, where the model predicts 39.6. The same two
-20-byte objects in a purpose-built test cartridge measure 39.9 -- so the
-model is right about the screen it was calibrated on and wrong about the
-game's. Untested suspects, in order: zone height (four scanlines here
-against the sixteen used for calibration) and graphics fetched from RAM
-rather than ROM.
-
-Holey DMA was the obvious suspect and is not the answer. These zones do set
-it, and measuring it directly shows it makes drawing **cheaper** -- 1,414
-iterations a frame to 1,827 on a counting cartridge -- so it pushes the wrong
-way, and the model, which ignores it, should if anything over-charge here.
-
-A change that makes the score worse does not go on by default, however
-correct it looks. That is what the gate is for.
+So `--dma-steal` stays off by default -- not because the default is more
+correct, it is less, but because turning it on would trade a published number
+for a worse one on the strength of a measure that cannot support the
+comparison. The flag is there, it is the better physics, and the honest
+position is that neither setting is close enough for the difference to mean
+anything yet.
 
 ## What has been ruled out
 
@@ -283,8 +269,9 @@ class Bus(object):
     # and docs/hardware.md; see probes/dma-costcart.py for how they were got.
     DMA_LINE, DMA_ZONE = 5.633, 1.678
     DMA_OBJ, DMA_BYTE, DMA_FIVE = 2.081, 0.744, 0.483
+    DMA_DLI = 16.6
 
-    def zone_cost(self, dl, lines):
+    def zone_cost(self, dl, lines, flags=0):
         """CPU cycles MARIA steals drawing one zone.
 
         MARIA draws by DMA and halts the 6502 while it does. A simulator that
@@ -293,26 +280,38 @@ class Bus(object):
         runs, just with the balance between the main loop and the interrupt
         handlers completely wrong.
         """
+        holey16 = bool(flags & 0x40)
         per_line = self.DMA_LINE
         i = 0
         for _ in range(32):
             b1 = self.ram[fold((dl + i + 1) & 0xFFFF)]
             if b1 == 0:
                 break
+            lo = self.ram[fold((dl + i) & 0xFFFF)]
             if (b1 & 0x1F) == 0:                      # five-byte entry
+                hi = self.ram[fold((dl + i + 2) & 0xFFFF)]
                 w = 32 - (self.ram[fold((dl + i + 3) & 0xFFFF)] & 0x1F)
-                if b1 & 0x20:                         # character mode
-                    bpc = 2 if (self.ctrl & 0x10) else 1
-                    per_line += (self.DMA_OBJ + self.DMA_FIVE
-                                 + w * (1 + bpc) * self.DMA_BYTE)
-                else:
-                    per_line += self.DMA_OBJ + self.DMA_FIVE + w * self.DMA_BYTE
+                five, chars = True, bool(b1 & 0x20)
                 i += 5
             else:
+                hi = self.ram[fold((dl + i + 2) & 0xFFFF)]
                 w = 32 - (b1 & 0x1F)
-                per_line += self.DMA_OBJ + w * self.DMA_BYTE
+                five, chars = False, False
                 i += 4
-        return lines * per_line + self.DMA_ZONE
+            # Holey DMA drops the graphics fetch when address bit 12 is set,
+            # measured; the entry is still read, so the object costs its
+            # header and no pixels. See docs/hardware.md.
+            if holey16 and (((hi << 8) | lo) & 0x1000):
+                w = 0
+            if chars:
+                bpc = 2 if (self.ctrl & 0x10) else 1
+                per_line += (self.DMA_OBJ + self.DMA_FIVE
+                             + w * (1 + bpc) * self.DMA_BYTE)
+            else:
+                per_line += (self.DMA_OBJ + w * self.DMA_BYTE
+                             + (self.DMA_FIVE if five else 0))
+        return (lines * per_line + self.DMA_ZONE
+                + (self.DMA_DLI if (flags & 0x80) else 0))
 
     def zones(self):
         """Walk the DLL the game built in RAM -> [(line_after_zone, dli), ...].
@@ -347,7 +346,7 @@ class Bus(object):
             n = (b0 & 0x0F) + 1
             line += n
             out.append((line, bool(b0 & 0x80),
-                        self.zone_cost((hi << 8) | lo, n)))
+                        self.zone_cost((hi << 8) | lo, n, b0)))
             if line >= self.MAX_LINES:
                 break
         return out
@@ -675,13 +674,22 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
             for line_end, dli, _cost in zones:
                 if dli and line_end <= vb_line:
                     events.append((base + int(line_end * CYCLES_PER_LINE), "dli"))
-        # MARIA halts the 6502 while it draws. Charge each zone's DMA at its
-        # end, so the cycles are gone before the code that runs after it.
+        # MARIA halts the 6502 while it draws, and it does so a scanline at a
+        # time. Charging a whole zone's worth in one lump at the zone boundary
+        # is not the same thing: it hands the CPU a burst of uninterrupted time
+        # and then takes a large block away, which is enough to make a game
+        # miss its own deadlines and write a garbage display-list pointer. So
+        # the cost is spread across the zone's scanlines, where it belongs.
         if steal:
+            start = 0
             for line_end, _dli, cost in zones:
-                if line_end <= vb_line:
-                    events.append((base + int(line_end * CYCLES_PER_LINE),
-                                   ("steal", cost)))
+                n = max(1, line_end - start)
+                per = cost / float(n)
+                for ln in range(start + 1, line_end + 1):
+                    if ln <= vb_line:
+                        events.append((base + int(ln * CYCLES_PER_LINE),
+                                       ("steal", per)))
+                start = line_end
         events.append((base + int(vb_line * CYCLES_PER_LINE), "vblank"))
         if frame_nmi and nmi:
             events.append((base + int(vb_line * CYCLES_PER_LINE), "dli"))
@@ -809,11 +817,11 @@ def main():
                          "much of it is reproduced. This is the only thing "
                          "that makes the simulation trustworthy.")
     ap.add_argument("--dma-steal", action="store_true",
-                    help="charge the CPU for MARIA's DMA using the measured "
-                         "cost model. More correct in principle and it moves "
-                         "the timing the right way, but it still under-charges "
-                         "and currently scores WORSE. Off by default; see the "
-                         "module docstring.")
+                    help="charge the CPU for MARIA's DMA, per scanline, using "
+                         "the measured cost model including holey DMA. Better "
+                         "physics than the default; scores differently rather "
+                         "than better, because the score cannot discriminate "
+                         "at this distance. See the module docstring.")
     ap.add_argument("--frame-nmi", action="store_true",
                     help="raise one NMI a frame at end of visible instead of "
                          "following the display list. The old behaviour, kept "
