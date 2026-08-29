@@ -819,3 +819,30 @@ display list and toggling MARIA's registers every frame. Anything sampled by
 frame number in the first two seconds is measuring the logo screen. A display
 list read at frame 16 and attributed to the game was, in this project, the
 central evidence for a wrong conclusion.
+
+## A negative result is only as good as the window you measured it over
+
+Twice in one investigation, and expensively both times.
+
+A simulator was returning a constant zero for POKEY's `RANDOM` register. The
+discrepancy was noticed early -- the emulator read `$4000` as `E4 E4 E4` where
+the simulator read `00 00 00` -- and dismissed after checking whether the game
+ever read POKEY. It did not, in the 300 frames that were checked. The music
+engine that reads `$400A` does not start until frame 400. That register was
+the entire bug, and it cost a day.
+
+Then the same game's sibling looked broken because its simulation scored 7.7%
+against a captured log. Every run of it was 14 seconds. The game leaves its
+attract loop at frame 1170 -- about 19.5 seconds -- so no run had ever reached
+the music being compared against.
+
+The shape is always the same: a measurement returns "this never happens", the
+window was too short for it to have happened yet, and the negative is filed as
+a fact. It then does its damage silently, because a ruled-out cause is not
+revisited.
+
+**Record the window with the result.** "Never reads POKEY" is not a finding;
+"never reads POKEY in the first 300 frames" is, and it visibly invites the
+question of what happens in frame 301. When a negative rules out a whole line
+of inquiry, deliberately re-measure it over a window several times longer
+before believing it.

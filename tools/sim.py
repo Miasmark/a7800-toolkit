@@ -15,40 +15,37 @@ still the authority on that format.** Reimplementing RMT's replayer means
 reading 803 instructions and hoping; running it means the answer is correct by
 construction. The same goes for every other player in the library.
 
-## State: unfinished, and measurably so
+## State: it works on a fixed score, and cannot be scored on a generated one
 
-`--compare` scores the simulation against a capture from `capture.py`, whose
-formats are verified at 100% against hardware. A simulator that is subtly
-wrong produces confident output nobody can distinguish from correct, so it
-should not be possible to believe this one without a number.
+`--compare` scores the simulation against a capture from `capture.py`. Run
+like for like -- same emulator, no input, long enough -- Midnight Mutants
+reads:
 
-It reports two, because they are independent questions and one number hid
-that:
+    agreement  94.8%   of what it played is the capture's, in order
+    progress  100.0%   it reached the end of the capture
+    timing     1.00x   gaps between matched events
 
-                        agreement   progress   timing
-    Ballblazer             60.4%       6.4%     1.00x
-    Midnight Mutants        7.7%       1.0%     1.00x
+That is a 6502, a mapper, MARIA's display interrupts and a TIA player
+reproducing forty seconds of a commercial game's music. For a cartridge that
+plays a fixed score, this tool now does what it was built to do.
 
-**agreement** is how much of what the simulation played is the reference's,
-in the reference's order -- does it play the right notes. **progress** is how
-far into the reference it got before stopping or wandering off -- does it keep
-playing. Ballblazer is the encouraging case and the single number used to
-hide why: it plays a fair amount of the right music and then stops after six
-per cent of it. Midnight Mutants does not play the right music at all.
+**It got there by fixing the measurement, not the simulator.** The same game
+read 7.7% for a long time, on two mistakes that were mine rather than the
+code's:
 
-**timing** is the ratio of the gaps between matched events. Both read 1.00,
-which is worth knowing: whatever is wrong, the frame clock is not.
+  * It was compared against a committed log that is not reproducible. A fresh
+    no-input capture gives 456 states where that log has 818, and the two
+    part company by frame 162 -- it was recorded with someone playing.
+  * Every run was 14 seconds. The game leaves its attract loop at frame 1170,
+    about 19.5 seconds, so no run had ever reached the music it was being
+    marked against.
 
-Matching is a longest common subsequence over register states, so frame
-numbers do not enter into it, and a state held for twenty frames counts once
-rather than twenty times. The measure this replaced counted rows landing on
-the same frame with the same values, and it was worse than useless: two
-builds of this simulator differing by 17 cycles a frame out of 2,350 scored
-6.3% and 0.1%. The replacement returns identical figures across VBLANK
-lengths of 20, 21 and 22 lines and across phase shifts of 40 and 130
-scanlines, and still catches a real regression -- turning on `--dma-steal`
-drops the simulation from 164 states to one, which the old score reported as
-a modest change and this reports as producing nothing.
+**Ballblazer cannot be scored this way at all**, and that is a fact about the
+cartridge. It generates its music from POKEY's random number generator rather
+than playing a score (see below), so a correct simulation with a different
+random stream produces different, equally valid music. It reads 24% agreement
+and the number is meaningless. Judge that one by whether it plays -- it does,
+on all four voices, continuously.
 
 ## What is known to work
 
@@ -944,10 +941,12 @@ def main():
     ap.add_argument("--drive", action="store_true",
                     help="hold fire, for a game that waits at a title screen")
     ap.add_argument("--compare", metavar="REF.log",
-                    help="compare the simulation against a known-good capture "
-                         "(from capture.py or probes/audio.lua) and report how "
-                         "much of it is reproduced. This is the only thing "
-                         "that makes the simulation trustworthy.")
+                    help="compare against a known-good capture from "
+                         "capture.py or probes/audio.lua. Compare LIKE FOR "
+                         "LIKE: the capture must be a no-input run of the "
+                         "same length, or you are marking the simulation "
+                         "against music it was never given time to reach, or "
+                         "against someone playing.")
     ap.add_argument("--dma-steal", action="store_true",
                     help="charge the CPU for MARIA's DMA, per scanline, using "
                          "the measured cost model including holey DMA. Better "
