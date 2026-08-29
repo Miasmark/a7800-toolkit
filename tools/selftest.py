@@ -340,6 +340,42 @@ def t_sim_compare():
     return "frame-shift invariant; separates agreement from progress"
 
 
+def t_sim_random():
+    """POKEY's RANDOM must not be a constant.
+
+    Ballblazer generates its music instead of playing a score, and asks
+    POKEY for the entropy: `CMP $400A / BCS` skips the note when the
+    comparison fails. A simulator returning zero there makes the branch
+    always skip, so the engine runs, emits nothing, and the game plays
+    silence through a player that is working perfectly. That was a real bug
+    here and it took a long time to find, so this pins the register down.
+    """
+    import sim, cart as cart_module
+
+    class FakeCart(object):
+        nbanks = 1
+        def pokeys(self):
+            return [0x4000]
+        def space_of(self, a, b):
+            return None
+        def byte(self, sp, a):
+            return 0xFF
+
+    bus = sim.Bus(FakeCart())
+    cyc = [0]
+    bus.cpu_cycles = lambda: cyc[0]
+    seen = set()
+    for step in range(64):
+        cyc[0] += 37
+        seen.add(bus.read(0x400A))
+    if len(seen) < 8:
+        raise AssertionError("RANDOM returned %d distinct values in 64 reads; "
+                             "it is effectively a constant" % len(seen))
+    if seen == {0} or seen == {0xFF}:
+        raise AssertionError("RANDOM is stuck at a single value")
+    return "%d distinct values over 64 reads" % len(seen)
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -1275,6 +1311,7 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("POKEY random", t_sim_random)
     r.check("sim compare", t_sim_compare)
     r.check("sprite import", t_mksprite)
     r.check("DMA cost model", t_dmabudget)

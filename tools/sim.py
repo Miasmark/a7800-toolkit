@@ -64,39 +64,43 @@ bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
 fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 `$40` counts down exactly once per frame, as its author intended.
 
-## What stops it
+## What stopped it: POKEY's random number generator
 
-The score says Ballblazer plays correctly and does not keep going, so this is
-about what stops it. Traced end to end; the answer is not where any of the
-earlier guesses put it.
+Traced to a root cause and fixed.
 
-**The attract tune is not the music.** There are two sound routines:
+Ballblazer does not play a score, it **generates** one, and it asks POKEY for
+the entropy. At `$B333`:
 
-    $FE32  the attract tune. Derives everything from the frame counter at
-           $42 and writes AUDC1-4 directly. This is what plays for the first
-           99 states, on all four voices, correctly.
-    $B570  the real player. Reads eight note bytes from RAM at $2114 and
-           $2116..$211D and pushes them straight at the POKEY.
+    CMP $400A        ; POKEY's RANDOM register
+    BCS $B34A        ; skip this note if the comparison fails
+    LDA $B936,Y
+    STA $2123        ; otherwise emit it
 
-Everything up to and including the handover is right. The attract sequencer
-advances at exactly 1.00 steps a frame, the same as hardware -- checked by
-watching `$66` count down in both. Around frame 400 the game clears memory
-and initialises the real music, writing `$40=$6F` and `$41=$99`, which is
-what MAME holds at the same point. The player itself is correct.
+This simulator returned zero for every POKEY read. `A >= 0` is always true, so
+the branch always skipped, no note was ever emitted, and the four voice cells
+the player reads stayed at zero. The player then did exactly what it was told
+and played silence -- which is why the failure looked like a player that
+stops, then like a missing interrupt, then like a display-list problem, and
+was none of those.
 
-**The engine that feeds the player is not.** Watched after the handover, the
-eight note cells are cleared every update -- `$B221` writes zero to voice
-one's, `$B233` to voice four's, 148 times each -- and only voice one is ever
-refilled, from `$B2E4`, with real values ($C8, $CC, $A8, $A2). Voices two,
-three and four are given nothing but the zeros. The player then does exactly
-what it is told and plays silence.
+`Bus.random` now implements the 17-bit polynomial counter, clocked at the CPU
+rate. The music plays: 428 of 429 logged states carry voice four, against one
+of 164 before, and it keeps playing to the end of the run instead of dying
+around frame 400.
 
-So the fault is inside the music engine's per-voice update, and the specific
-question is why it produces data for voice one and not for the other three.
-Everything around it has been eliminated by measurement: the CPU core and
-mapper (427,399 identical instructions), the display list (byte for byte
-against MAME), the interrupt rate, the frame clock (1.00x), the sequencer
-rate (1.00 steps a frame), the handover, and the player.
+### And the score went DOWN
+
+Agreement fell from 60% to 24% while the simulation became fundamentally more
+correct, because a generated soundtrack driven by a different random stream is
+different music -- valid, in the same style, not the same notes. **Ballblazer
+cannot be scored by log comparison at all** unless the polynomial counter is
+bit-exact and cycle-aligned with the hardware, which is a far higher bar than
+"plays the right music".
+
+That is a limit of the gate, not a defect in the fix, and it is worth stating
+plainly because the number moving the wrong way is exactly what an unwary
+reading would call a regression. For cartridges that play a fixed score the
+comparison means what it says; for one that improvises, it cannot.
 
 ## MARIA's DMA, and what the score is worth
 
@@ -150,8 +154,11 @@ Each of these was a confident diagnosis at some point, and each was wrong.
   re-synchronises 1,160 instructions later, and sweeping the flag's phase
   across a whole frame changes the score by nothing.
 * **The RIOT timer.** Neither game ever reads `INTIM`.
-* **POKEY reads.** `RANDOM` returns zero here where hardware returns live
-  state -- a real gap, but Ballblazer never reads it.
+* ~~**POKEY reads.**~~ Recorded here as ruled out, on the grounds that
+  "Ballblazer never reads it". That was wrong: it was measured over 300
+  frames, and the music engine that reads `$400A` does not start until frame
+  400. It was the bug. Left in place as a reminder that a negative result is
+  only as good as the window it was measured over.
 * **Double buffering of the display list.** The hypothesis was that the game
   keeps two lists and repoints MARIA mid-frame, so reading `DPPH`/`DPPL` once
   at frame start would read the wrong one. It does not: the pointer is
@@ -244,15 +251,44 @@ class Bus(object):
         self.dppl = None                # hardware; the sim keeps its own copy
         self.ctrl = 0x00                # MARIA CTRL: DMA is OFF until a game
                                         # turns it on, and so are its interrupts
+        self.poly = 0x1FFFF             # POKEY's 17-bit polynomial counter
+        self.poly_at = 0                # ... and the cycle it was last advanced
         self.drive = drive
+        self.cpu_cycles = lambda: 0     # set by CPU.__init__
         self.pokeys = set()
         for base in cart.pokeys():
             for r in range(16):
                 self.pokeys.add(base + r)
 
+    def random(self, cycles):
+        """POKEY's RANDOM register: the top bits of a 17-bit LFSR.
+
+        This is not a detail. Ballblazer generates its music rather than
+        playing a score, and the generator asks POKEY for entropy --
+        `CMP $400A / BCS` at $B333, which skips the note when the comparison
+        fails. Return a constant zero, as this simulator did, and the
+        comparison always skips: the engine runs, emits nothing, and the game
+        plays silence through a player that is working perfectly.
+
+        The polynomial is x^17 + x^12 + 1, clocked at the CPU rate, so it is
+        advanced by however many cycles have passed since it was last asked.
+        """
+        step = cycles - self.poly_at
+        self.poly_at = cycles
+        p = self.poly
+        for _ in range(min(step, 4096)):
+            p = ((p >> 1) | (((p ^ (p >> 5)) & 1) << 16)) & 0x1FFFF
+        self.poly = p
+        return (p >> 9) & 0xFF
+
     # -- reads
     def read(self, a):
         a &= 0xFFFF
+        if a in self.pokeys:
+            reg = a & 0x0F
+            if reg == 0x0A:                       # RANDOM
+                return self.random(self.cpu_cycles())
+            return 0xFF
         if a >= 0x4000:
             sp = self.cart.space_of(a, self.bank)
             if sp is not None:
@@ -418,6 +454,7 @@ class CPU(object):
 
     def __init__(self, bus):
         self.bus = bus
+        bus.cpu_cycles = lambda: self.cycles     # POKEY's LFSR runs on these
         self.a = self.x = self.y = 0
         self.s = 0xFD
         self.p = U | I
