@@ -30,12 +30,26 @@ cartridges that play music on their own:
 Three of five reproduce a commercial game's music from its own code. That is
 what this was built to do, and on those cartridges it does it.
 
-The two failures are specific rather than general, and both look like the same
-shape of bug: **a voice that never gets written.** Choplifter's channel 0
-matches the capture value for value while `AUDC1` and `AUDF1` are never
-written at all, so its second voice is silent -- exactly the shape of the
-Ballblazer fault, where an engine ran correctly and one conditional path was
-never reached. Donkey Kong emits a single state.
+### Choplifter, traced
+
+Its channel 0 matches the capture value for value, while `AUDC1` and `AUDF1`
+are never written at all. That looked like a missing write path. It is not.
+
+The player at `$B29E` is voice-generic -- `STA $15,X / STA $17,X / STA $19,X`
+-- and the caller is unrolled per voice, each gated on its own counter:
+`$1923` for voice 0 at `$B326`, `$1926` for voice 1 at `$B346`, both skipped
+when the counter reads `$FF`. Sampled every 150 frames, the emulator's
+`$1926` holds `$AF`, `$0E`, `$01`; this simulator's reads `$FF` every single
+time.
+
+So nothing is failing to write. **Voice 1 is never asked to play.** The
+routine is correct and never invoked, because whatever triggers that sound
+never happens here -- which is what an attract-mode demo taking a different
+course would look like, and Choplifter runs one. That was suggested early and
+dismissed on the strength of the register columns; the columns showed which
+voice was silent, not why, and the why is consistent with the demo.
+
+Donkey Kong emits a single state and has not been traced.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
 generates its music from POKEY's random register and cannot be scored by log
