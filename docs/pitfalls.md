@@ -846,3 +846,21 @@ revisited.
 question of what happens in frame 301. When a negative rules out a whole line
 of inquiry, deliberately re-measure it over a window several times longer
 before believing it.
+
+## The capture probe presses fire, so a committed log is not a passive recording
+
+`probes/audio.lua` taps fire on a loop when `A7800_DRIVE=1`, and `capture.py`
+turns that on **by default** -- the flag it offers is `--no-drive`, not
+`--drive`. Most cartridges sit silent on a title screen until someone presses
+something, so this is the right default for getting music out of one.
+
+It does mean a committed `.log` is a recording of a game that has been
+*started*, and comparing anything passive against it is comparing two
+different sessions. Ballblazer's driven capture holds 1,544 states where a
+no-input run of the same length holds 742; Midnight Mutants' holds 818 against
+456, and the two diverge by frame 162.
+
+Nothing about the file says which it is. When a log is the reference for
+anything, record how it was captured -- driven or not, how long, what input --
+next to it, and when comparing, reproduce those conditions rather than
+assuming the default was passive.

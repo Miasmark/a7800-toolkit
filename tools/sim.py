@@ -33,19 +33,39 @@ plays a fixed score, this tool now does what it was built to do.
 read 7.7% for a long time, on two mistakes that were mine rather than the
 code's:
 
-  * It was compared against a committed log that is not reproducible. A fresh
-    no-input capture gives 456 states where that log has 818, and the two
-    part company by frame 162 -- it was recorded with someone playing.
+  * It was compared against a committed log that is not reproducible. The
+    capture probe taps fire on a loop when `A7800_DRIVE=1`, and `capture.py`
+    does that BY DEFAULT -- it has a `--no-drive` flag, not a `--drive` one --
+    so the committed logs are of a game that has been started. A fresh
+    no-input capture gives 456 states where that log has 818, and the two part
+    company by frame 162.
   * Every run was 14 seconds. The game leaves its attract loop at frame 1170,
     about 19.5 seconds, so no run had ever reached the music it was being
     marked against.
 
-**Ballblazer cannot be scored this way at all**, and that is a fact about the
-cartridge. It generates its music from POKEY's random number generator rather
-than playing a score (see below), so a correct simulation with a different
-random stream produces different, equally valid music. It reads 24% agreement
-and the number is meaningless. Judge that one by whether it plays -- it does,
-on all four voices, continuously.
+**Ballblazer cannot be scored this way at all**, and there is now direct
+evidence rather than a plausible story. Compared against a no-input capture of
+its own -- so that nothing hinges on whether the reference was recorded with
+fire held down -- it reads:
+
+    agreement  22.3%   progress 15.9%   timing 1.00x
+
+and the shape behind those numbers is the whole answer. **The first 101 states
+match exactly**, value for value and gap for gap: the rising arpeggio the game
+opens with is fixed, and the simulation plays it note for note. Then the two
+part company and never re-align -- the longest matching run after that point is
+a single state.
+
+That is what a generated stream looks like when it diverges. Ballblazer
+improvises from POKEY's random register, so the sequences agree while the music
+is deterministic and separate permanently at the first draw that differs, each
+draw feeding the next. Nothing accumulates or drifts, which is also why timing
+still reads 1.00x on the matched part.
+
+Scoring it properly needs POKEY's exact polynomial, bit for bit, clocked in
+step with the hardware. `Bus.random` implements a 17-bit counter that is
+plausible rather than verified, and that is the bounded piece of work which
+would make this cartridge measurable.
 
 ## What is known to work
 
