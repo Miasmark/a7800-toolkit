@@ -46,18 +46,16 @@ fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 ## Where the fault is
 
 Ballblazer spends 94% of its time waiting at `$FCBC` -- `STA $66 / LDA $66 /
-BNE` -- on a counter its interrupt handler clears. By frame 400 the display
-list this simulator is walking contains **no zones with the interrupt bit set
-at all**, where MAME's has 19. No interrupts can be raised, so the wait never
-ends.
+BNE` -- on a counter cleared inside its interrupt handler at `$FDE4`. That
+does work, ten times, and then `$66` sticks at `$28` and the wait becomes
+permanent.
 
-Why the list goes flat here and not on hardware is the open question. The
-untested hypothesis is double buffering: if the game keeps two display lists
-and points MARIA at the next one part-way through a frame, then reading
-`DPPH`/`DPPL` once at frame start -- which is what `run()` does -- can
-consistently read the buffer being written rather than the one being shown.
-MARIA latches that pointer at a particular point in the frame, and this does
-not model when.
+The signature that matters is not the first divergence in the trace -- which
+has now misled four times -- but the shape of the 1,086 re-synchronisations
+after it. Almost all are MAME executing the same ~36 instructions this does
+not, over and over, from about frame 124 onwards. That is an interrupt
+handler running on hardware and not here, repeatedly, and it says so without
+needing a story.
 
 ## What has been ruled out
 
@@ -80,8 +78,24 @@ Each of these was a confident diagnosis at some point, and each was wrong.
 * **The RIOT timer.** Neither game ever reads `INTIM`.
 * **POKEY reads.** `RANDOM` returns zero here where hardware returns live
   state -- a real gap, but Ballblazer never reads it.
+* **Double buffering of the display list.** The hypothesis was that the game
+  keeps two lists and repoints MARIA mid-frame, so reading `DPPH`/`DPPL` once
+  at frame start would read the wrong one. It does not: the pointer is
+  written twice at frame 46 and once more at frame 404, and never within a
+  frame.
 * **RAM mirroring**, and **a crash through a null interrupt vector**: both
   were real faults, both are fixed, neither moved the score.
+
+### A retraction
+
+An earlier version of this file offered, as evidence that the two diverge
+during initialisation, that MAME's display list sat at `$1F84` where this
+simulator built one at `$26EE`. **That comparison was invalid.** `$1F84` is
+written at MAME frame 16, and the cartridge does not get control until about
+frame 133 -- so it is the BIOS's own display list, and the comparison was
+against the logo screen rather than the game. The instruction-level diff,
+which came later and is trustworthy, shows the two agreeing for 427,399
+instructions instead.
 
 A method note worth more than any of them: the useful signal was not the
 "first divergence", which has now been misleading three times, but the SHAPE

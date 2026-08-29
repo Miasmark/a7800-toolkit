@@ -808,4 +808,14 @@ negatives:
   MARIA registers are unaffected.
 * **A tap can stop firing when the driver remaps.** One installed over
   `$0000-$03FF` here went quiet at frame 81, and a trace that simply stops
-  looks like a machine that has gone idle.
+  looks like a machine that has gone idle. It happened twice, at different
+  frames, and the second time it silently truncated a comparison of two
+  register-write sequences -- the missing half read as "the game never does
+  this" rather than "the instrument stopped".
+
+And one that is not the instrument's fault at all: **the 7800 BIOS runs for
+about 133 frames before the cartridge gets control**, building its own
+display list and toggling MARIA's registers every frame. Anything sampled by
+frame number in the first two seconds is measuring the logo screen. A display
+list read at frame 16 and attributed to the game was, in this project, the
+central evidence for a wrong conclusion.
