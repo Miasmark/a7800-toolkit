@@ -864,3 +864,25 @@ Nothing about the file says which it is. When a log is the reference for
 anything, record how it was captured -- driven or not, how long, what input --
 next to it, and when comparing, reproduce those conditions rather than
 assuming the default was passive.
+
+## "That can't be what the game does" is a premise, not a measurement
+
+A simulator performed exactly one bank switch across four hundred frames of a
+128K cartridge and then sat in one bank, spinning in a tight loop. That was
+written up as a bank-switching failure, on reasoning that sounds unanswerable:
+a cartridge with eight banks which switches once is obviously broken.
+
+The emulator performs exactly one bank switch too, from the same instruction to
+the same address, and spends its time in the same loop -- which turned out to
+be the game's own delay routine, a busy-wait of twelve thousand iterations that
+the emulator executes 1,745,101 times in the same window.
+
+Nothing about the simulator's behaviour was wrong. What was wrong was comparing
+it against an expectation instead of against the hardware, when the hardware
+was sitting right there and the comparison costs one trace.
+
+The tell is the shape of the argument. "A game with eight banks would not use
+one" is a claim about what programmers do, not an observation about what this
+program does, and it feels strongest exactly when it has been checked least.
+Before reporting that a simulation does something a real machine would not,
+make the real machine do it and look.

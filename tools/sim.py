@@ -82,31 +82,37 @@ black-boxing the register and read how the emulator derives it; the probe and
 the fitting results narrow it to the output mapping, which is the part still
 missing.
 
-### Commando: a third failure, and a different one
+### Commando, and a retraction
 
-Commando is the only other retail POKEY cartridge, and it is the useful one
-to aim at, because unlike Ballblazer it plays a fixed score -- so it can test
-the POKEY path without RANDOM having to be exact. Against a no-input capture
-of its own it reads:
+Commando is the only other retail POKEY cartridge and the useful one to aim
+at, because unlike Ballblazer it plays a fixed score -- so it could test the
+POKEY path without RANDOM having to be exact. Against a no-input capture of
+its own it reads:
 
     agreement  27.3%   progress 7.1%   timing 21.28x
 
-**That timing figure is the finding.** Both other cartridges read 1.00x; this
-one runs its music twenty-one times too slowly, which is a rate failure and
-not the drift or divergence seen elsewhere. It emits 11 states where the
-capture holds 424, having made 5,934 audio writes -- it is writing the same
-values over and over.
+**The bank-switching diagnosis published for this was wrong, and is
+withdrawn.** The reasoning was that the simulation performed exactly one bank
+switch in four hundred frames and then sat in bank 6, and that a cartridge
+with eight banks which switches once must be stuck. MAME performs **exactly
+one bank switch too** -- the same store, `$DD80` writing `$8000`, once -- and
+the banking is correct.
 
-The cause is upstream of the sound. Commando is a 128K SuperGame cartridge,
-the first thing in this series to lean on bank switching here, and over 400
-frames the simulation performs **exactly one bank switch** and then spends
-100% of its time in bank 6, spinning between `$BF9B` and `$BFAA`. A game with
-eight banks that switches once is stuck, and everything downstream of that
-follows.
+The spinning that looked like a hang is the game's own delay routine at
+`$BF95`: `LDX #$30 / LDY #$00 / INY / BNE / DEX / BNE`, a busy-wait of some
+twelve thousand iterations. MAME executes its inner instruction 1,745,101
+times in a comparable window. Both are doing what the cartridge asks.
 
-So the POKEY path is still unvalidated: Ballblazer cannot be scored and
-Commando does not get far enough to try. What is validated is the TIA path,
-by Midnight Mutants, at 94.8%.
+The instruction streams agree for 21,318 instructions from the cartridge's
+reset and then part at a VBLANK wait, which is benign here as it was for
+Ballblazer: the simulation reaches `$8FBD` past that wait, and every other
+landmark checked.
+
+So what is actually known is narrower than what was claimed. Banking is
+right, gross control flow is right, and the simulation still emits 11 distinct
+audio states where the capture holds 424. The 21.28x timing figure is computed
+from a handful of matched events and should not be read as a measured rate.
+Commando's low score is **unexplained**.
 
 ## What is known to work
 
