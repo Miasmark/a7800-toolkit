@@ -63,6 +63,31 @@ python tools/gfx.py mygame/game.a78 --space rom --base 0xD000 --direct 4 --lines
 If the sprite comes out sheared diagonally, the width is wrong; if it comes out
 as one row repeated, the page striding is.
 
+## The budget
+
+MARIA halts the 6502 while it draws, so "how much can my game compute" is a
+question about how much is on screen. `dmabudget.py` answers it:
+
+```
+python tools/dmabudget.py --uniform 12,16,4,8 --afford
+```
+
+NTSC gives you **29,868 CPU cycles per frame** (262 scanlines at 114.00), and
+drawing is charged per scanline, so a tall zone costs proportionally more than
+a short one and an empty zone is not free. The numbers are measured -- see
+`docs/hardware.md` for the table and the method.
+
+For scale: Asteroids mid-play spends about **10%** of its frame on DMA, which
+is what a screen of small objects costs. A full screen of wide objects or
+character-mode tiles can pass 50-60%. If the report says you are over budget,
+nothing warns you at runtime -- MARIA does not yield, the frame just arrives
+with your logic half-done, which presents as sluggish input or a game that
+speeds up when fewer things are on screen.
+
+The cheapest things to cut, in order: object *width* (each byte costs on every
+scanline of the zone), then object *count*, then zone height. Making a zone
+empty for part of the screen is nearly free.
+
 ## Where the rest is written down
 
 * `docs/hardware.md` -- register map, DLL and DL bit layouts, holey DMA.

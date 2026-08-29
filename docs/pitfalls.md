@@ -741,3 +741,22 @@ most careful when the first byte past the end looks meaningful -- adjacent
 variables are as likely to hold plausible values as the array is, and a theory
 built on them will fit the data comfortably while being about the wrong bytes
 entirely.
+
+## A register bit documented by its name, not by its effect
+
+`CTRL` bit 4 is "character width", and this toolkit recorded it as `1 = 1 byte`
+-- which is what the name suggests and the wrong way round. Setting the bit
+makes character mode cost *more*, because it fetches two bytes per character
+rather than one.
+
+Nothing about reading a disassembly would have caught it. Both games in this
+series clear the bit, so both behave identically whichever way you read it, and
+a wrong bit description survives any amount of static analysis that never asks
+the bit to do anything. It fell out of a timing measurement taken for an
+unrelated reason: the configuration that should have been cheaper measured
+dearer, by exactly one byte-fetch per character.
+
+The general form: **a bit whose documented meaning your corpus never exercises
+is unverified, no matter how many ROMs you have read.** When a measurement
+disagrees with a bit description, suspect the description -- it was probably
+written from a name.

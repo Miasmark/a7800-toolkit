@@ -177,6 +177,37 @@ def t_newgame():
     return "assembles to 16K; sprite stored bottom-up, a page per scanline"
 
 
+def t_dmabudget():
+    """The cost model must still reproduce the measurements it was fitted to.
+
+    These seven numbers came off real MAME runs (see dmabudget.py for the
+    method). They are here because a plausible-looking edit to one constant
+    would otherwise go unnoticed -- the tool prints a confident table either
+    way.
+    """
+    import dmabudget as d
+    cases = [                       # 12 zones x 16 lines, 2 objects
+        (8, 0, 0, 4177), (1, 0, 0, 2242), (16, 0, 0, 6489),
+        (8, 0, 1, 4373),                       # 5-byte entries
+        (4, 1, 0, 4372), (8, 1, 0, 6685),      # character mode, 1 byte/char
+        (4, 2, 0, 5515),                       # character mode, 2 bytes/char
+    ]
+    worst = 0.0
+    for width, chars, five, measured in cases:
+        zones = [d.Zone(16, 2, width, five=bool(five), chars=chars)
+                 for _ in range(12)]
+        model = sum(z.cycles() for z in zones)
+        err = abs(model - measured) / measured
+        worst = max(worst, err)
+        if err > 0.03:   # the model's honest worst case, at width 1
+            raise AssertionError(
+                "width %d chars %d five %d: model %.0f vs measured %d (%.1f%%)"
+                % (width, chars, five, model, measured, 100 * err))
+    if d.REGIONS["ntsc"][0] != 262:
+        raise AssertionError("NTSC scanline count changed")
+    return "7 measured configurations reproduced, worst error %.1f%%" % (100 * worst)
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -1112,6 +1143,7 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("DMA cost model", t_dmabudget)
     r.check("game scaffold", t_newgame)
     r.check("gap checker", t_check_gaps)
     r.check("6502 cycle table", t_cycles)

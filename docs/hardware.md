@@ -88,6 +88,41 @@ A colour byte is hue in the high nibble, luminance in the low. Hue 0 is
 greyscale. `tools/palette.py` converts to RGB well enough to read artwork by;
 real output depends on the console and the television.
 
+### What MARIA costs
+
+MARIA draws by DMA and halts the 6502 while it does, so the frame budget is a
+function of what is on screen. These are **measured**, not quoted: a cartridge
+that spins a fixed-cost loop for the whole visible period and publishes the
+iteration count, built once per display-list shape with nothing else changed.
+`tools/dmabudget.py` implements the model and explains the method; the loop was
+calibrated against extra NOPs (14.020 cycles/iteration fitted, 14.016 counted
+by hand) and the model was checked by predicting four shapes it had not seen,
+all within 0.3%.
+
+NTSC: **262 scanlines/frame, 114.00 CPU cycles each, 29,868 cycles/frame.** Of
+those, 21 lines are VBLANK, where DMA is off and the CPU has everything.
+
+| what | CPU cycles | colour clocks |
+|---|---|---|
+| every scanline inside a zone, even an empty one | 5.63 | 22.5 |
+| a zone boundary (the DLL fetch) | 1.68 | 6.7 |
+| one 4-byte DL entry, per scanline | 2.08 | 8.3 |
+| a 5-byte entry instead, per scanline | +0.48 | +1.9 |
+| one graphics byte, per scanline | 0.74 | 3.0 |
+| one character in character mode, per scanline | 1.49 or 2.25 | 6 or 9 |
+
+The graphics byte landing on 3.0 colour clocks -- the documented figure -- is
+the main reason to trust the rest of the table.
+
+A character costs one fetch for the character list plus its own data bytes, so
+it is two fetches with `CTRL` bit 4 clear and three with it set. **Bit 4 set
+means TWO bytes per character, not one.** This file and `a7800.py` both had it
+the other way round until it was measured; the giveaway was that setting the
+bit made drawing more expensive. Both shipping games in this series clear it.
+
+For scale, Asteroids mid-play -- rocks, ship, score -- spends about 10% of its
+frame on DMA. A full screen of 16-byte-wide objects can pass 60%.
+
 ### Holey DMA
 
 With holey DMA on, reads from certain pages return zero instead of fetching.
