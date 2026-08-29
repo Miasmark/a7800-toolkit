@@ -66,36 +66,37 @@ fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 
 ## What stops it
 
-The new score said Ballblazer plays correctly and does not keep going, so
-this is about what stops it rather than what it plays wrong.
+The score says Ballblazer plays correctly and does not keep going, so this is
+about what stops it. Traced end to end; the answer is not where any of the
+earlier guesses put it.
 
-It plays the right music, on all four voices, for 99 states. Then the music
-winds down and stops. There are two sound routines in this cartridge and the
-handover between them is where it happens:
+**The attract tune is not the music.** There are two sound routines:
 
     $FE32  the attract tune. Derives everything from the frame counter at
-           $42 and writes AUDC1-4 directly. Simple, self-contained, and it
-           is what plays for those first 99 states -- correctly.
-
-    $B570  the real player. Reads eight note bytes out of RAM at $2114,
+           $42 and writes AUDC1-4 directly. This is what plays for the first
+           99 states, on all four voices, correctly.
+    $B570  the real player. Reads eight note bytes from RAM at $2114 and
            $2116..$211D and pushes them straight at the POKEY.
 
-The real player runs. It is fed nothing. Its four control cells hold $AA
-each while the attract tune plays, and once the game hands over they drain:
-by frame 420 they read $C8 $A4 $A3 $00 -- voice four already silent -- and
-by frame 500 all four are $00. The player is faithfully playing silence.
+Everything up to and including the handover is right. The attract sequencer
+advances at exactly 1.00 steps a frame, the same as hardware -- checked by
+watching `$66` count down in both. Around frame 400 the game clears memory
+and initialises the real music, writing `$40=$6F` and `$41=$99`, which is
+what MAME holds at the same point. The player itself is correct.
 
-So the fault is upstream of the player, in whatever fills those cells. That
-is the sequencer, it runs inside the interrupt handler around $FDB2, and it
-stops producing note data. It is gated on the counter at `$66` that the
-handler decrements -- the wait at `$FCBC` this file has mentioned since the
-beginning -- and `$66` sticks.
+**The engine that feeds the player is not.** Watched after the handover, the
+eight note cells are cleared every update -- `$B221` writes zero to voice
+one's, `$B233` to voice four's, 148 times each -- and only voice one is ever
+refilled, from `$B2E4`, with real values ($C8, $CC, $A8, $A2). Voices two,
+three and four are given nothing but the zeros. The player then does exactly
+what it is told and plays silence.
 
-What that narrows to, for whoever continues: the handler runs, the display
-list is right, the interrupts fire at the right rate, the frame clock reads
-1.00x against the reference, and the player is correct. The remaining
-question is why the sequencer inside the handler stops advancing, and it is
-now a question about one routine rather than about a simulator.
+So the fault is inside the music engine's per-voice update, and the specific
+question is why it produces data for voice one and not for the other three.
+Everything around it has been eliminated by measurement: the CPU core and
+mapper (427,399 identical instructions), the display list (byte for byte
+against MAME), the interrupt rate, the frame clock (1.00x), the sequencer
+rate (1.00 steps a frame), the handover, and the player.
 
 ## MARIA's DMA, and what the score is worth
 
