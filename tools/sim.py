@@ -82,6 +82,32 @@ black-boxing the register and read how the emulator derives it; the probe and
 the fitting results narrow it to the output mapping, which is the part still
 missing.
 
+### Commando: a third failure, and a different one
+
+Commando is the only other retail POKEY cartridge, and it is the useful one
+to aim at, because unlike Ballblazer it plays a fixed score -- so it can test
+the POKEY path without RANDOM having to be exact. Against a no-input capture
+of its own it reads:
+
+    agreement  27.3%   progress 7.1%   timing 21.28x
+
+**That timing figure is the finding.** Both other cartridges read 1.00x; this
+one runs its music twenty-one times too slowly, which is a rate failure and
+not the drift or divergence seen elsewhere. It emits 11 states where the
+capture holds 424, having made 5,934 audio writes -- it is writing the same
+values over and over.
+
+The cause is upstream of the sound. Commando is a 128K SuperGame cartridge,
+the first thing in this series to lean on bank switching here, and over 400
+frames the simulation performs **exactly one bank switch** and then spends
+100% of its time in bank 6, spinning between `$BF9B` and `$BFAA`. A game with
+eight banks that switches once is stuck, and everything downstream of that
+follows.
+
+So the POKEY path is still unvalidated: Ballblazer cannot be scored and
+Commando does not get far enough to try. What is validated is the TIA path,
+by Midnight Mutants, at 94.8%.
+
 ## What is known to work
 
 The 6502 core, the mapper and the memory map are right, and this is not an
