@@ -15,104 +15,48 @@ still the authority on that format.** Reimplementing RMT's replayer means
 reading 803 instructions and hoping; running it means the answer is correct by
 construction. The same goes for every other player in the library.
 
-## State: it works on a fixed score, and cannot be scored on a generated one
+## State: a TIA tool, validated on some cartridges and not others
 
 `--compare` scores the simulation against a capture from `capture.py`. Run
-like for like -- same emulator, no input, long enough -- Midnight Mutants
-reads:
+like for like -- same emulator, no input, same length -- across five TIA
+cartridges that play music on their own:
 
-    agreement  94.8%   of what it played is the capture's, in order
-    progress  100.0%   it reached the end of the capture
-    timing     1.00x   gaps between matched events
+    Ikari Warriors    agreement 99.4%   progress  86.2%   timing 1.00x
+    Midnight Mutants            94.8%             100.0%         1.00x
+    Dark Chambers               78.4%             100.0%         1.00x
+    Choplifter                   1.7%               1.0%         0.97x
+    Donkey Kong             (1 state)               1.4%             --
 
-That is a 6502, a mapper, MARIA's display interrupts and a TIA player
-reproducing forty seconds of a commercial game's music. For a cartridge that
-plays a fixed score, this tool now does what it was built to do.
+Three of five reproduce a commercial game's music from its own code. That is
+what this was built to do, and on those cartridges it does it.
 
-**It got there by fixing the measurement, not the simulator.** The same game
-read 7.7% for a long time, on two mistakes that were mine rather than the
-code's:
+The two failures are specific rather than general, and both look like the same
+shape of bug: **a voice that never gets written.** Choplifter's channel 0
+matches the capture value for value while `AUDC1` and `AUDF1` are never
+written at all, so its second voice is silent -- exactly the shape of the
+Ballblazer fault, where an engine ran correctly and one conditional path was
+never reached. Donkey Kong emits a single state.
 
-  * It was compared against a committed log that is not reproducible. The
-    capture probe taps fire on a loop when `A7800_DRIVE=1`, and `capture.py`
-    does that BY DEFAULT -- it has a `--no-drive` flag, not a `--drive` one --
-    so the committed logs are of a game that has been started. A fresh
-    no-input capture gives 456 states where that log has 818, and the two part
-    company by frame 162.
-  * Every run was 14 seconds. The game leaves its attract loop at frame 1170,
-    about 19.5 seconds, so no run had ever reached the music it was being
-    marked against.
+**Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
+generates its music from POKEY's random register and cannot be scored by log
+comparison at all, and Commando -- the only other retail POKEY cartridge --
+emits 11 states against a capture's 424 for reasons not yet understood.
 
-**Ballblazer cannot be scored this way at all**, and there is now direct
-evidence rather than a plausible story. Compared against a no-input capture of
-its own -- so that nothing hinges on whether the reference was recorded with
-fire held down -- it reads:
+### Comparing like for like, which is most of the difficulty
 
-    agreement  22.3%   progress 15.9%   timing 1.00x
+Two things have to match between the capture and the simulation or the numbers
+mean nothing, and both caught me out:
 
-and the shape behind those numbers is the whole answer. **The first 101 states
-match exactly**, value for value and gap for gap: the rising arpeggio the game
-opens with is fixed, and the simulation plays it note for note. Then the two
-part company and never re-align -- the longest matching run after that point is
-a single state.
-
-That is what a generated stream looks like when it diverges. Ballblazer
-improvises from POKEY's random register, so the sequences agree while the music
-is deterministic and separate permanently at the first draw that differs, each
-draw feeding the next. Nothing accumulates or drifts, which is also why timing
-still reads 1.00x on the matched part.
-
-Scoring it properly needs POKEY's RANDOM register exactly right, and that was
-attempted by measurement -- `probes/pokey-polyoracle.py` builds a cartridge
-that samples `$400A` at cycle spacings fixed by its own loop, so the relative
-timing of every sample is exact.
-
-It got half an answer. The recurrence is the classic 17-bit polynomial,
-`s[n] = s[n-12] ^ s[n-17]`, clocked one bit per CPU cycle: across every tap
-pair and rates of a quarter, a half, one and two bits per cycle, that scored
-95 consistent against 19 violations and nothing else came close. But **RANDOM
-is not eight consecutive bits of that register** -- an exhaustive search over
-all 131,071 phases found no contiguous window reproducing the measured bytes
-in either bit order, inverted or not, and a model where each byte bit is a
-fixed tap of a plain shift register came back empty as well.
-
-So `Bus.random` remains a plausible counter rather than a verified one, and
-Ballblazer remains unscoreable. Whoever picks this up should stop
-black-boxing the register and read how the emulator derives it; the probe and
-the fitting results narrow it to the output mapping, which is the part still
-missing.
-
-### Commando, and a retraction
-
-Commando is the only other retail POKEY cartridge and the useful one to aim
-at, because unlike Ballblazer it plays a fixed score -- so it could test the
-POKEY path without RANDOM having to be exact. Against a no-input capture of
-its own it reads:
-
-    agreement  27.3%   progress 7.1%   timing 21.28x
-
-**The bank-switching diagnosis published for this was wrong, and is
-withdrawn.** The reasoning was that the simulation performed exactly one bank
-switch in four hundred frames and then sat in bank 6, and that a cartridge
-with eight banks which switches once must be stuck. MAME performs **exactly
-one bank switch too** -- the same store, `$DD80` writing `$8000`, once -- and
-the banking is correct.
-
-The spinning that looked like a hang is the game's own delay routine at
-`$BF95`: `LDX #$30 / LDY #$00 / INY / BNE / DEX / BNE`, a busy-wait of some
-twelve thousand iterations. MAME executes its inner instruction 1,745,101
-times in a comparable window. Both are doing what the cartridge asks.
-
-The instruction streams agree for 21,318 instructions from the cartridge's
-reset and then part at a VBLANK wait, which is benign here as it was for
-Ballblazer: the simulation reaches `$8FBD` past that wait, and every other
-landmark checked.
-
-So what is actually known is narrower than what was claimed. Banking is
-right, gross control flow is right, and the simulation still emits 11 distinct
-audio states where the capture holds 424. The 21.28x timing figure is computed
-from a handful of matched events and should not be read as a measured rate.
-Commando's low score is **unexplained**.
+  * **Driving.** `capture.py` taps fire BY DEFAULT (its flag is `--no-drive`).
+    `sim.py --drive` now taps on the same duty cycle rather than holding the
+    button, but the two still count frames from different origins -- the
+    emulator from machine boot, this from the cartridge's reset, about 133
+    frames apart -- so the presses land at different points in a title
+    sequence and the runs diverge before the music starts. Every driven
+    comparison attempted here scored badly for that reason and none of them
+    should be read as a measurement of the simulator.
+  * **Length.** Midnight Mutants leaves its attract loop at frame 1170. Every
+    run of it was 14 seconds for a long time, and it read 7.7%.
 
 ## What is known to work
 
