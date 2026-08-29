@@ -133,8 +133,8 @@ empty for part of the screen is nearly free.
 * `docs/hardware.md` -- register map, DLL and DL bit layouts, holey DMA.
 * `docs/graphics.md` -- pixel formats, palettes, the offset direction, and how
   to find graphics in a ROM.
-* `docs/pitfalls.md` -- thirty ways to get a confident wrong answer, most of
-  them found the slow way. The four/five-byte display list entry, the
+* `docs/pitfalls.md` -- every way this project has found to get a
+  confident wrong answer, most of them found the slow way. The four/five-byte display list entry, the
   write-only registers, and the RAM mirroring are all in there.
 * `docs/audio.md` and `tracker.py` -- music, including 6502 export with a
   player, if you want sound in the thing you just built.

@@ -4,10 +4,27 @@ Each frame it zeroes a counter, spins a fixed-cost loop for the whole visible
 period, and publishes the count when VBLANK starts. More drawing -> fewer
 iterations. Everything about the ROM is identical between runs except the
 display lists, so the difference IS the DMA cost.
+
+This is the instrument behind the cost table in docs/hardware.md and the model
+in tools/dmabudget.py. It is kept so the numbers can be re-derived rather than
+taken on trust -- and re-derived on other emulators, or on hardware.
+
+    python probes/dma-costcart.py                 # writes t.a78, 1 object of 8 bytes
+    mame a7800 -cart t.a78 -autoboot_script probes/dma-count.lua \
+         -window -seconds_to_run 12 -nothrottle -sound none -video soft
+
+dma-count.lua prints the per-frame iteration count. Multiply by the loop cost
+(14.0156 cycles, calibrated with the `nops` parameter) to get cycles, and
+compare against a run with dma_on=False for the ceiling.
+
+build() takes the display-list shape: objects per zone, object width, how many
+zones carry them, zone height, 4- or 5-byte entries, and character mode with
+one or two bytes per character.
 """
 import os, sys, struct
-TK = "/Users/thucom/Documents/Atari 7800/a7800-toolkit/tools"
-sys.path.insert(0, TK)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "tools"))
 import asm
 
 ZONE_LINES = 16

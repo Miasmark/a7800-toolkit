@@ -1,12 +1,21 @@
-# Atari 7800 disassembly toolkit
+# Atari 7800 toolkit
 
-Tools and hard-won notes for taking apart 7800 cartridges, extracted from a
-complete byte-identical disassembly of a 128K commercial game.
+Tools and hard-won notes for taking 7800 cartridges apart — and, increasingly,
+for putting one together. It started as the byproduct of a complete
+byte-identical disassembly of a 128K commercial game, and grew through several
+more.
 
-Nothing here is specific to that game. The cartridge model was tested against
+Nothing here is specific to those games. The cartridge model was tested against
 **2,664 retail and homebrew images** and lays out all but four of them — including Activision's 8K-granular mapper and bankset cartridges, whose two halves are read separately with `side=`; the
 disassembler reproduces the hand-verified 128K disassembly byte for byte while
 also handling unbanked 4K-48K ROMs.
+
+The authoring side is newer and smaller: `newgame.py` writes a cartridge that
+boots, takes input and splits the screen with an interrupt; `mksprite.py` gets
+artwork into it; `dmabudget.py` says what MARIA's DMA leaves you to compute
+with. Those numbers were measured rather than quoted, and the measurement
+corrected a register bit this toolkit had recorded backwards — see
+[`docs/making-a-game.md`](docs/making-a-game.md).
 
 ## Start here
 
@@ -100,7 +109,8 @@ the cartridge header so nothing needs choosing.
 
 ### Probes
 
-`probes/watch.lua`, `probes/dumpdl.lua` and `probes/audio.lua` — MAME scripts
+`probes/watch.lua`, `probes/dumpdl.lua`, `probes/audio.lua`,
+`probes/dma-count.lua` and `probes/dma-costcart.py` — MAME scripts
 for watching writes, capturing a live display list, and logging every audio
 register write (TIA, or cartridge POKEY via `A7800_POKEY=<base>`) so
 `tracker.py` can turn a running game's music into an editable song. All three
