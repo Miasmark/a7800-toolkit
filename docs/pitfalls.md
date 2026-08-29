@@ -778,3 +778,34 @@ other by zero, which happens to be correct in either unit.
 Measured on hardware: in 160A mode, position 0 to 159 spans the visible width,
 one unit per pixel, whatever the object's width. So the rightmost position that
 still shows a whole object is `160 - width_in_bytes * 4`.
+
+## MAME's tracer collapses loops, and a trace diff against it lies
+
+Comparing a simulator against MAME instruction by instruction is the strongest
+check there is -- the first differing PC is the bug, with no inference in
+between. But `trace file,0` does not record every instruction. It detects
+repeated loops and replaces them with a summary line, so a spin loop of two
+hundred iterations appears as two iterations and a note.
+
+Diffed naively, the first "divergence" is therefore wherever the traced program
+first loops, and it looks utterly convincing: a plausible instruction, a
+plausible register, a plausible story. In this project it pointed at a
+memory-clearing loop and a wrong X register, and the real answer was four
+hundred thousand instructions further on.
+
+    trace out.txt,0,noloop
+
+`noloop` is the whole fix. The file gets large -- 90MB for fourteen seconds --
+and the emulator drops to about 60% speed, which is a small price for a diff
+that means what it says.
+
+Two related limits of the same instrument, both of which produce silent false
+negatives:
+
+* **Read taps do not see instruction fetches from cartridge ROM.** Counting
+  interrupts by tapping the handler's entry address reports zero, which reads
+  exactly like "no interrupts are being raised". Write taps on RAM and on
+  MARIA registers are unaffected.
+* **A tap can stop firing when the driver remaps.** One installed over
+  `$0000-$03FF` here went quiet at frame 81, and a trace that simply stops
+  looks like a machine that has gone idle.

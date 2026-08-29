@@ -61,30 +61,57 @@ and survived in a docstring long enough to look established.
 
 ### Where the fault actually is
 
-Not in the interrupts. Ballblazer stalls in a wait loop at `$BA65` --
-`LDA $42 / CMP $4B / BEQ` -- spinning on a counter its interrupt handler
-bumps, and it gets through that loop about a quarter as often as it should.
-The obvious reading is "not enough interrupts", and the sim does raise
-6 a frame where MAME's display list calls for 19.
+Diffed instruction by instruction against MAME's debugger trace, from the
+moment the BIOS hands the cartridge control. **The first 427,399 instructions
+are identical** -- about 124 frames. The 6502 core, the mapper, the memory
+map and the RAM model are all correct over that span; whatever is wrong is
+narrow.
 
-But comparing the two at the FIRST frame either one enables DMA, before
-anything has had a chance to drift:
+The first divergence is a vertical-blank wait:
 
-    MAME  DLL=$1F84   0F 22 06  0F 22 00  0F 22 00  0F 22 00  03 22 00  85 22 0D
-    SIM   DLL=$26EE   0F 26 0C  0F 26 0C  0F 26 0C  47 26 0C  47 26 00  C3 26 0E
+    $FC47  BIT $28        ; MSTAT
+    $FC49  BPL $FC47      ; spin until bit 7 says VBLANK
 
-Different address, different display-list pages, different flags. The
-cartridge's own setup code has already built a different screen, so the
-interrupt shortfall is a symptom of divergence that happened earlier, not
-its cause. Chasing DLI counts further would be chasing the wrong end.
+MAME stays in the loop. This simulator's VBLANK flag is already set, so it
+falls straight through. The game runs its initialisation for those 124 frames
+without ever waiting on the video, and the very first time it does, the two
+disagree.
 
-The leading hypothesis, untested: **this simulator does not run the BIOS.**
-It enters the cartridge at its reset vector with RAM zeroed, where real
-hardware and MAME hand over after the console's own startup has run and
-touched machine state. Anything a game inherits rather than initialises
-would differ from the first instruction. That is where the next attempt
-should start, and it is cheap to test -- compare RAM and registers at the
-moment the cartridge takes control.
+The likely reason is phase, not rate. MAME's video clock has been running
+since power-on and the cartridge is handed control part-way through a frame;
+this simulator starts its own frame zero at the reset vector, so its VBLANK
+edge sits at an arbitrary offset from the hardware's. That is unfixable
+without emulating from power-on -- and it should also be harmless, since a
+constant offset is exactly what `compare()` aligns away. So it is the first
+divergence without necessarily being the fault, and the next step is to find
+out which, by re-running the diff with a re-sync window wide enough to cover
+a whole frame of spinning (8,000 instructions, not the 400 used here -- that
+window was too small and made a transient difference look permanent).
+
+### What the earlier version of this file got wrong
+
+It said the blocker was that "Midnight Mutants runs, but its music routine is
+never called: its timing comes from DLIs, not from the frame." Measured
+against hardware, **Midnight Mutants raises no display interrupts at all** --
+twenty zones, not one with bit 7 set. Whatever stops its music, that was not
+it.
+
+### What has been ruled out
+
+* **The BIOS.** The suspicion was that entering at the reset vector with RAM
+  zeroed, rather than after the console's own startup, left a game reading
+  state it never initialised. Disproven: execution matches MAME exactly for
+  427,399 instructions after handover. Had inherited state mattered, they
+  would have parted company immediately.
+* **The mapper and the memory map.** The two agree byte for byte on the
+  vectors and on the code at the reset address, and now for most of half a
+  million instructions of execution.
+* **The RIOT timer.** Neither game ever reads `INTIM`.
+* **POKEY reads.** The `RANDOM` register returns zero here where hardware
+  returns live state, which is a real gap -- but Ballblazer never reads it,
+  so it is not this.
+* **RAM mirroring**, and **a crash on a null interrupt vector**: both were
+  real faults, both are fixed, neither changed the score.
 
 Until `--compare` reports a high number, `capture.py` is the way to hear a
 cartridge and this remains groundwork. See `docs/emulation.md`.
