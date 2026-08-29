@@ -114,15 +114,25 @@ those, 21 lines are VBLANK, where DMA is off and the CPU has everything.
 The graphics byte landing on 3.0 colour clocks -- the documented figure -- is
 the main reason to trust the rest of the table.
 
-**Two things this table does not cover, both measured since.** Holey DMA is a
-real and large saving, not a rounding error: switching it on for a screen of
-two 20-byte objects took a counting cartridge from 1,414 iterations a frame to
-1,827. And the table under-states at least one real game: Ballblazer draws two
-20-byte objects in four-scanline zones and MARIA takes **70.3 cycles per
-scanline** there, against 39.6 predicted -- while the same object
-configuration in a purpose-built cartridge measures 39.9. So the numbers hold
-for the screens they were calibrated on and not yet for a game's. Zone height
-and graphics-in-RAM are the untested suspects.
+Two more costs, measured later and now in `dmabudget.py`:
+
+| what | CPU cycles |
+|---|---|
+| one display interrupt (MARIA's signal plus the 6502's entry and exit) | 16.6 |
+| a graphics byte in a region **holey DMA** suppresses | 0 |
+
+Holey DMA is a large saving, not a rounding error -- two 20-byte objects over
+192 scanlines went from 1,412 iterations a frame to 1,825 -- and it is exactly
+the byte cost that disappears: the objects still pay for their display-list
+entries. Which addresses are suppressed was measured, not looked up: with the
+16K bit set a fetch is dropped when **address bit 12 is set** (`$D000` and
+`$F000` free, `$C000` and `$E000` charged in full). The 8K bit made no
+measurable difference anywhere in `$C000-$FFFF`.
+
+Two things that cost nothing extra, also measured, because both looked like
+plausible suspects for a discrepancy that turned out not to exist: **zone
+height** (8-scanline and 16-scanline zones with the same objects agree to
+0.2%) and **where the graphics live** (RAM and ROM measure identically).
 
 A character costs one fetch for the character list plus its own data bytes, so
 it is two fetches with `CTRL` bit 4 clear and three with it set. **Bit 4 set

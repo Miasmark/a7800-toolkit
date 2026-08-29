@@ -20,26 +20,42 @@ HOW THEY WERE MEASURED
     against 14.016 counted by hand, and the measured window at exactly 241.0
     scanlines of 114.00 cycles.
 
-KNOWN LIMITS
-    Holey DMA is not modelled, and it matters: turning it on for a screen of
-    two 20-byte objects moved a counting cartridge from 1,414 to 1,827
-    iterations a frame, so the saving is real and large. This tool will
-    over-state the cost of any zone that uses it.
+HOLEY DMA, and what it is worth
+    A zone can tell MARIA to suppress graphics fetches from part of memory, so
+    one display-list entry can span a region that is mostly empty. The saving
+    is large and now modelled: `h` on a zone. Measured, it is exactly the byte
+    cost and nothing else -- the objects still pay for their display-list
+    entries, and their pixels become free. Two 20-byte objects over 192
+    scanlines went from 1,412 iterations a frame to 1,825, which is 0.753
+    cycles a byte against the 0.744 charged here.
 
-    Worse, the model is known to UNDER-state a real game's screen. Ballblazer
-    draws two 20-byte objects in four-scanline zones; measured off MAME's
-    instruction trace, MARIA takes 70.3 cycles per scanline there, where this
-    predicts 39.6. The same object configuration in a purpose-built test
-    cartridge measures 39.9 -- so the model is right about the screen it was
-    calibrated on and wrong about the game's. The untested difference is zone
-    height (four scanlines against the sixteen used for calibration) or
-    graphics fetched from RAM rather than ROM.
+    Which addresses are suppressed was measured rather than looked up: with
+    the 16K bit set, a fetch is dropped when **address bit 12 is set**
+    ($D000 and $F000 free; $C000 and $E000 pay in full). The 8K bit made no
+    difference anywhere in $C000-$FFFF, so this tool does not model it, and
+    does not pretend to know what it does.
+
+WHAT DOES NOT COST WHAT YOU MIGHT THINK
+    Zone height does not matter: the same objects in 8-scanline and
+    16-scanline zones cost within 0.2% of each other. Nor does where the
+    graphics live -- fetching them from RAM measures identically to fetching
+    them from ROM, to the iteration.
 
 ACCURACY
-    Typically well under 1%. The worst residual is about 2.5%, on
-    single-byte-wide objects, where the linear model slightly UNDER-states
-    the cost -- so a screen full of very narrow objects is the one case
-    where this reads optimistic. Budget accordingly.
+    Typically well under 1%, and 1.5% at worst across the holey and
+    display-interrupt cases added later. The one systematic error is on
+    single-byte-wide objects, about 2.5%, where the linear model UNDER-states
+    the cost -- so a screen full of very narrow objects reads optimistic.
+
+    A caution about one number that is NOT in this model. Measuring
+    Ballblazer's own screen off an emulator trace suggested MARIA was taking
+    70.3 cycles a scanline where this predicts 39.6. That measurement is not
+    trusted and no correction was made for it: the cycle total behind it
+    under-counts taken branches, and it compared two runs that had already
+    diverged. Every controlled test of the difference it blamed -- zone
+    height, graphics in RAM, holey DMA, display interrupts -- came back
+    showing the model right. If you find a real screen this under-states,
+    that would be worth knowing; nothing here demonstrates one.
 
     Seventeen configurations were fitted (objects per zone, object width, zone
     count, zone height, 4- versus 5-byte entries), then the model was checked
@@ -62,6 +78,9 @@ PER_ZONE  = 1.678    # the DLL fetch at a zone boundary
 PER_OBJ   = 2.081    # reading one 4-byte display-list entry, per scanline
 PER_BYTE  = 0.744    # one graphics byte, per scanline
 FIVE_XTRA = 0.483    # a 5-byte entry costs this much more than a 4-byte one
+DLI_COST  = 16.6     # one display interrupt: MARIA's signal plus the 6502's
+                     # own entry and exit. Measured by toggling the bit on 24
+                     # zones and on 12, which agreed at 16.9 and 16.3.
 
 REGIONS = {                      # lines/frame, CPU Hz, frames/sec
     "ntsc": (262, 1789772.5, 59.9224),
@@ -71,28 +90,40 @@ MAX_ZONE_LINES = 16              # the DLL offset field is 4 bits: lines-1 <= 15
 
 
 class Zone(object):
-    def __init__(self, lines, count, width, five=False, chars=0):
+    def __init__(self, lines, count, width, five=False, chars=0,
+                 holey=False, dli=False):
         # chars: 0 = direct mode; 1 or 2 = character mode, that many bytes per
         # character. In character mode `width` counts CHARACTERS, and each one
         # costs a fetch from the character list plus its own data bytes.
+        # holey: this zone's graphics sit in a region holey DMA suppresses,
+        # so MARIA pays for the display-list entry and fetches no pixels.
+        # Measured: the saving is exactly the byte cost, 0.753 per byte
+        # against the 0.744 charged here.
         self.lines, self.count, self.width = lines, count, width
         self.five, self.chars = five, chars
+        self.holey, self.dli = holey, dli
 
     def cycles(self):
+        bytes_per_obj = 0 if self.holey else self.width
         if self.chars:
             per_obj = (PER_OBJ + FIVE_XTRA
-                       + self.width * (1 + self.chars) * PER_BYTE)
+                       + bytes_per_obj * (1 + self.chars) * PER_BYTE)
         else:
-            per_obj = (PER_OBJ + self.width * PER_BYTE
+            per_obj = (PER_OBJ + bytes_per_obj * PER_BYTE
                        + (FIVE_XTRA if self.five else 0))
-        return self.lines * (PER_LINE + per_obj * self.count) + PER_ZONE
+        return (self.lines * (PER_LINE + per_obj * self.count) + PER_ZONE
+                + (DLI_COST if self.dli else 0))
 
     def label(self):
+        tag = ("".join(x for x, on in (("holey", self.holey), ("dli", self.dli))
+                       if on))
+        tag = "  " + tag if tag else ""
         if self.chars:
-            return "%2d lines x %2d obj @ %2d chars (%d b/char)" % (
-                self.lines, self.count, self.width, self.chars)
-        return "%2d lines x %2d obj @ %2d bytes%s" % (
-            self.lines, self.count, self.width, "  (5-byte)" if self.five else "")
+            return "%2d lines x %2d obj @ %2d chars (%d b/char)%s" % (
+                self.lines, self.count, self.width, self.chars, tag)
+        return "%2d lines x %2d obj @ %2d bytes%s%s" % (
+            self.lines, self.count, self.width,
+            "  (5-byte)" if self.five else "", tag)
 
 
 def parse_zone(spec):
@@ -102,9 +133,19 @@ def parse_zone(spec):
         5       direct mode, 5-byte entry
         c       character mode, 1 byte per character  (CTRL bit 4 clear)
         c2      character mode, 2 bytes per character (CTRL bit 4 SET)
+        h       the zone's graphics are in a region holey DMA suppresses,
+                so its objects cost their headers and no pixels
+        d       the zone raises a display interrupt
 
     In character mode WIDTH counts characters, not bytes.
     """
+    holey = dli = False
+    while spec and spec[-1] in "hd":
+        if spec[-1] == "h":
+            holey = True
+        else:
+            dli = True
+        spec = spec[:-1]
     chars = 0
     if spec.endswith("c2"):
         chars, spec = 2, spec[:-2]
@@ -116,7 +157,8 @@ def parse_zone(spec):
     try:
         lines, rest = spec.split(":")
         count, width = rest.split("@")
-        return Zone(int(lines), int(count), int(width), five, chars)
+        return Zone(int(lines), int(count), int(width), five, chars,
+                    holey, dli)
     except ValueError:
         raise SystemExit("bad --zone %r: want LINES:COUNT@WIDTH, e.g. 16:4@8"
                          % spec)
@@ -177,10 +219,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__)
     ap.add_argument("--zone", action="append", default=[], metavar="L:C@W",
-                    help="one zone: LINES:COUNT@WIDTH, repeatable. Suffix 5 "
-                         "for a 5-byte entry, c or c2 for character mode with "
-                         "1 or 2 bytes per character (then WIDTH is in "
-                         "characters)")
+                    help="one zone: LINES:COUNT@WIDTH, repeatable. Suffixes: "
+                         "5 a 5-byte entry; c/c2 character mode with 1 or 2 "
+                         "bytes per character (WIDTH then counts characters); "
+                         "h graphics in a holey-suppressed region; d the zone "
+                         "raises a display interrupt")
     ap.add_argument("--uniform", metavar="ZONES,LINES,COUNT,WIDTH",
                     help="shorthand for identical zones, e.g. 12,16,4,8")
     ap.add_argument("--region", choices=sorted(REGIONS), default="ntsc")

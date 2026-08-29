@@ -192,7 +192,27 @@ def t_dmabudget():
         (4, 1, 0, 4372), (8, 1, 0, 6685),      # character mode, 1 byte/char
         (4, 2, 0, 5515),                       # character mode, 2 bytes/char
     ]
+    # 24 zones x 8 lines, 2 objects: holey DMA and display interrupts
+    extra = [
+        (dict(lines=8, count=2, width=20), 24, 1412),
+        (dict(lines=8, count=2, width=20, holey=True), 24, 1825),
+        (dict(lines=8, count=2, width=8), 24, 1660),
+        (dict(lines=8, count=2, width=20, dli=True), 24, 1383),
+        (dict(lines=8, count=2, width=8, dli=True), 24, 1631),
+    ]
     worst = 0.0
+    for kw, n, iters in extra:
+        measured = (1960 - iters) * 14.0156      # the counting cartridge
+        model = sum(d.Zone(**kw).cycles() for _ in range(n))
+        err = abs(model - measured) / measured
+        worst = max(worst, err)
+        if err > 0.03:
+            raise AssertionError("%s: model %.0f vs measured %.0f (%.1f%%)"
+                                 % (kw, model, measured, 100 * err))
+    if d.Zone(8, 2, 20, holey=True).cycles() >= d.Zone(8, 2, 20).cycles():
+        raise AssertionError("holey DMA must be cheaper, not dearer")
+    if d.DLI_COST <= 0:
+        raise AssertionError("a display interrupt is not free")
     for width, chars, five, measured in cases:
         zones = [d.Zone(16, 2, width, five=bool(five), chars=chars)
                  for _ in range(12)]
@@ -205,7 +225,8 @@ def t_dmabudget():
                 % (width, chars, five, model, measured, 100 * err))
     if d.REGIONS["ntsc"][0] != 262:
         raise AssertionError("NTSC scanline count changed")
-    return "7 measured configurations reproduced, worst error %.1f%%" % (100 * worst)
+    return ("12 measured configurations reproduced, worst error %.1f%%"
+            % (100 * worst))
 
 
 def t_mksprite():
