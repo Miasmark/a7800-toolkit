@@ -886,3 +886,25 @@ one" is a claim about what programmers do, not an observation about what this
 program does, and it feels strongest exactly when it has been checked least.
 Before reporting that a simulation does something a real machine would not,
 make the real machine do it and look.
+
+## A MAME port lookup that silently does nothing
+
+`probes/audio.lua` drives the fire button when `A7800_DRIVE=1`, which is how
+`capture.py` gets music out of a cartridge sitting on a title screen -- it is
+that tool's default. The lookup was `MACHINE.ioport.ports[":buttons"]`.
+
+MAME reports the tag as `":BUTTONS"`. The lookup returns nil, the field lookup
+on nil is guarded, `fire` stays nil, and the probe then captures happily while
+pressing nothing at all. There is no error, and the log it produces looks
+exactly like a driven one -- it just contains a game that never started. Five
+7800 titles captured this way yielded a single row each, which reads as "this
+cartridge is silent" rather than "the button was never pressed".
+
+Case is the specific bug; the general one is that **a lookup which can return
+nil and a feature which can do nothing are the same bug when nothing checks**.
+The probe now searches the port tags case-insensitively and prints a warning
+if it was asked to drive and found no button, because a capture that silently
+changed meaning is worse than one that fails.
+
+Worth suspecting whenever an emulator is upgraded under a script: tags,
+casing and field names are not a stable interface.

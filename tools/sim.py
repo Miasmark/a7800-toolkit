@@ -367,8 +367,18 @@ class Bus(object):
         if a in (0x0008, 0x0009, 0x000A, 0x000B):
             return 0x00                  # INPT0-3: no paddles
         if a in (0x000C, 0x000D):
-            # INPT4/5: fire buttons, active low
-            return 0x00 if self.drive else 0x80
+            # INPT4/5: fire buttons, active low.
+            #
+            # --drive taps fire rather than holding it, on the same duty cycle
+            # probes/audio.lua uses: ten frames in every seventy. Holding it
+            # down is not the same thing -- a title screen that waits for a
+            # press AND a release never gets the release, and the game sits
+            # there while the capture it is being compared against has long
+            # since started. The two have to agree or the comparison is
+            # between different sessions.
+            if not self.drive:
+                return 0x80
+            return 0x00 if (self.frame % 70) < 10 else 0x80
         if a == 0x0280:
             # SWCHA: joystick directions, also active low. All ones is centred.
             return 0xFF
