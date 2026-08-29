@@ -908,3 +908,23 @@ changed meaning is worse than one that fails.
 
 Worth suspecting whenever an emulator is upgraded under a script: tags,
 casing and field names are not a stable interface.
+
+## A budget figure that answers a different question than the one asked
+
+`dmabudget.py --afford` reported "how many more objects fit" and computed
+objects present in EVERY zone -- a band spanning the whole screen. Read as
+"how many more sprites", which is the obvious reading and the one it invites,
+it understates the headroom by the number of zones: twenty-five, on the screen
+it was first used against.
+
+It produced a real wrong answer. A game's remaining budget was reported as
+"room for 13 more 8-byte objects", which sounds tight next to a display array
+of sixteen slots, and the honest figure for a sprite occupying one 16-line
+zone was 210. The conclusion happened to survive -- DMA was not the constraint
+either way -- but only because the error pointed the wrong direction from the
+conclusion.
+
+It now prints both columns and says which is which. The general form is worth
+keeping in mind for any capacity number: **a rate has a denominator, and the
+reader will supply their own if the tool does not.** "Objects" meant
+object-zone-instances; the reader means sprites.

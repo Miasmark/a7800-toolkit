@@ -207,11 +207,22 @@ def report(zones, region, afford):
 
     if afford:
         print("")
-        print("how many more objects fit, at each width (uniform across %d zones):"
-              % len(zones))
+        # Two different questions, and reporting only the first invites a
+        # reader to take it for the second. A band across the whole screen and
+        # a sprite in one zone differ by the number of zones they touch, which
+        # here is a factor of twenty-five.
+        drawn = sum(z.lines for z in zones)
+        tall = max((z.lines for z in zones), default=16)
+        print("")
+        print("what the leftover buys, by object width in bytes:")
+        print("   %-8s %14s %16s" % ("width", "full-height", "one %d-line zone" % tall))
         for w in (1, 2, 4, 8, 16):
-            each = sum(z.lines for z in zones) * (PER_OBJ + w * PER_BYTE)
-            print("   width %2d bytes: %4d more" % (w, max(0, int(left / each))))
+            band = drawn * (PER_OBJ + w * PER_BYTE)
+            one = tall * (PER_OBJ + w * PER_BYTE)
+            print("   %-8d %14d %16d"
+                  % (w, max(0, int(left / band)), max(0, int(left / one))))
+        print("   full-height counts objects present in EVERY zone, spanning")
+        print("   all %d drawn scanlines. A sprite is the other column." % drawn)
 
 
 def main():
