@@ -59,6 +59,33 @@ and survived in a docstring long enough to look established.
   which is what the hardware does -- fixed it: 0.0% now. It did not improve
   the audio, so the stall is a separate fault.
 
+### Where the fault actually is
+
+Not in the interrupts. Ballblazer stalls in a wait loop at `$BA65` --
+`LDA $42 / CMP $4B / BEQ` -- spinning on a counter its interrupt handler
+bumps, and it gets through that loop about a quarter as often as it should.
+The obvious reading is "not enough interrupts", and the sim does raise
+6 a frame where MAME's display list calls for 19.
+
+But comparing the two at the FIRST frame either one enables DMA, before
+anything has had a chance to drift:
+
+    MAME  DLL=$1F84   0F 22 06  0F 22 00  0F 22 00  0F 22 00  03 22 00  85 22 0D
+    SIM   DLL=$26EE   0F 26 0C  0F 26 0C  0F 26 0C  47 26 0C  47 26 00  C3 26 0E
+
+Different address, different display-list pages, different flags. The
+cartridge's own setup code has already built a different screen, so the
+interrupt shortfall is a symptom of divergence that happened earlier, not
+its cause. Chasing DLI counts further would be chasing the wrong end.
+
+The leading hypothesis, untested: **this simulator does not run the BIOS.**
+It enters the cartridge at its reset vector with RAM zeroed, where real
+hardware and MAME hand over after the console's own startup has run and
+touched machine state. Anything a game inherits rather than initialises
+would differ from the first instruction. That is where the next attempt
+should start, and it is cheap to test -- compare RAM and registers at the
+moment the cartridge takes control.
+
 Until `--compare` reports a high number, `capture.py` is the way to hear a
 cartridge and this remains groundwork. See `docs/emulation.md`.
 """
