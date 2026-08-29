@@ -15,20 +15,46 @@ still the authority on that format.** Reimplementing RMT's replayer means
 reading 803 instructions and hoping; running it means the answer is correct by
 construction. The same goes for every other player in the library.
 
-## State: a TIA tool, validated on some cartridges and not others
+## State: a TIA tool, and it works
 
 `--compare` scores the simulation against a capture from `capture.py`. Run
 like for like -- same emulator, no input, same length -- across five TIA
 cartridges that play music on their own:
 
     Ikari Warriors    agreement 99.4%   progress  86.2%   timing 1.00x
-    Midnight Mutants            94.8%             100.0%         1.00x
+    Midnight Mutants            99.0%             100.0%         1.00x
+    Donkey Kong                 89.0%             100.0%         1.00x
     Dark Chambers               78.4%             100.0%         1.00x
-    Choplifter                   1.7%               1.0%         0.97x
-    Donkey Kong             (1 state)               1.4%             --
+    Choplifter                   0.8%               1.0%         0.04x
 
-Three of five reproduce a commercial game's music from its own code. That is
-what this was built to do, and on those cartridges it does it.
+Four of five reproduce a commercial game's music from its own code, with the
+frame clock exact in every one. That is what this was built to do.
+
+The fifth is understood and is not a simulator defect: Choplifter's second
+voice is never triggered because its attract demo takes a different course
+here -- see below.
+
+**Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
+generates its music from POKEY's random register and cannot be scored by log
+comparison at all, and Commando -- the only other retail POKEY cartridge --
+emits 11 states against a capture's 424 for reasons not yet understood.
+
+### The bug that made Donkey Kong silent
+
+Worth recording because of how badly the symptom described the cause. Donkey
+Kong emitted a single state and looked like a cartridge this could not run.
+
+Its title music is driven by one display interrupt, on the LAST visible zone:
+DLL byte `$C7`, ending at scanline 248. MAME takes 457 of them in ten
+seconds; the handler at `$F7B1` runs `dec $74` and the main loop at `$E24A`
+spins on `$74` waiting for it.
+
+This simulator took none. When display interrupts were added here they were
+fired only for zones ending before the VBLANK line, which was an invention --
+MARIA walks the display list and does not consult anybody's idea of where
+vertical blank starts. That filter silently dropped Donkey Kong's only
+interrupt, and the game span for ever. One bit, in one DLL entry, presenting
+as "makes no sound".
 
 ### Choplifter, traced
 
@@ -797,7 +823,16 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         zones = bus.zones()
         if nmi:
             for line_end, dli, _cost in zones:
-                if dli and line_end <= vb_line:
+                # Every zone with the bit set raises its interrupt. An earlier
+                # version fired only zones ending before the VBLANK line, which
+                # was an invention -- MARIA walks the list and does not consult
+                # anybody's notion of where vertical blank starts. Donkey Kong
+                # puts its ONLY display interrupt on the last visible zone,
+                # ending at line 248, and that filter silently dropped it: no
+                # interrupt, a counter at $74 never decremented, and the game
+                # spinning at $E24A for ever while looking like a cartridge
+                # that simply makes no sound.
+                if dli and line_end < lines:
                     events.append((base + int(line_end * CYCLES_PER_LINE), "dli"))
         # MARIA halts the 6502 while it draws, and it does so a scanline at a
         # time. Charging a whole zone's worth in one lump at the zone boundary
