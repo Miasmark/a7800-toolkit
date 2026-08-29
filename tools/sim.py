@@ -64,7 +64,41 @@ bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
 fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 `$40` counts down exactly once per frame, as its author intended.
 
+## What stops it
+
+The new score said Ballblazer plays correctly and does not keep going, so
+this is about what stops it rather than what it plays wrong.
+
+It plays the right music, on all four voices, for 99 states. Then the music
+winds down and stops. There are two sound routines in this cartridge and the
+handover between them is where it happens:
+
+    $FE32  the attract tune. Derives everything from the frame counter at
+           $42 and writes AUDC1-4 directly. Simple, self-contained, and it
+           is what plays for those first 99 states -- correctly.
+
+    $B570  the real player. Reads eight note bytes out of RAM at $2114,
+           $2116..$211D and pushes them straight at the POKEY.
+
+The real player runs. It is fed nothing. Its four control cells hold $AA
+each while the attract tune plays, and once the game hands over they drain:
+by frame 420 they read $C8 $A4 $A3 $00 -- voice four already silent -- and
+by frame 500 all four are $00. The player is faithfully playing silence.
+
+So the fault is upstream of the player, in whatever fills those cells. That
+is the sequencer, it runs inside the interrupt handler around $FDB2, and it
+stops producing note data. It is gated on the counter at `$66` that the
+handler decrements -- the wait at `$FCBC` this file has mentioned since the
+beginning -- and `$66` sticks.
+
+What that narrows to, for whoever continues: the handler runs, the display
+list is right, the interrupts fire at the right rate, the frame clock reads
+1.00x against the reference, and the player is correct. The remaining
+question is why the sequencer inside the handler stops advancing, and it is
+now a question about one routine rather than about a simulator.
+
 ## MARIA's DMA, and what the score is worth
+
 
 The simulation gave the game more CPU than hardware does, because it never
 paid for MARIA's cycle stealing. `--dma-steal` charges it, using the cost
