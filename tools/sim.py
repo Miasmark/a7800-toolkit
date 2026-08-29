@@ -43,19 +43,37 @@ bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
 fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 `$40` counts down exactly once per frame, as its author intended.
 
-## Where the fault is
+## Where the fault is: MARIA's DMA is not charged for
 
-Ballblazer spends 94% of its time waiting at `$FCBC` -- `STA $66 / LDA $66 /
-BNE` -- on a counter cleared inside its interrupt handler at `$FDE4`. That
-does work, ten times, and then `$66` sticks at `$28` and the wait becomes
-permanent.
+The simulation gives the game far more CPU than hardware does, because it
+never pays for MARIA's cycle stealing. Measured against MAME's instruction
+trace, interrupts arrive every **65 instructions** on hardware and every
+**151** here -- the interrupts are at the same points on the screen, and this
+simply executes 2.3x more code between them. Everything then runs with the
+balance between the main loop and the interrupt handlers badly wrong, which
+is not a crash and not obviously a timing bug: it just quietly stops sounding
+like the game.
 
-The signature that matters is not the first divergence in the trace -- which
-has now misled four times -- but the shape of the 1,086 re-synchronisations
-after it. Almost all are MAME executing the same ~36 instructions this does
-not, over and over, from about frame 124 onwards. That is an interrupt
-handler running on hardware and not here, repeatedly, and it says so without
-needing a story.
+`--dma-steal` charges each zone using the measured cost model (the same
+numbers as `dmabudget.py`). It moves the metric the right way, 151 down to
+97 instructions, and it is off by default because **it still under-charges
+and it currently scores worse** -- 0.1% against 6.3%.
+
+The arithmetic of what is missing, for whoever picks this up. Ballblazer's
+interrupt-bearing zones are four scanlines apart, so 456 CPU cycles:
+
+    hardware leaves ~195 of those 456 for the CPU   (65 instructions)
+    this model leaves  296                          (97 instructions)
+    -> hardware is losing about 65 cycles per scanline, the model charges 40
+
+So the shape is right and the magnitude is not. Two candidates, neither
+tested: the cost model was calibrated on simple screens and may miss
+something these zones do, or the display list this simulator has built by
+then is not the one MAME is drawing -- which cannot currently be checked,
+because MAME's write taps stop firing before the cartridge takes control.
+
+A change that makes the score worse does not go on by default, however
+correct it looks. That is what the gate is for.
 
 ## What has been ruled out
 
@@ -240,6 +258,41 @@ class Bus(object):
     MAX_ZONES = 32
     MAX_LINES = 250
 
+    # Measured DMA costs, in CPU cycles. Same numbers as tools/dmabudget.py
+    # and docs/hardware.md; see probes/dma-costcart.py for how they were got.
+    DMA_LINE, DMA_ZONE = 5.633, 1.678
+    DMA_OBJ, DMA_BYTE, DMA_FIVE = 2.081, 0.744, 0.483
+
+    def zone_cost(self, dl, lines):
+        """CPU cycles MARIA steals drawing one zone.
+
+        MARIA draws by DMA and halts the 6502 while it does. A simulator that
+        ignores that hands the game two to three times the CPU the hardware
+        gives it, which does not look like a timing bug -- everything still
+        runs, just with the balance between the main loop and the interrupt
+        handlers completely wrong.
+        """
+        per_line = self.DMA_LINE
+        i = 0
+        for _ in range(32):
+            b1 = self.ram[fold((dl + i + 1) & 0xFFFF)]
+            if b1 == 0:
+                break
+            if (b1 & 0x1F) == 0:                      # five-byte entry
+                w = 32 - (self.ram[fold((dl + i + 3) & 0xFFFF)] & 0x1F)
+                if b1 & 0x20:                         # character mode
+                    bpc = 2 if (self.ctrl & 0x10) else 1
+                    per_line += (self.DMA_OBJ + self.DMA_FIVE
+                                 + w * (1 + bpc) * self.DMA_BYTE)
+                else:
+                    per_line += self.DMA_OBJ + self.DMA_FIVE + w * self.DMA_BYTE
+                i += 5
+            else:
+                w = 32 - (b1 & 0x1F)
+                per_line += self.DMA_OBJ + w * self.DMA_BYTE
+                i += 4
+        return lines * per_line + self.DMA_ZONE
+
     def zones(self):
         """Walk the DLL the game built in RAM -> [(line_after_zone, dli), ...].
 
@@ -267,9 +320,13 @@ class Bus(object):
             return []                           # a half-written pointer
         out, line = [], 0
         for z in range(self.MAX_ZONES):
-            b0 = self.ram[(addr + z * 3) & 0xFFFF]
-            line += (b0 & 0x0F) + 1
-            out.append((line, bool(b0 & 0x80)))
+            b0 = self.ram[fold((addr + z * 3) & 0xFFFF)]
+            hi = self.ram[fold((addr + z * 3 + 1) & 0xFFFF)]
+            lo = self.ram[fold((addr + z * 3 + 2) & 0xFFFF)]
+            n = (b0 & 0x0F) + 1
+            line += n
+            out.append((line, bool(b0 & 0x80),
+                        self.zone_cost((hi << 8) | lo, n)))
             if line >= self.MAX_LINES:
                 break
         return out
@@ -563,7 +620,7 @@ VBLANK_LINES = {"ntsc": 21, "pal": 21}
 
 
 def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
-        frame_nmi=False):
+        frame_nmi=False, steal=False):
     """Execute the cartridge for `frames` frames, collecting audio writes.
 
     Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
@@ -592,10 +649,18 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         # The display list is rebuilt in RAM every frame by most games, so the
         # zone layout is read fresh rather than cached.
         events = []
+        zones = bus.zones()
         if nmi:
-            for line_end, dli in bus.zones():
+            for line_end, dli, _cost in zones:
                 if dli and line_end <= vb_line:
                     events.append((base + int(line_end * CYCLES_PER_LINE), "dli"))
+        # MARIA halts the 6502 while it draws. Charge each zone's DMA at its
+        # end, so the cycles are gone before the code that runs after it.
+        if steal:
+            for line_end, _dli, cost in zones:
+                if line_end <= vb_line:
+                    events.append((base + int(line_end * CYCLES_PER_LINE),
+                                   ("steal", cost)))
         events.append((base + int(vb_line * CYCLES_PER_LINE), "vblank"))
         if frame_nmi and nmi:
             events.append((base + int(vb_line * CYCLES_PER_LINE), "dli"))
@@ -605,8 +670,11 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         i = 0
         while cpu.cycles < target:
             while i < len(events) and cpu.cycles >= events[i][0]:
-                if events[i][1] == "vblank":
+                kind = events[i][1]
+                if kind == "vblank":
                     bus.vblank = True
+                elif isinstance(kind, tuple):
+                    cpu.cycles += kind[1]          # MARIA takes these
                 else:
                     cpu.nmi()
                 i += 1
@@ -719,6 +787,12 @@ def main():
                          "(from capture.py or probes/audio.lua) and report how "
                          "much of it is reproduced. This is the only thing "
                          "that makes the simulation trustworthy.")
+    ap.add_argument("--dma-steal", action="store_true",
+                    help="charge the CPU for MARIA's DMA using the measured "
+                         "cost model. More correct in principle and it moves "
+                         "the timing the right way, but it still under-charges "
+                         "and currently scores WORSE. Off by default; see the "
+                         "module docstring.")
     ap.add_argument("--frame-nmi", action="store_true",
                     help="raise one NMI a frame at end of visible instead of "
                          "following the display list. The old behaviour, kept "
@@ -739,7 +813,7 @@ def main():
     frames = args.frames or int(args.seconds * (50 if region == "pal" else 60))
 
     bus = run(cart, frames, region, drive=args.drive, nmi=not args.no_nmi,
-              frame_nmi=args.frame_nmi)
+              frame_nmi=args.frame_nmi, steal=args.dma_steal)
     out = args.out or (os.path.splitext(args.rom)[0] + "-sim.log")
     n = write_log(bus, cart, out, region)
     print("%s -- %d frames simulated, %d audio writes, %d changed rows"
