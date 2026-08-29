@@ -760,3 +760,21 @@ The general form: **a bit whose documented meaning your corpus never exercises
 is unverified, no matter how many ROMs you have read.** When a measurement
 disagrees with a bit description, suspect the description -- it was probably
 written from a name.
+
+## A display list entry's horizontal position is in pixels, not bytes
+
+An object's width is given in **bytes** and its horizontal position in
+**pixels**, in the same four-byte entry, and nothing about the encoding hints
+at the change of unit. Reading both as bytes gives a sprite that will not move
+past a quarter of the screen; reading both as pixels gives one whose width is
+four times too small.
+
+This surfaced while writing a scaffold, not while reading one: the clamp on a
+moving sprite was computed as "160 pixels / 4 per byte = 40", the sprite
+started at 40, and it moved left perfectly and refused to move right at all.
+The asymmetry is the tell -- one direction bounded by a wrong constant and the
+other by zero, which happens to be correct in either unit.
+
+Measured on hardware: in 160A mode, position 0 to 159 spans the visible width,
+one unit per pixel, whatever the object's width. So the rightmost position that
+still shows a whole object is `160 - width_in_bytes * 4`.

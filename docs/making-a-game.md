@@ -63,6 +63,46 @@ python tools/gfx.py mygame/game.a78 --space rom --base 0xD000 --direct 4 --lines
 If the sprite comes out sheared diagonally, the width is wrong; if it comes out
 as one row repeated, the page striding is.
 
+## Input
+
+`SWCHA` (`$0280`) holds both joysticks -- player 1 in the high nibble, player 2
+in the low -- and **every bit is active low**: a clear bit means pushed. Player
+1 is bit 7 right, 6 left, 5 down, 4 up. The buttons are `INPT4` and `INPT1`,
+bit 7 clear while held. Testing any of these the obvious way round is the
+classic first input bug, and it fails silently: the game simply behaves as
+though the stick is held in the opposite direction constantly.
+
+The scaffold reads the stick and the button, so there is a working example to
+edit rather than a register table to interpret.
+
+## Splitting the screen with a DLI
+
+Set bit 7 of a zone's DLL entry and MARIA raises an interrupt at the end of
+that zone. Two things about it catch people out:
+
+* **It arrives as NMI, not IRQ.** `SEI` does not protect you. The handler has
+  to exist and be correct before you turn DMA on, not merely before you first
+  want a split.
+* **Whatever it changes stays changed.** Put it back during VBLANK or the
+  screen splits once and then stays that way for good.
+
+That is how a game gets more than eight palettes onto a screen, or a status
+bar in different colours from the playfield. Keep the handler short: it runs
+inside the visible frame, and every cycle in it is a cycle the game does not
+get -- which the budget below will not know about unless you account for it.
+
+## Artwork
+
+```
+python tools/mksprite.py ship.png --label ship -o ship.asm
+python tools/mksprite.py rocks.png --frames 12 --label rock -o rocks.asm
+```
+
+Colours are palette indices, not RGB: four in 160A, two in 320A, index 0 being
+the background and therefore transparent. To check what you got, render it back
+the way the hardware reads it with `gfx.py --direct`, which is a genuine
+round trip -- it will show you an upside-down sprite as upside-down.
+
 ## The budget
 
 MARIA halts the 6502 while it draws, so "how much can my game compute" is a

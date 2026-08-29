@@ -208,6 +208,65 @@ def t_dmabudget():
     return "7 measured configurations reproduced, worst error %.1f%%" % (100 * worst)
 
 
+def t_mksprite():
+    """Packing must invert, and must come out bottom-first.
+
+    The orientation half matters more than the packing half: a sprite stored
+    the wrong way up still assembles and still draws, just wrongly, so the
+    test art here is deliberately asymmetric top-to-bottom and the check is
+    that the LAST scanline is emitted first.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return SKIP, "needs Pillow"
+    import mksprite
+
+    for mode, ncol in (("160A", 4), ("320A", 2)):
+        bpp, ppb = mksprite.MODES[mode]
+        w, h = ppb * 2, 4
+        img = Image.new("RGB", (w, h))
+        shades = [(0, 0, 0), (90, 90, 90), (180, 180, 180), (255, 255, 255)][:ncol]
+        want = []
+        for y in range(h):
+            row = []
+            for x in range(w):
+                idx = (x + y) % ncol
+                row.append(idx)
+                img.putpixel((x, y), shades[idx])
+            want.append(row)
+        cmap = mksprite.build_map(img, bpp, None)
+        rows, width = mksprite.pack(img, mode, 1, cmap)
+        if width != w // ppb:
+            raise AssertionError("%s: width %d, expected %d" % (mode, width, w // ppb))
+        got = mksprite.unpack(rows, width, 1, mode)
+        if got != want:
+            raise AssertionError("%s: pack/unpack did not round-trip" % mode)
+
+        text = mksprite.emit(rows, width, 1, "art", mode, "test.png")
+        body = [l for l in text.split("\n") if l.strip().startswith(".byte")]
+        first = [int(t, 16) for t in body[0].split(";")[0].replace(".byte", "").replace("$", "").split(",")]
+        if bytes(first) != rows[-1]:
+            raise AssertionError("%s: emitted top row first; MARIA reads "
+                                 "bottom-first" % mode)
+
+    # frames pack side by side at a stride of one frame's width
+    img = Image.new("RGB", (16, 2))
+    for x in range(16):
+        img.putpixel((x, 0), (255, 255, 255) if x < 8 else (0, 0, 0))
+        img.putpixel((x, 1), (255, 255, 255) if x < 8 else (0, 0, 0))
+    cmap = mksprite.build_map(img, 2, None)
+    rows, width = mksprite.pack(img, "160A", 2, cmap)
+    if width != 2:
+        raise AssertionError("two frames of 8 pixels should be 2 bytes wide")
+    if len(rows[0]) != 4:
+        raise AssertionError("a scanline of 2 frames x 2 bytes should be 4")
+    if rows[0][:2] == rows[0][2:]:
+        raise AssertionError("the two frames packed identically; the split "
+                             "is in the wrong place")
+    return "160A and 320A round-trip; rows emitted bottom-first; frames stride"
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -1143,6 +1202,7 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("sprite import", t_mksprite)
     r.check("DMA cost model", t_dmabudget)
     r.check("game scaffold", t_newgame)
     r.check("gap checker", t_check_gaps)
