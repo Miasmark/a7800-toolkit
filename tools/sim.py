@@ -62,10 +62,25 @@ is deterministic and separate permanently at the first draw that differs, each
 draw feeding the next. Nothing accumulates or drifts, which is also why timing
 still reads 1.00x on the matched part.
 
-Scoring it properly needs POKEY's exact polynomial, bit for bit, clocked in
-step with the hardware. `Bus.random` implements a 17-bit counter that is
-plausible rather than verified, and that is the bounded piece of work which
-would make this cartridge measurable.
+Scoring it properly needs POKEY's RANDOM register exactly right, and that was
+attempted by measurement -- `probes/pokey-polyoracle.py` builds a cartridge
+that samples `$400A` at cycle spacings fixed by its own loop, so the relative
+timing of every sample is exact.
+
+It got half an answer. The recurrence is the classic 17-bit polynomial,
+`s[n] = s[n-12] ^ s[n-17]`, clocked one bit per CPU cycle: across every tap
+pair and rates of a quarter, a half, one and two bits per cycle, that scored
+95 consistent against 19 violations and nothing else came close. But **RANDOM
+is not eight consecutive bits of that register** -- an exhaustive search over
+all 131,071 phases found no contiguous window reproducing the measured bytes
+in either bit order, inverted or not, and a model where each byte bit is a
+fixed tap of a plain shift register came back empty as well.
+
+So `Bus.random` remains a plausible counter rather than a verified one, and
+Ballblazer remains unscoreable. Whoever picks this up should stop
+black-boxing the register and read how the emulator derives it; the probe and
+the fitting results narrow it to the output mapping, which is the part still
+missing.
 
 ## What is known to work
 
