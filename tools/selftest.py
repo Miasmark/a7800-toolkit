@@ -288,6 +288,58 @@ def t_mksprite():
     return "160A and 320A round-trip; rows emitted bottom-first; frames stride"
 
 
+def t_sim_compare():
+    """sim.py's score must measure the player, not the phase of the clock.
+
+    The first version of it counted rows landing on the same frame with the
+    same values, which conflated "plays the right notes" with "keeps
+    playing", and was chaotic: two builds of the simulator differing by 17
+    cycles a frame scored 6.3% and 0.1%. This checks the replacement is
+    insensitive to frame numbering and separates the two questions.
+    """
+    import sim
+
+    def log(rows):
+        return [(f, tuple(v.split())) for f, v in rows]
+
+    ref = log([(10, "00 01"), (20, "00 02"), (30, "00 03"),
+               (40, "00 04"), (50, "00 05"), (60, "00 06")])
+
+    same = sim.compare(ref, ref)
+    if same["agreement"] < 0.999 or same["progress"] < 0.999:
+        raise AssertionError("a log does not match itself: %r" % same)
+
+    # Same states, every frame number shifted. Must score identically.
+    shifted = log([(f + 977, v) for f, v in
+                   [(10, "00 01"), (20, "00 02"), (30, "00 03"),
+                    (40, "00 04"), (50, "00 05"), (60, "00 06")]])
+    sh = sim.compare(shifted, ref)
+    if sh["agreement"] < 0.999 or sh["progress"] < 0.999:
+        raise AssertionError("frame offset changed the score: %r" % sh)
+
+    # Correct as far as it goes, then stops: agreement high, progress low.
+    short = log([(10, "00 01"), (20, "00 02")])
+    st = sim.compare(short, ref)
+    if st["agreement"] < 0.999:
+        raise AssertionError("a correct prefix should agree fully: %r" % st)
+    if not 0.2 < st["progress"] < 0.5:
+        raise AssertionError("a third of the way through should read as such: "
+                             "%r" % st)
+
+    # Wrong notes: agreement must collapse even though the count matches.
+    wrong = log([(10, "0A 0B"), (20, "0C 0D"), (30, "0E 0F"),
+                 (40, "10 11"), (50, "12 13"), (60, "14 15")])
+    wr = sim.compare(wrong, ref)
+    if wr["agreement"] > 0.01:
+        raise AssertionError("unrelated states should not agree: %r" % wr)
+
+    # A state held for many frames is one event, not many.
+    held = log([(10, "00 01"), (11, "00 01"), (12, "00 01"), (20, "00 02")])
+    if len(sim.states(held)) != 2:
+        raise AssertionError("repeated rows should collapse to one state")
+    return "frame-shift invariant; separates agreement from progress"
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -1223,6 +1275,7 @@ def main():
     r.check("shipped json", t_json)
     r.check("format files", t_formats)
     r.check("display lists", t_dlwalk)
+    r.check("sim compare", t_sim_compare)
     r.check("sprite import", t_mksprite)
     r.check("DMA cost model", t_dmabudget)
     r.check("game scaffold", t_newgame)

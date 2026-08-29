@@ -20,14 +20,35 @@ construction. The same goes for every other player in the library.
 `--compare` scores the simulation against a capture from `capture.py`, whose
 formats are verified at 100% against hardware. A simulator that is subtly
 wrong produces confident output nobody can distinguish from correct, so it
-should not be possible to believe this one without a number:
+should not be possible to believe this one without a number.
 
-    Ballblazer          98 of 1544 reference rows   (6.3%)
-    Midnight Mutants     5 of  818 reference rows   (0.6%)
+It reports two, because they are independent questions and one number hid
+that:
 
-Ballblazer is the encouraging one: of the 98 rows it produces, all 98 are
-correct, at a constant frame offset. It plays the right notes at the right
-times and then stops.
+                        agreement   progress   timing
+    Ballblazer             60.4%       6.4%     1.00x
+    Midnight Mutants        7.7%       1.0%     1.00x
+
+**agreement** is how much of what the simulation played is the reference's,
+in the reference's order -- does it play the right notes. **progress** is how
+far into the reference it got before stopping or wandering off -- does it keep
+playing. Ballblazer is the encouraging case and the single number used to
+hide why: it plays a fair amount of the right music and then stops after six
+per cent of it. Midnight Mutants does not play the right music at all.
+
+**timing** is the ratio of the gaps between matched events. Both read 1.00,
+which is worth knowing: whatever is wrong, the frame clock is not.
+
+Matching is a longest common subsequence over register states, so frame
+numbers do not enter into it, and a state held for twenty frames counts once
+rather than twenty times. The measure this replaced counted rows landing on
+the same frame with the same values, and it was worse than useless: two
+builds of this simulator differing by 17 cycles a frame out of 2,350 scored
+6.3% and 0.1%. The replacement returns identical figures across VBLANK
+lengths of 20, 21 and 22 lines and across phase shifts of 40 and 130
+scanlines, and still catches a real regression -- turning on `--dma-steal`
+drops the simulation from 164 states to one, which the old score reported as
+a modest change and this reports as producing nothing.
 
 ## What is known to work
 
@@ -726,33 +747,72 @@ def read_log(path):
     return rows
 
 
-def compare(sim_rows, ref_rows, window=400):
-    """How well does the simulation reproduce a known-good capture?
+def states(rows):
+    """A log as the ORDERED SEQUENCE OF REGISTER STATES it passes through.
 
-    Absolute frame numbers cannot match: MAME boots through the BIOS before
-    the cartridge gets control, so its clock starts a hundred-odd frames
-    earlier. What must match is the SEQUENCE of register states and the gaps
-    between them, so this searches for the offset that aligns them best and
-    reports the agreement at that offset.
-
-    Reported as (offset, matched, total): how many of the reference's rows
-    appear in the simulation at the same relative frame, with the same values.
+    Consecutive rows carrying the same values are one state, not several: a
+    note held for twenty frames is one event in the music and should count
+    once, or a simulation that merely stalls on a correct value scores for
+    every frame it fails to advance.
     """
-    if not sim_rows or not ref_rows:
-        return (0, 0, len(ref_rows))
-    sim_by = {}
-    for f, v in sim_rows:
-        sim_by.setdefault(f, []).append(v)
-    best = (0, -1)
-    lo = ref_rows[0][0] - sim_rows[0][0]
-    for off in range(lo - window, lo + window + 1):
-        hit = 0
-        for f, v in ref_rows:
-            if v in sim_by.get(f - off, ()):
-                hit += 1
-        if hit > best[1]:
-            best = (off, hit)
-    return (best[0], best[1], len(ref_rows))
+    out = []
+    for f, v in rows:
+        if not out or out[-1][1] != v:
+            out.append((f, v))
+    return out
+
+
+def compare(sim_rows, ref_rows):
+    """How much of a known-good capture does the simulation reproduce?
+
+    The obvious measure -- count rows that land on the same frame with the
+    same values -- was the first one here and it is nearly useless. It
+    conflates two independent questions and is chaotic besides: two versions
+    of this simulator differing by 17 cycles a frame out of 2,350 scored 6.3%
+    and 0.1%, which says nothing about either.
+
+    The two questions are separated here.
+
+      agreement  Of the states the simulation actually produced, how many are
+                 the reference's, in the reference's order? This is "does the
+                 player play the right notes".
+      progress   How far into the reference did it get before it stopped or
+                 wandered off? This is "does it keep playing".
+
+    A simulation can be perfect on the first and hopeless on the second --
+    Ballblazer is exactly that -- and the single number hid it.
+
+    Matching is by longest common subsequence over the state values, so
+    nothing depends on frame numbers, and timing is reported separately as
+    the ratio of the gaps between matched events. Returns a dict.
+    """
+    import difflib
+    sim, ref = states(sim_rows), states(ref_rows)
+    if not sim or not ref:
+        return {"agreement": 0.0, "progress": 0.0, "timing": None,
+                "matched": 0, "sim_states": len(sim), "ref_states": len(ref)}
+    sm = difflib.SequenceMatcher(a=[v for _, v in ref], b=[v for _, v in sim],
+                                 autojunk=False)
+    blocks = [b for b in sm.get_matching_blocks() if b.size]
+    matched = sum(b.size for b in blocks)
+    reach = max((b.a + b.size) for b in blocks) if blocks else 0
+
+    # Timing, from the gaps between consecutive matched events in each log.
+    pairs = []
+    for b in blocks:
+        for k in range(b.size):
+            pairs.append((ref[b.a + k][0], sim[b.b + k][0]))
+    ratios = []
+    for i in range(1, len(pairs)):
+        dr, ds = pairs[i][0] - pairs[i - 1][0], pairs[i][1] - pairs[i - 1][1]
+        if dr > 0 and ds > 0:
+            ratios.append(float(ds) / dr)
+    ratios.sort()
+    timing = ratios[len(ratios) // 2] if ratios else None
+    return {"agreement": float(matched) / len(sim),
+            "progress": float(reach) / len(ref),
+            "timing": timing, "matched": matched,
+            "sim_states": len(sim), "ref_states": len(ref)}
 
 
 def write_log(bus, cart, path, region="ntsc"):
@@ -849,15 +909,28 @@ def main():
           % (os.path.basename(out), frames, len(bus.writes), n))
 
     if args.compare:
-        off, hit, total = compare(read_log(out), read_log(args.compare))
-        pct = 100.0 * hit / total if total else 0.0
+        r = compare(read_log(out), read_log(args.compare))
         print("compared with %s" % os.path.basename(args.compare))
-        print("  best alignment: reference frame = simulated frame + %d" % off)
-        print("  %d of %d reference rows reproduced exactly (%.1f%%)"
-              % (hit, total, pct))
-        if pct < 50:
-            print("  NOT trustworthy for this cartridge. Something the "
-                  "simulation does not model is changing what its player does.")
+        print("  reference %d states, simulated %d"
+              % (r["ref_states"], r["sim_states"]))
+        print("  agreement  %5.1f%%  of what it played is the reference's, "
+              "in order" % (100 * r["agreement"]))
+        print("  progress   %5.1f%%  of the way through the reference before "
+              "it stopped" % (100 * r["progress"]))
+        if r["timing"] is not None:
+            print("  timing     %5.2fx  gaps between matched events, against "
+                  "the reference" % r["timing"])
+        if r["sim_states"] < 10:
+            print("  Too little output to judge: %d state%s. Whatever the "
+                  "agreement figure says above, it is measuring almost "
+                  "nothing." % (r["sim_states"],
+                                "" if r["sim_states"] == 1 else "s"))
+        elif r["agreement"] >= 0.9 and r["progress"] < 0.5:
+            print("  Plays correctly and does not keep going: look for what "
+                  "stops it, not for what it plays wrong.")
+        elif r["agreement"] < 0.5:
+            print("  NOT trustworthy for this cartridge. What it plays is not "
+                  "what the game plays.")
     if not bus.writes:
         print("  Nothing was written to the sound chip. The game may need "
               "input (--drive),")
