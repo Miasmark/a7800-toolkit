@@ -1,46 +1,9 @@
-### Where the fault actually is
-
-Diffed instruction by instruction against MAME's debugger trace (with
-`noloop` -- see pitfalls.md), from the moment the BIOS hands the cartridge
-control. **The first 427,399 instructions are identical**, about 124 frames.
-The 6502 core, the mapper, the memory map and the RAM model are all correct
-over that span.
-
-The first divergence is a vertical-blank wait, and it is **not** the fault:
-it re-synchronises 1,160 instructions later when MAME finishes the same
-spin, and sweeping this simulator's VBLANK phase across a whole frame
-changes the score by nothing at all (98 matched rows at every offset tried).
-Phase is not it.
-
-What follows is 1,086 further re-synchronisations, almost all of the same
-shape: MAME executes about 36 instructions that this does not, over and
-over. That is an interrupt handler running on hardware and not here.
-
-The chain, as far as it is now understood:
-
-1. Ballblazer spends 94% of its time in a wait at `$FCBC` -- `STA $66 /
-   LDA $66 / BNE` -- for a counter its interrupt handler clears.
-2. Interrupts do work. Early on the simulation raises 16 a frame and the
-   game's other counter, at `$40`, counts down exactly once per frame as
-   designed. An earlier reading of this as "the handler never runs" was
-   simply wrong.
-3. But by frame 400 the display list this simulator is walking contains
-   **no zones with the interrupt bit set at all**, where MAME's has 19. No
-   interrupts can then be raised, and every wait becomes permanent.
-
-So the question is why the DLL goes flat here and not on hardware. The
-untested hypothesis is double buffering: if the game keeps two display
-lists and points MARIA at the next one part-way through a frame, then
-reading `DPPH`/`DPPL` once at frame start -- which is what `run()` does --
-can consistently read the buffer being written rather than the one being
-shown. MARIA latches that pointer at a particular point in the frame, and
-this does not model when.
-
 #!/usr/bin/env python3
 """
 Run a cartridge's own code, and listen to what it writes to the sound chip.
 
     python tools/sim.py game.a78 --seconds 20 -o game.log
+    python tools/sim.py game.a78 -o out.log --compare known-good.log
 
 `capture.py` gets the same log by driving an emulator. This gets it by
 executing the 6502 directly: RAM, the cartridge mapper, enough of MARIA to keep
@@ -52,106 +15,79 @@ still the authority on that format.** Reimplementing RMT's replayer means
 reading 803 instructions and hoping; running it means the answer is correct by
 construction. The same goes for every other player in the library.
 
-## State: still unfinished, but the gap is no longer MARIA
+## State: unfinished, and measurably so
 
-The 6502 core works. It boots cartridges, runs their startup code, switches
-banks, takes interrupts and reaches their main loops -- checked against real
-disassemblies instruction by instruction. MARIA's display interrupts are now
-implemented: the DLL the game builds in RAM is walked every frame and an NMI
-raised at the end of each zone whose entry has bit 7 set. That walk is verified
-against MAME, which reports the same display list byte for byte.
-
-**It is still not trustworthy, and `--compare` is how you find that out.** Point
-it at a capture from `capture.py` and it reports how much of a known-good log
-the simulation reproduces:
+`--compare` scores the simulation against a capture from `capture.py`, whose
+formats are verified at 100% against hardware. A simulator that is subtly
+wrong produces confident output nobody can distinguish from correct, so it
+should not be possible to believe this one without a number:
 
     Ballblazer          98 of 1544 reference rows   (6.3%)
     Midnight Mutants     5 of  818 reference rows   (0.6%)
 
-Ballblazer is the encouraging one: of the 98 rows it produces, 98 are correct,
-at a constant frame offset. It plays the right notes at the right times and
-then stops. Both games now run indefinitely without crashing and simply cease
-to advance -- Ballblazer spinning at $FCBC, Midnight Mutants at $809E. Those
-are the leads.
+Ballblazer is the encouraging one: of the 98 rows it produces, all 98 are
+correct, at a constant frame offset. It plays the right notes at the right
+times and then stops.
 
-### What the earlier version of this file got wrong
+## What is known to work
 
-It said the blocker was that "Midnight Mutants runs, but its music routine is
-never called: its timing comes from DLIs, not from the frame." Measured against
-hardware, **Midnight Mutants raises no display interrupts at all** -- twenty
-zones, not one with bit 7 set. Whatever stops its music, that was not it. The
-lesson is the ordinary one: the explanation was plausible, was never measured,
-and survived in a docstring long enough to look established.
+The 6502 core, the mapper and the memory map are right, and this is not an
+opinion: diffed instruction by instruction against MAME's debugger trace (with
+`noloop` -- see pitfalls.md), from the moment the BIOS hands over the
+cartridge, **the first 427,399 instructions are identical**. That is about 124
+frames.
 
-### What has been ruled out
+MARIA's display interrupts are implemented -- the DLL the game builds in RAM
+is walked each frame and an NMI raised at the end of every zone whose entry has
+bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
+fire: early in Ballblazer this raises 16 a frame, and the game's counter at
+`$40` counts down exactly once per frame, as its author intended.
 
-* **The RIOT timer.** Instrumenting every hardware read shows neither game ever
-  touches `INTIM`, so a missing countdown timer is not the cause.
-* **RAM mirroring.** The 7800 mirrors `$2040-$20FF` into the zero page and
-  `$2140-$21FF` into the stack, and this simulator did not. It does now (see
-  `fold`), which is a real fix and made no difference to either game.
-* **A crash on a null interrupt vector.** DLIs were being raised from frame
-  zero, before a game had installed the RAM vector its handler dispatches
-  through, so the jump went to `$0000`. Ballblazer spent 31.5% of its run
-  executing address zero. Gating interrupts on DMA actually being enabled --
-  which is what the hardware does -- fixed it: 0.0% now. It did not improve
-  the audio, so the stall is a separate fault.
+## Where the fault is
 
-### Where the fault actually is
+Ballblazer spends 94% of its time waiting at `$FCBC` -- `STA $66 / LDA $66 /
+BNE` -- on a counter its interrupt handler clears. By frame 400 the display
+list this simulator is walking contains **no zones with the interrupt bit set
+at all**, where MAME's has 19. No interrupts can be raised, so the wait never
+ends.
 
-Diffed instruction by instruction against MAME's debugger trace, from the
-moment the BIOS hands the cartridge control. **The first 427,399 instructions
-are identical** -- about 124 frames. The 6502 core, the mapper, the memory
-map and the RAM model are all correct over that span; whatever is wrong is
-narrow.
+Why the list goes flat here and not on hardware is the open question. The
+untested hypothesis is double buffering: if the game keeps two display lists
+and points MARIA at the next one part-way through a frame, then reading
+`DPPH`/`DPPL` once at frame start -- which is what `run()` does -- can
+consistently read the buffer being written rather than the one being shown.
+MARIA latches that pointer at a particular point in the frame, and this does
+not model when.
 
-The first divergence is a vertical-blank wait:
+## What has been ruled out
 
-    $FC47  BIT $28        ; MSTAT
-    $FC49  BPL $FC47      ; spin until bit 7 says VBLANK
+Each of these was a confident diagnosis at some point, and each was wrong.
 
-MAME stays in the loop. This simulator's VBLANK flag is already set, so it
-falls straight through. The game runs its initialisation for those 124 frames
-without ever waiting on the video, and the very first time it does, the two
-disagree.
-
-The likely reason is phase, not rate. MAME's video clock has been running
-since power-on and the cartridge is handed control part-way through a frame;
-this simulator starts its own frame zero at the reset vector, so its VBLANK
-edge sits at an arbitrary offset from the hardware's. That is unfixable
-without emulating from power-on -- and it should also be harmless, since a
-constant offset is exactly what `compare()` aligns away. So it is the first
-divergence without necessarily being the fault, and the next step is to find
-out which, by re-running the diff with a re-sync window wide enough to cover
-a whole frame of spinning (8,000 instructions, not the 400 used here -- that
-window was too small and made a transient difference look permanent).
-
-### What the earlier version of this file got wrong
-
-It said the blocker was that "Midnight Mutants runs, but its music routine is
-never called: its timing comes from DLIs, not from the frame." Measured
-against hardware, **Midnight Mutants raises no display interrupts at all** --
-twenty zones, not one with bit 7 set. Whatever stops its music, that was not
-it.
-
-### What has been ruled out
-
+* **Display interrupts as the original blocker.** The first version of this
+  file said Midnight Mutants' "timing comes from DLIs, not from the frame".
+  Measured against hardware, that game raises **no display interrupts at
+  all** -- twenty zones, not one with bit 7 set.
 * **The BIOS.** The suspicion was that entering at the reset vector with RAM
-  zeroed, rather than after the console's own startup, left a game reading
-  state it never initialised. Disproven: execution matches MAME exactly for
-  427,399 instructions after handover. Had inherited state mattered, they
-  would have parted company immediately.
-* **VBLANK phase.** Sweeping the flag's position across a whole frame moves
-  the score by nothing, and the one divergence it causes re-synchronises.
-* **The mapper and the memory map.** The two agree byte for byte on the
-  vectors and on the code at the reset address, and now for most of half a
-  million instructions of execution.
+  zeroed left a game reading state it never initialised. Disproven by the
+  427,399 identical instructions: had inherited state mattered, the two would
+  have parted company at once.
+* **The mapper and the memory map.** Both agree with MAME on the vectors, on
+  the code at the reset address, and now across most of half a million
+  instructions of execution.
+* **VBLANK phase.** The first divergence in the trace is a VBLANK wait, but it
+  re-synchronises 1,160 instructions later, and sweeping the flag's phase
+  across a whole frame changes the score by nothing.
 * **The RIOT timer.** Neither game ever reads `INTIM`.
-* **POKEY reads.** The `RANDOM` register returns zero here where hardware
-  returns live state, which is a real gap -- but Ballblazer never reads it,
-  so it is not this.
-* **RAM mirroring**, and **a crash on a null interrupt vector**: both were
-  real faults, both are fixed, neither changed the score.
+* **POKEY reads.** `RANDOM` returns zero here where hardware returns live
+  state -- a real gap, but Ballblazer never reads it.
+* **RAM mirroring**, and **a crash through a null interrupt vector**: both
+  were real faults, both are fixed, neither moved the score.
+
+A method note worth more than any of them: the useful signal was not the
+"first divergence", which has now been misleading three times, but the SHAPE
+of the 1,086 re-synchronisations that follow it -- almost all of them MAME
+executing the same ~36 instructions this does not. That is a missing interrupt
+handler, and it says so without needing a story.
 
 Until `--compare` reports a high number, `capture.py` is the way to hear a
 cartridge and this remains groundwork. See `docs/emulation.md`.
