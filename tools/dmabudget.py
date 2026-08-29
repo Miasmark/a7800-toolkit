@@ -20,6 +20,21 @@ HOW THEY WERE MEASURED
     against 14.016 counted by hand, and the measured window at exactly 241.0
     scanlines of 114.00 cycles.
 
+KNOWN LIMITS
+    Holey DMA is not modelled, and it matters: turning it on for a screen of
+    two 20-byte objects moved a counting cartridge from 1,414 to 1,827
+    iterations a frame, so the saving is real and large. This tool will
+    over-state the cost of any zone that uses it.
+
+    Worse, the model is known to UNDER-state a real game's screen. Ballblazer
+    draws two 20-byte objects in four-scanline zones; measured off MAME's
+    instruction trace, MARIA takes 70.3 cycles per scanline there, where this
+    predicts 39.6. The same object configuration in a purpose-built test
+    cartridge measures 39.9 -- so the model is right about the screen it was
+    calibrated on and wrong about the game's. The untested difference is zone
+    height (four scanlines against the sixteen used for calibration) or
+    graphics fetched from RAM rather than ROM.
+
 ACCURACY
     Typically well under 1%. The worst residual is about 2.5%, on
     single-byte-wide objects, where the linear model slightly UNDER-states

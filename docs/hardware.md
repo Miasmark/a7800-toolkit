@@ -114,6 +114,16 @@ those, 21 lines are VBLANK, where DMA is off and the CPU has everything.
 The graphics byte landing on 3.0 colour clocks -- the documented figure -- is
 the main reason to trust the rest of the table.
 
+**Two things this table does not cover, both measured since.** Holey DMA is a
+real and large saving, not a rounding error: switching it on for a screen of
+two 20-byte objects took a counting cartridge from 1,414 iterations a frame to
+1,827. And the table under-states at least one real game: Ballblazer draws two
+20-byte objects in four-scanline zones and MARIA takes **70.3 cycles per
+scanline** there, against 39.6 predicted -- while the same object
+configuration in a purpose-built cartridge measures 39.9. So the numbers hold
+for the screens they were calibrated on and not yet for a game's. Zone height
+and graphics-in-RAM are the untested suspects.
+
 A character costs one fetch for the character list plus its own data bytes, so
 it is two fetches with `CTRL` bit 4 clear and three with it set. **Bit 4 set
 means TWO bytes per character, not one.** This file and `a7800.py` both had it

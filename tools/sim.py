@@ -66,11 +66,25 @@ interrupt-bearing zones are four scanlines apart, so 456 CPU cycles:
     this model leaves  296                          (97 instructions)
     -> hardware is losing about 65 cycles per scanline, the model charges 40
 
-So the shape is right and the magnitude is not. Two candidates, neither
-tested: the cost model was calibrated on simple screens and may miss
-something these zones do, or the display list this simulator has built by
-then is not the one MAME is drawing -- which cannot currently be checked,
-because MAME's write taps stop firing before the cartridge takes control.
+So the shape is right and the magnitude is not, and one of the two candidates
+for that is now settled. **The display lists are identical.** Read straight
+out of MAME's memory at a matched frame -- a read, not a tap -- the game's
+list at `$26EE` matches this simulator's byte for byte, all 45 bytes of it.
+The two are drawing the same screen.
+
+Which leaves the cost model, and its error is now measured rather than
+guessed. The zones in question hold two 20-byte objects; MARIA takes 70.3
+cycles a scanline on them, where the model predicts 39.6. The same two
+20-byte objects in a purpose-built test cartridge measure 39.9 -- so the
+model is right about the screen it was calibrated on and wrong about the
+game's. Untested suspects, in order: zone height (four scanlines here
+against the sixteen used for calibration) and graphics fetched from RAM
+rather than ROM.
+
+Holey DMA was the obvious suspect and is not the answer. These zones do set
+it, and measuring it directly shows it makes drawing **cheaper** -- 1,414
+iterations a frame to 1,827 on a counting cartridge -- so it pushes the wrong
+way, and the model, which ignores it, should if anything over-charge here.
 
 A change that makes the score worse does not go on by default, however
 correct it looks. That is what the gate is for.
@@ -101,6 +115,13 @@ Each of these was a confident diagnosis at some point, and each was wrong.
   at frame start would read the wrong one. It does not: the pointer is
   written twice at frame 46 and once more at frame 404, and never within a
   frame.
+* **A different display list.** Read out of MAME's memory at a matched frame,
+  the game's list is byte-for-byte what this simulator has. An earlier claim
+  that MAME ran 19 zone interrupts to this simulator's 16 is **withdrawn**:
+  that reading came from tap-captured pointers, and the taps had died before
+  the cartridge started, so it described the BIOS's display list.
+* **Holey DMA.** Set in these zones, and measured to make drawing cheaper,
+  not dearer -- so it cannot explain a cost that is too high.
 * **RAM mirroring**, and **a crash through a null interrupt vector**: both
   were real faults, both are fixed, neither moved the score.
 
