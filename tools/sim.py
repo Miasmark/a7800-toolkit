@@ -14,29 +14,53 @@ still the authority on that format.** Reimplementing RMT's replayer means
 reading 803 instructions and hoping; running it means the answer is correct by
 construction. The same goes for every other player in the library.
 
-## State: unfinished, and the gap is MARIA
+## State: still unfinished, but the gap is no longer MARIA
 
 The 6502 core works. It boots cartridges, runs their startup code, switches
 banks, takes interrupts and reaches their main loops -- checked against real
-disassemblies instruction by instruction.
+disassemblies instruction by instruction. MARIA's display interrupts are now
+implemented: the DLL the game builds in RAM is walked every frame and an NMI
+raised at the end of each zone whose entry has bit 7 set. That walk is verified
+against MAME, which reports the same display list byte for byte.
 
-What it does **not** yet do is get a game as far as its music, and the reason is
-always the same: **MARIA's display interrupt.** One NMI a frame is not what the
-hardware does. MARIA raises a DLI per display-list zone -- many a frame, at
-positions the game chooses -- and players hang off those. Concretely:
+**It is still not trustworthy, and `--compare` is how you find that out.** Point
+it at a capture from `capture.py` and it reports how much of a known-good log
+the simulation reproduces:
 
-  * Midnight Mutants runs, but its music routine is never called: its timing
-    comes from DLIs, not from the frame.
-  * The RMT demos install their handler through a RAM vector at `$0042` that
-    only gets written once the display list is running. Without DLIs the vector
-    stays zero, and forcing an NMI through it corrupts the stack.
+    Ballblazer          98 of 1544 reference rows   (6.3%)
+    Midnight Mutants     5 of  818 reference rows   (0.6%)
 
-So finishing this means walking the display list the game builds in RAM --
-which `dlwalk.py` already knows how to do -- and raising an NMI at each zone
-boundary. That is the remaining work, and it is not small.
+Ballblazer is the encouraging one: of the 98 rows it produces, 98 are correct,
+at a constant frame offset. It plays the right notes at the right times and
+then stops. Both games now run indefinitely without crashing and simply cease
+to advance -- Ballblazer spinning at $FCBC, Midnight Mutants at $809E. Those
+are the leads.
 
-Until then `capture.py` is the way to hear a cartridge, and this is groundwork.
-See `docs/emulation.md`.
+### What the earlier version of this file got wrong
+
+It said the blocker was that "Midnight Mutants runs, but its music routine is
+never called: its timing comes from DLIs, not from the frame." Measured against
+hardware, **Midnight Mutants raises no display interrupts at all** -- twenty
+zones, not one with bit 7 set. Whatever stops its music, that was not it. The
+lesson is the ordinary one: the explanation was plausible, was never measured,
+and survived in a docstring long enough to look established.
+
+### What has been ruled out
+
+* **The RIOT timer.** Instrumenting every hardware read shows neither game ever
+  touches `INTIM`, so a missing countdown timer is not the cause.
+* **RAM mirroring.** The 7800 mirrors `$2040-$20FF` into the zero page and
+  `$2140-$21FF` into the stack, and this simulator did not. It does now (see
+  `fold`), which is a real fix and made no difference to either game.
+* **A crash on a null interrupt vector.** DLIs were being raised from frame
+  zero, before a game had installed the RAM vector its handler dispatches
+  through, so the jump went to `$0000`. Ballblazer spent 31.5% of its run
+  executing address zero. Gating interrupts on DMA actually being enabled --
+  which is what the hardware does -- fixed it: 0.0% now. It did not improve
+  the audio, so the stall is a separate fault.
+
+Until `--compare` reports a high number, `capture.py` is the way to hear a
+cartridge and this remains groundwork. See `docs/emulation.md`.
 """
 import argparse
 import os
@@ -57,6 +81,24 @@ BRANCH_ON = {"BCC": (C, False), "BCS": (C, True),
              "BVC": (V, False), "BVS": (V, True)}
 
 
+def fold(a):
+    """The 7800 mirrors RAM into the first two pages -- see docs/pitfalls.md.
+
+    The 6502 needs a zero page and a stack, so $2040-$20FF appears at
+    $0040-$00FF and $2140-$21FF at $0140-$01FF. They are the SAME bytes, and
+    games use both views freely: state written through the high view and read
+    back through the low one, or the other way round.
+
+    A simulator with a flat 64K array silently gives you two separate stores
+    instead. Nothing crashes; the game simply reads back zero where it wrote a
+    value, and the symptom is a player that starts correctly and then stops
+    advancing -- which is exactly how this was found.
+    """
+    if 0x0040 <= a <= 0x00FF or 0x0140 <= a <= 0x01FF:
+        return a + 0x2000
+    return a
+
+
 class Bus(object):
     """The 7800's memory map, as much of it as sound needs.
 
@@ -73,6 +115,10 @@ class Bus(object):
         self.writes = []                # (frame, address, value)
         self.frame = 0
         self.vblank = False
+        self.dpph = None                # DPPH/DPPL are WRITE-ONLY on real
+        self.dppl = None                # hardware; the sim keeps its own copy
+        self.ctrl = 0x00                # MARIA CTRL: DMA is OFF until a game
+                                        # turns it on, and so are its interrupts
         self.drive = drive
         self.pokeys = set()
         for base in cart.pokeys():
@@ -108,7 +154,7 @@ class Bus(object):
             # released waits forever. Midnight Mutants spins on exactly that.
             #   bit 0 reset, bit 1 select, bit 3 colour/BW
             return 0x0B
-        return self.ram[a]
+        return self.ram[fold(a)]
 
     # -- writes
     def write(self, a, v):
@@ -126,6 +172,16 @@ class Bus(object):
                 return
             return                       # ROM: writes go nowhere
         low = a & 0xFF
+        if a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
+            # MARIA's display-list pointer. Write-only on hardware, so nothing
+            # can read it back -- the sim has to catch it on the way past or
+            # it never learns where the display list is.
+            if low == 0x2C:
+                self.dpph = v
+            elif low == 0x30:
+                self.dppl = v
+            elif low == 0x3C:
+                self.ctrl = v
         if a < 0x0400 and 0x15 <= low <= 0x1A and (a & 0x300) in (0, 0x100, 0x200):
             self.audio[0x0000 + low] = v
             self.writes.append((self.frame, low, v))
@@ -134,7 +190,45 @@ class Bus(object):
             self.audio[a] = v
             self.writes.append((self.frame, a, v))
             return
-        self.ram[a] = v
+        self.ram[fold(a)] = v
+
+
+    MAX_ZONES = 32
+    MAX_LINES = 250
+
+    def zones(self):
+        """Walk the DLL the game built in RAM -> [(line_after_zone, dli), ...].
+
+        Three bytes per zone: byte 0 is flags and the offset (scanlines minus
+        one) in bits 3-0, then the display list address high and low. Bit 7 is
+        the display interrupt, which is the only interrupt MARIA raises -- and
+        it fires at the END of its zone, which is what makes the line count
+        matter rather than just the flag.
+
+        Returns [] until the game has actually pointed MARIA somewhere, and
+        gives up on a list that runs past the screen or past MAX_ZONES: during
+        boot the pointer is often mid-write and the bytes are garbage.
+        """
+        if self.dpph is None or self.dppl is None:
+            return []
+        # MARIA raises nothing while DMA is off, and DMA is off out of reset.
+        # Firing zone interrupts before a game enables DMA delivers an NMI
+        # before it has installed its handler vector -- and games dispatch
+        # through a RAM vector, so the jump goes to $0000 and the machine is
+        # gone. CTRL bits 6-5: 10 is on, 11 is off (measured; see a7800.py).
+        if (self.ctrl & 0x60) != 0x40:
+            return []
+        addr = ((self.dpph << 8) | self.dppl) & 0xFFFF
+        if addr < 0x1800 or addr > 0x27FF:      # 7800 RAM; anything else is
+            return []                           # a half-written pointer
+        out, line = [], 0
+        for z in range(self.MAX_ZONES):
+            b0 = self.ram[(addr + z * 3) & 0xFFFF]
+            line += (b0 & 0x0F) + 1
+            out.append((line, bool(b0 & 0x80)))
+            if line >= self.MAX_LINES:
+                break
+        return out
 
 
 class CPU(object):
@@ -414,36 +508,110 @@ class CPU(object):
         self.cycles += cyc
 
 
-# NTSC: 3.579545 MHz colour clock / 2 for the CPU, 262 lines a frame.
-CYCLES_PER_FRAME = {"ntsc": 29829, "pal": 35780}
-VBLANK_FRACTION = 0.12
+# Measured, not quoted: a counting cartridge run under MAME put the NTSC
+# scanline at exactly 114.00 CPU cycles and the non-VBLANK window at exactly
+# 241.0 of the 262 lines. See docs/hardware.md, "What MARIA costs", and
+# probes/dma-costcart.py for the instrument. PAL is derived the same way from
+# its own clock and line count, and has NOT been measured.
+CYCLES_PER_LINE = 114.0
+LINES = {"ntsc": 262, "pal": 312}
+VBLANK_LINES = {"ntsc": 21, "pal": 21}
 
 
-def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False):
-    """Execute the cartridge for `frames` frames, collecting audio writes."""
+def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
+        frame_nmi=False):
+    """Execute the cartridge for `frames` frames, collecting audio writes.
+
+    Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
+    is MARIA's display interrupt, fired at the end of any zone whose DLL entry
+    has bit 7 set. There is no separate vertical-blank interrupt. A game that
+    wants one puts a DLI on its last zone -- Asteroids does exactly that, with
+    one DLI in seventeen zones -- while a game doing per-zone work raises many
+    (Ms. Pac-Man: thirty).
+
+    This is what an earlier version got wrong. It raised one NMI a frame at the
+    end of the visible screen, which is right for a game like Asteroids by
+    accident and wrong for everything that hangs work off zone boundaries.
+    `frame_nmi=True` restores that behaviour for comparison.
+    """
     bus = Bus(cart, drive=drive)
     cpu = CPU(bus)
-    per = CYCLES_PER_FRAME[region]
+    lines = LINES[region]
+    vb_line = lines - VBLANK_LINES[region]
+    per = int(lines * CYCLES_PER_LINE)
+
     for f in range(frames):
         bus.frame = f + 1
-        target = cpu.cycles + per
-        vb_at = cpu.cycles + int(per * (1.0 - VBLANK_FRACTION))
+        base = cpu.cycles
         bus.vblank = False
+
+        # The display list is rebuilt in RAM every frame by most games, so the
+        # zone layout is read fresh rather than cached.
+        events = []
+        if nmi:
+            for line_end, dli in bus.zones():
+                if dli and line_end <= vb_line:
+                    events.append((base + int(line_end * CYCLES_PER_LINE), "dli"))
+        events.append((base + int(vb_line * CYCLES_PER_LINE), "vblank"))
+        if frame_nmi and nmi:
+            events.append((base + int(vb_line * CYCLES_PER_LINE), "dli"))
+        events.sort(key=lambda e: e[0])
+
+        target = base + per
+        i = 0
         while cpu.cycles < target:
-            if not bus.vblank and cpu.cycles >= vb_at:
-                bus.vblank = True
-                # MARIA raises NMI at the end of the visible screen, and a
-                # great many games do their whole frame's work in that handler.
-                #
-                # NMI is **non-maskable**: the I flag does not block it. Gating
-                # on I here meant the handler never ran for any game that sets
-                # I and leaves it set, which is most of them -- and the symptom
-                # was a game that runs, spins in its main loop and never plays
-                # a note.
-                if nmi:
+            while i < len(events) and cpu.cycles >= events[i][0]:
+                if events[i][1] == "vblank":
+                    bus.vblank = True
+                else:
                     cpu.nmi()
+                i += 1
             cpu.step()
     return bus
+
+
+def read_log(path):
+    """Parse a capture log -> [(frame, (values...))]."""
+    rows = []
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        try:
+            rows.append((int(parts[0]), tuple(parts[1:])))
+        except ValueError:
+            continue
+    return rows
+
+
+def compare(sim_rows, ref_rows, window=400):
+    """How well does the simulation reproduce a known-good capture?
+
+    Absolute frame numbers cannot match: MAME boots through the BIOS before
+    the cartridge gets control, so its clock starts a hundred-odd frames
+    earlier. What must match is the SEQUENCE of register states and the gaps
+    between them, so this searches for the offset that aligns them best and
+    reports the agreement at that offset.
+
+    Reported as (offset, matched, total): how many of the reference's rows
+    appear in the simulation at the same relative frame, with the same values.
+    """
+    if not sim_rows or not ref_rows:
+        return (0, 0, len(ref_rows))
+    sim_by = {}
+    for f, v in sim_rows:
+        sim_by.setdefault(f, []).append(v)
+    best = (0, -1)
+    lo = ref_rows[0][0] - sim_rows[0][0]
+    for off in range(lo - window, lo + window + 1):
+        hit = 0
+        for f, v in ref_rows:
+            if v in sim_by.get(f - off, ()):
+                hit += 1
+        if hit > best[1]:
+            best = (off, hit)
+    return (best[0], best[1], len(ref_rows))
 
 
 def write_log(bus, cart, path, region="ntsc"):
@@ -502,6 +670,15 @@ def main():
     ap.add_argument("--frames", type=int)
     ap.add_argument("--drive", action="store_true",
                     help="hold fire, for a game that waits at a title screen")
+    ap.add_argument("--compare", metavar="REF.log",
+                    help="compare the simulation against a known-good capture "
+                         "(from capture.py or probes/audio.lua) and report how "
+                         "much of it is reproduced. This is the only thing "
+                         "that makes the simulation trustworthy.")
+    ap.add_argument("--frame-nmi", action="store_true",
+                    help="raise one NMI a frame at end of visible instead of "
+                         "following the display list. The old behaviour, kept "
+                         "for comparison.")
     ap.add_argument("--no-nmi", action="store_true",
                     help="do not call the NMI handler each frame")
     ap.add_argument("--verify", metavar="LOG",
@@ -517,11 +694,23 @@ def main():
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     frames = args.frames or int(args.seconds * (50 if region == "pal" else 60))
 
-    bus = run(cart, frames, region, drive=args.drive, nmi=not args.no_nmi)
+    bus = run(cart, frames, region, drive=args.drive, nmi=not args.no_nmi,
+              frame_nmi=args.frame_nmi)
     out = args.out or (os.path.splitext(args.rom)[0] + "-sim.log")
     n = write_log(bus, cart, out, region)
     print("%s -- %d frames simulated, %d audio writes, %d changed rows"
           % (os.path.basename(out), frames, len(bus.writes), n))
+
+    if args.compare:
+        off, hit, total = compare(read_log(out), read_log(args.compare))
+        pct = 100.0 * hit / total if total else 0.0
+        print("compared with %s" % os.path.basename(args.compare))
+        print("  best alignment: reference frame = simulated frame + %d" % off)
+        print("  %d of %d reference rows reproduced exactly (%.1f%%)"
+              % (hit, total, pct))
+        if pct < 50:
+            print("  NOT trustworthy for this cartridge. Something the "
+                  "simulation does not model is changing what its player does.")
     if not bus.writes:
         print("  Nothing was written to the sound chip. The game may need "
               "input (--drive),")
