@@ -928,3 +928,29 @@ It now prints both columns and says which is which. The general form is worth
 keeping in mind for any capacity number: **a rate has a denominator, and the
 reader will supply their own if the tool does not.** "Objects" meant
 object-zone-instances; the reader means sprites.
+
+## A formula makes a bad detector on its own, because formulas alias
+
+Pole Position II decays the car's speed by an eighth on contact with a puddle
+(`speed - speed>>3`). Since that routine had exactly two xrefs and both sat
+inside the collision handler, a drop of precisely `speed >> 3` looked like a
+sound identification of a puddle hit -- derived from the listing, not guessed,
+and it correctly found five hits confirmed by screenshots and by timing.
+
+It also produced two false positives. The game has a *scripted* stop -- a flat
+17 per step, every six frames, to zero -- used at the end of qualifying and at
+time-out. Wherever `speed >> 3` equals 17, that is speed 136 to 143, the two
+are indistinguishable from a single transition, and both false positives
+landed there. A third mechanic, a flat `-16` penalty, aliases the same way at
+speed 128 to 135.
+
+Sampling the whole sequence rather than the one transition settled it in a
+minute: `153 136 119 102 85 68 51 34 17 0` has a constant difference, and a
+proportional decay from 153 would have given 134, not 136.
+
+**A single before-and-after pair cannot distinguish a proportional rule from a
+constant one -- the sequence can.** When a detector is built from an
+arithmetic signature, work out which other values in the state space produce
+the same delta, state that band, and check it before trusting any hit inside
+it. This costs one extra probe run and is the difference between five findings
+and seven claims.
