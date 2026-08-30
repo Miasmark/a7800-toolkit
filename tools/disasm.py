@@ -1002,7 +1002,53 @@ def check_gaps(an, cart, spaces, status):
                                                  "  " + nm if nm else ""))
         if len(ramind) > 8:
             print("    ... and %d more" % (len(ramind) - 8))
-    return len(real)
+
+    # The case above cannot see code that has no reachable caller at all, and
+    # the "coincidence" verdict is circular for it: nothing inside a wholly
+    # unreached region is an instruction start, so every reference into one
+    # gets dismissed no matter how real it is.
+    #
+    # One shape of that is worth testing directly, because a tracer can never
+    # find it and it is unambiguous when present: a gap that a traced JMP
+    # steps straight over. Falling into the bytes after a JMP is impossible,
+    # so if a routine is reached at all it is reached from somewhere else --
+    # and the tracer, arriving only via the JMP, never enters. In Pole
+    # Position II this hid three routines and 929 bytes, the whole of the
+    # car's physics, behind nine bytes that were three JSRs.
+    skipped = []
+    for space in spaces:
+        base = cart.base_of(space)
+        st = status[space]
+        gap = sorted(a for a, s in st.items() if s == 0)
+        if not gap:
+            continue
+        starts = [gap[0]] + [b for a_, b in zip(gap, gap[1:]) if b != a_ + 1]
+        ends = dict()
+        run_start = gap[0]
+        for a_, b in zip(gap, gap[1:]):
+            if b != a_ + 1:
+                ends[run_start] = a_
+                run_start = b
+        ends[run_start] = gap[-1]
+        for g in starts:
+            j = g - 3
+            if j < base or (space, j) not in an.code:
+                continue
+            if cart.byte(space, j) != 0x4C:
+                continue
+            tgt = cart.byte(space, j + 1) | (cart.byte(space, j + 2) << 8)
+            if tgt > g:
+                skipped.append((space, g, ends[g], j, tgt))
+    if skipped:
+        print("  %d gap%s stepped over by a traced JMP -- unreachable by "
+              "fall-through, so the tracer cannot enter even if the bytes are "
+              "live code with a caller elsewhere. Decode by hand and add an "
+              "entry if they are instructions:"
+              % (len(skipped), "" if len(skipped) == 1 else "s"))
+        for space, g, e, j, tgt in skipped:
+            print("    %s:%04X-%04X (%d bytes)  skipped by %s:%04X JMP $%04X"
+                  % (space, g, e, e - g + 1, space, j, tgt))
+    return len(real) + len(skipped)
 
 
 def coverage_status(an, cart, spaces):

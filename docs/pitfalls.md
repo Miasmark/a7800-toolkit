@@ -954,3 +954,33 @@ arithmetic signature, work out which other values in the state space produce
 the same delta, state that band, and check it before trusting any hit inside
 it. This costs one extra probe run and is the difference between five findings
 and seven claims.
+
+## "No missed code" can mean "the tracer had no way in"
+
+`--check-gaps` scans for JSR/JMP operands landing in a gap and dismisses any
+whose opcode byte is not a known instruction start. That rule is sound, and on
+six finished disassemblies every apparent call into a gap really was a byte
+coincidence.
+
+It is also circular for the case that matters most. Nothing inside a *wholly
+unreached* region is an instruction start, so a reference from inside one gap
+to another gets filed as a coincidence no matter how real it is. Pole Position
+II hid its entire car physics this way -- three routines, 929 bytes, 27.5% of
+the ROM covered and the tool reporting "70 coincidences, no real call site".
+
+What gave it away was arithmetic, not the tool: six routines wrote the speed
+byte and **not one of them accelerated the car**. A variable that demonstrably
+goes up, with no writer that increases it, means the writer has not been found.
+Then a raw byte scan for `85 CE` found eight more, all inside gaps.
+
+The mechanism was a nine-byte gap holding three JSRs, sitting directly after a
+`JMP` that stepped over it. Falling into the bytes after a JMP is impossible,
+so a tracer that arrives only via that JMP can never enter, however live the
+code is. `--check-gaps` now detects this shape directly and reports it
+separately; it fires once on Pole Position II and not at all on the six
+finished projects.
+
+**Two habits follow.** Model the variable, not just the code: list what must
+exist (something increments this, something clears that) and check the listing
+actually contains each one. And treat a gap adjacent to an unconditional jump
+as suspect by default -- that is precisely where a tracer is blind.
