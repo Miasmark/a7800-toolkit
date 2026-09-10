@@ -1160,6 +1160,169 @@ A detail that confirmed the reading before any test did: voices 2 and 3 carry
 the same melody one AUDF apart. That is a detuning trick, and it is not
 something a misparse produces.
 
+## The same engine on a different chip
+
+Commando's music sat unread for a while because the scan pointed at the wrong
+thing. `audiotrace` found tables at `b6:$A951` and reported them, and they are
+real -- but they are the *instrument* table, sixteen records of sixteen bytes
+with only the first ten used. Nothing there is a note. The reasonable
+conclusion from a short table of unfamiliar bytes is that the cartridge holds
+some small sound effect and not much else, and that is exactly the wrong
+conclusion.
+
+What settled it was not a better decoder but a better prior: Atari-era houses
+shared their sound code, so the first thing to check is whether an unknown
+player is a known player. Commando's is Midnight Mutants'.
+
+The evidence is layout, not vibes. Both keep a 16-entry duration table
+immediately before 16 instrument records of 16 bytes; Midnight Mutants at
+`f6:$7734` and `f6:$7744`, Commando at `b6:$A941` and `b6:$A951`, sixteen bytes
+apart in both. Both end a pointer list with an entry whose high byte is zero.
+Both store patterns count-prefixed with fixed-size notes, and pack the note as
+an instrument in the high nibble of the first byte and a duration index in the
+low one. Both run the same five-stage envelope over an 8-bit volume
+accumulator whose high nibble reaches the chip.
+
+What differs is forced by the chip, and is worth stating because it is the
+part that does not transfer. TIA's AUDF is five bits wide, so Midnight Mutants
+has three bits going spare in its pitch byte and spends them on an index into
+a waveform table. POKEY's AUDF is the whole byte -- pitches here run from $00
+to $F3 -- so there is no room, and the control value comes from the instrument
+instead. `audc_from: instrument` selects that. Same idea, different budget.
+
+Two things that only a capture could have caught, both of which produced music
+that sounded fine:
+
+**POKEY keeps distortion in bits 7-5.** Reading the instrument's control byte
+with a four-bit shift instead of five turns $A0 into distortion $A, which does
+not exist, and every note comes out on the wrong waveform. Agreement with the
+hardware was 86.6% -- high enough to look like rounding error somewhere, low
+enough to be completely wrong.
+
+**A frame's byte belongs to the stage the envelope was in when the frame
+began.** Reading the stage after advancing it silences the timbre one frame
+early. That moved agreement from 99.1% to 99.2% and looked like a fix; it had
+actually shifted the error rather than removed it, which the frame-level diff
+showed and a percentage never would.
+
+With both corrected, song 0 matches the running machine on 576 of 576 frames
+across all four voices -- every AUDC, AUDF and volume, every frame. Song 1
+follows in the same capture at 94 of 96; the last two frames are the player
+cutting a note short to start what comes next, which is sequencing above the
+level a song describes.
+
+Eleven songs, 43 patterns, 1,398 notes, and a no-op push that changes zero
+bytes.
+
+## Hunting the engine, not the game
+
+Two format files took a long time each, because each meant reading a player's
+code. That does not scale to a library of 2,700 images, and it does not need
+to: the same engine turns up again and again. Midnight Mutants and Commando
+run the *same one*, and their duration tables are byte-for-byte identical --
+
+```
+60 48 40 30 24 20 18 12 10 0C 09 08 06 04 03 02
+```
+
+-- as are Alien Brigade's, Fatal Run's and Meltdown's. Atari-era houses shared
+their sound code, and this is what that looks like from the ROM side.
+
+`audiotrace.py --engine` searches for it structurally, so it works on a
+cartridge whose player the tracer never reaches:
+
+```
+python tools/audiotrace.py game.a78 --engine [--emit]
+
+  durations   b6:$A941   60 48 40 30 24 20 18 12 10 0C 09 08 06 04 03 02
+  instruments b6:$A951   16 x 16 bytes, 16 rows used
+  song table  b6:$B640   11 songs, 4 voices, stride 8
+  11 of them followed all the way down to real patterns
+```
+
+`--emit` writes the format file.
+
+### Why it is allowed to search at all
+
+Guessing at structure is how you produce a song from the wrong bytes that
+sounds like music. What makes this safe is that every step is checked against
+the next, and the chain is long:
+
+- Sixteen 16-byte instrument records whose **last six bytes are always zero**.
+- A **sixteen-entry duration table immediately before them**, every entry
+  non-zero and strictly descending. Sixteen bytes of anything else almost
+  never satisfies that.
+- A song table whose voice pointers reach **pointer lists ended by a
+  high-byte-zero entry**, whose entries are **count-prefixed patterns whose
+  counts fit inside the bank**.
+
+A wrong instrument table gives a duration table that is not descending. A
+wrong song table gives pointers that land on nothing. The search reports only
+what survives all of it, and says how many songs it followed the whole way
+down.
+
+The one thing it cannot find by shape is the **waveform table**: a TIA player
+spends the top three bits of its pitch byte on an index into eight arbitrary
+values sitting in the middle of instructions. Nothing about those bytes says
+"table". So it asks the tracer instead, which finds it the way the player
+reaches it -- `LDA table,X / STA AUDC0`. That is why both halves live in one
+file.
+
+### What came of it
+
+Five cartridges were put through the search and then checked against captures
+of themselves, which is the only thing that settles whether a description is
+right:
+
+| cartridge | agreement with the machine |
+|---|---|
+| Commando | 576/576 frames, all four voices |
+| Missing In Action | 2358/2358 frames |
+| Meltdown | 846/846 frames |
+| Fatal Run | 487/487 frames of pitch and waveform; 85.2% including volume |
+| Alien Brigade | 71% at best -- **not accepted** |
+
+Fatal Run's caveat is worth stating rather than rounding away. Its notes are
+exactly right; the shortfall is entirely in AUDV, because this engine's
+sustain stage writes no volume at all, so a sound effect playing over the
+music leaves holes in the recording. Midnight Mutants, whose description was
+confirmed long before any of this, behaves identically against its own capture
+-- 87.96% including volume, 96.79% on pitch and waveform. A capture with
+effects in it cannot score 100%, and treating that as a failure would reject
+two descriptions that are correct.
+
+Alien Brigade is the one that did not clear the bar, at 71% on pitch and
+waveform, and it is not in `formats/`. The search finds its instrument and
+duration tables confidently -- its duration table is byte-identical to the
+others -- so the engine is certainly there; something about the song table or
+the voice grouping is still wrong. A structurally valid table is not
+necessarily *the* table, which is the whole reason for checking against the
+machine rather than against itself.
+
+Three new format files came out of this, all fingerprinted by player so they
+cover the whole engine family rather than one image each.
+
+### Where it is uncertain, and how it says so
+
+**Which bank a pointer resolves against is runtime state.** On a bank-switched
+cartridge a track pointer in `$8000-$BFFF` means a different byte in every
+bank, and which one was mapped when the song started is not in the ROM. The
+search tries each and keeps one where every voice resolves -- but where more
+than one does, the choice is a coin flip, and a wrong bank does not fail. It
+produces a song, from the wrong bytes, that sounds like music.
+
+So it records which songs were ambiguous, in the format file, by number. On
+Midnight Mutants it chooses `{0:3, 3:0, 4:3, 5:4, 6:3}` against the
+hand-written `{0:3, 3:0, 4:3, 5:5, 6:3}` -- four of five right, and song 5,
+the one it got wrong, is one of the two it flagged.
+
+**Structure verified is not sound verified.** The emitted file says so, and
+names the command that settles it. Commando's hand-written description matches
+its hardware on 576 of 576 frames across four voices; the auto-generated one
+for the same cartridge pulls the identical 43 patterns and 1,398 notes and
+scores the same 100%. That is the standard, and nothing that has not been
+through it should be trusted further than a strong lead.
+
 ## A fourth reader, for what an ear can establish
 
 The three readers above describe *players*: where the song table sits, how a

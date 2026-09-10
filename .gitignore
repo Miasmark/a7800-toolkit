@@ -12,5 +12,10 @@ __pycache__/
 # is bundled.
 *.a78
 *.bin
+*.rom
+*.car
+*.atr
+*.atx
+*.xex
 
 .DS_Store
