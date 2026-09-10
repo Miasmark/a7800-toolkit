@@ -16,6 +16,7 @@ checks, and they are not softer.
 """
 import argparse
 import glob
+import hashlib
 import io
 import json
 import os
@@ -1293,6 +1294,829 @@ def t_disasm(rom):
     return "%d listings written" % len(listings)
 
 
+# ----------------------------------------------------------------- merged in
+# These seven come from the tree this toolkit was forked into for
+# the Karateka work. They cover the tools that arrived with them
+# -- a8dis, portscan, forth, patchset, portkit -- plus the two
+# guarantees those tools make: that a conversion recipe carries
+# coordinates and not content, and that a published patch carries
+# none of the cartridge it patches.
+
+
+def t_engine_finder():
+    """The engine hunter, against a cartridge built to have exactly one.
+
+    `audiotrace.py --engine` searches a cartridge for the Atari in-house music
+    engine by the shape of its tables. A search like that is only worth having
+    if a wrong answer is impossible rather than merely unlikely, so this builds
+    an image whose engine is at known addresses and checks all four are found.
+
+    Synthetic rather than a real cartridge, so the package stays ROM-free and
+    the test states the format instead of assuming a particular game.
+    """
+    import audiotrace
+
+    DUR = [0x60, 0x48, 0x40, 0x30, 0x24, 0x20, 0x18, 0x12,
+           0x10, 0x0C, 0x09, 0x08, 0x06, 0x04, 0x03, 0x02]
+    BASE, SIZE = 0x4000, 0x1000
+    DURS, INSTR = 0x4100, 0x4110
+    PAT_A, PAT_B = 0x4300, 0x4320
+    TRK_1, TRK_2 = 0x4400, 0x4410
+    SONGS = 0x4500
+
+    img = bytearray(SIZE)
+
+    def put(addr, data):
+        img[addr - BASE:addr - BASE + len(data)] = bytes(data)
+
+    def word(addr, value):
+        put(addr, [value & 0xFF, value >> 8])
+
+    put(DURS, DUR)
+    for k in range(16):
+        # ten bytes used, six of padding -- the shape the search keys on
+        put(INSTR + k * 16, [0xA0, 0x01, 0x80, 0x80, 0x05,
+                             0x02, 0x13, 0x01, 0x28, k + 1] + [0] * 6)
+    # Fence the table with words that cannot resolve, so its start and end are
+    # unambiguous. Without this the run can begin a couple of bytes early on
+    # padding, and -- because every song here has the same two pointers -- a
+    # four-voice reading of the same bytes validates just as well as the real
+    # two-voice one and outscores it. Real tables are not that uniform; a test
+    # image has to be fenced deliberately to stand in for that.
+    for a in range(0x44F0, 0x4500):
+        img[a - BASE] = 0xFF
+    put(PAT_A, [4] + [0x16, 0x60, 0x1B, 0x48, 0x1B, 0x48, 0x13, 0x55])
+    put(PAT_B, [3] + [0x1C, 0x23, 0x1C, 0x2A, 0x13, 0x90])
+    word(TRK_1, PAT_A)
+    word(TRK_1 + 2, PAT_B)
+    word(TRK_1 + 4, 0x0009)          # high byte zero ends the list
+    word(TRK_2, PAT_B)
+    word(TRK_2 + 2, 0x0000)
+    for n in range(6):               # six songs, two voices, stride 4
+        word(SONGS + n * 4, TRK_1)
+        word(SONGS + n * 4 + 2, TRK_2)
+    # Six two-voice songs is 24 bytes, which is three four-voice entries and a
+    # remainder -- so a four-voice reading runs into the fence after three and
+    # falls short of the minimum, while the two-voice reading gets all six.
+    for a in range(SONGS + 24, SONGS + 40):
+        img[a - BASE] = 0xFF
+
+    class FakeCart(object):
+        """One fixed space, which is all the search needs."""
+
+        def __init__(self, blob):
+            self.rom = bytes(blob)
+            self.info = {"title": "synthetic"}
+
+        def spaces(self):
+            return ["f0"]
+
+        def base_of(self, _sp):
+            return BASE
+
+        def size_of(self, _sp):
+            return SIZE
+
+        def pokeys(self):
+            return []
+
+        def byte(self, _sp, addr):
+            i = addr - BASE
+            if not 0 <= i < SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i]
+
+        def slice(self, _sp, addr, n):
+            i = addr - BASE
+            if i < 0 or i + n > SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i:i + n]
+
+        def space_of(self, addr, _bank=None):
+            return "f0" if BASE <= addr < BASE + SIZE else None
+
+    cart = FakeCart(img)
+    found = audiotrace.find_engine(cart)
+    if not found:
+        raise AssertionError("the engine hunter found nothing in an image "
+                             "built to contain exactly one")
+    for name, want, got in (("instruments", INSTR, found["instruments"]),
+                            ("durations", DURS, found["durations"]),
+                            ("song table", SONGS, found["songs"])):
+        if got != want:
+            raise AssertionError("%s found at $%04X, expected $%04X"
+                                 % (name, got, want))
+    if found["voices"] != 2 or found["stride"] != 4:
+        raise AssertionError("read %d voices at stride %d, expected 2 at 4"
+                             % (found["voices"], found["stride"]))
+    if found["verified"] < 6:
+        raise AssertionError("only %d of 6 songs followed down to patterns"
+                             % found["verified"])
+    if found["duration_values"] != DUR:
+        raise AssertionError("duration table read back wrong")
+
+    # ...and the format it writes must describe the same thing
+    doc = audiotrace.engine_format(cart, "synthetic.a78", found)
+    import songfmt
+    pulled = songfmt.pull(cart, doc)
+    if len(pulled["songs"]) != 6:
+        raise AssertionError("the emitted format pulls %d songs, not 6"
+                             % len(pulled["songs"]))
+    if set(pulled["patterns"]) != {"f0:%04X" % PAT_A, "f0:%04X" % PAT_B}:
+        raise AssertionError("the emitted format resolves the wrong patterns: "
+                             "%s" % sorted(pulled["patterns"]))
+    return ("engine located at its known addresses, and the format it emits "
+            "pulls the same songs back")
+
+
+def t_forth_decompiler():
+    """The Forth decompiler, against an image built to be one.
+
+    `forth.py` finds a threaded image's interpreter by shape -- the inner loop
+    every primitive jumps to, the routine that saves the thread pointer, the
+    one that restores it, the word that eats the following cell -- and then
+    walks the thread. All four have to be right together: get the literal
+    wrong and every number in the program decompiles as a call to whatever
+    address it happens to equal, which reads perfectly and means nothing.
+
+    So this assembles a small indirect-threaded image with a known kernel and
+    two known definitions, and checks the tool recovers all of it. Synthetic,
+    so the package stays ROM-free and the test states the format rather than
+    depending on one cartridge.
+    """
+    import forth
+
+    BASE, SIZE = 0x4000, 0x1000
+    IP = 0xE8
+    NEXT = 0x4000
+    DOCOL = 0x4030
+    BRTAIL = 0x4050          # IP += inline cell
+    SKIPTAIL = 0x4060        # IP += 2
+    LIT = 0x4070             # word; its code is at LIT+2
+    EXIT = 0x4080
+    BRANCH = 0x4090
+    ADD = 0x40A0             # an ordinary primitive
+    DEF1 = 0x4100
+    DEF2 = 0x4140
+
+    img = bytearray(b"\xFF" * SIZE)
+
+    def put(addr, data):
+        img[addr - BASE:addr - BASE + len(data)] = bytes(data)
+
+    def word(addr, v):
+        put(addr, [v & 0xFF, v >> 8])
+
+    # NEXT: LDY #1 / LDA (IP),Y / STA $EC / DEY / LDA (IP),Y / STA $EB
+    #       / CLC / LDA IP / ADC #2 / STA IP / BCC / INC IP+1 / JMP ($00EA)
+    put(NEXT, [0xA0, 0x01, 0xB1, IP, 0x85, 0xEC, 0x88, 0xB1, IP, 0x85, 0xEB,
+               0x18, 0xA5, IP, 0x69, 0x02, 0x85, IP, 0x90, 0x02, 0xE6, IP + 1,
+               0x4C, 0xEA, 0x00])
+    # DOCOL: LDA IP+1 / PHA / LDA IP / PHA / ... / JMP NEXT
+    put(DOCOL, [0xA5, IP + 1, 0x48, 0xA5, IP, 0x48, 0x18, 0xA5, 0xEB,
+                0x69, 0x02, 0x85, IP, 0x98, 0x65, 0xEC, 0x85, IP + 1,
+                0x4C, NEXT & 0xFF, NEXT >> 8])
+    # the two tails that mean "the next cell is data"
+    put(BRTAIL, [0x18, 0xB1, IP, 0x65, IP, 0x85, IP,
+                 0x4C, NEXT & 0xFF, NEXT >> 8])
+    put(SKIPTAIL, [0x18, 0xA5, IP, 0x69, 0x02, 0x85, IP,
+                   0x4C, NEXT & 0xFF, NEXT >> 8])
+    # LIT: reads through IP and steps it, then NEXT
+    word(LIT, LIT + 2)
+    put(LIT + 2, [0xB1, IP, 0x48, 0xE6, IP, 0xD0, 0x02, 0xE6, IP + 1,
+                  0x4C, NEXT & 0xFF, NEXT >> 8])
+    # EXIT: pulls the saved thread pointer back
+    word(EXIT, EXIT + 2)
+    put(EXIT + 2, [0x68, 0x85, IP, 0x68, 0x85, IP + 1,
+                   0x4C, NEXT & 0xFF, NEXT >> 8])
+    # BRANCH: jumps straight to the tail that adds the inline cell
+    word(BRANCH, BRANCH + 2)
+    put(BRANCH + 2, [0x4C, BRTAIL & 0xFF, BRTAIL >> 8])
+    # an ordinary primitive, which must NOT be read as taking a cell
+    word(ADD, ADD + 2)
+    put(ADD + 2, [0xB5, 0x00, 0x75, 0x02, 0x95, 0x02, 0xE8, 0xE8,
+                  0x4C, NEXT & 0xFF, NEXT >> 8])
+
+    # : DEF1  LIT 1234  ADD  DEF2  BRANCH <8>  EXIT ;
+    word(DEF1, DOCOL)
+    for i, cell in enumerate([LIT, 0x1234, ADD, DEF2, BRANCH, 0x0008, EXIT]):
+        word(DEF1 + 2 + i * 2, cell)
+    # : DEF2  ADD  EXIT ;
+    word(DEF2, DOCOL)
+    for i, cell in enumerate([ADD, EXIT]):
+        word(DEF2 + 2 + i * 2, cell)
+
+    class FakeCart(object):
+        def __init__(self, blob):
+            self.rom = bytes(blob)
+            self.info = {"title": "synthetic forth"}
+
+        def spaces(self):
+            return ["rom"]
+
+        def base_of(self, _s):
+            return BASE
+
+        def size_of(self, _s):
+            return SIZE
+
+        def byte(self, _s, addr):
+            i = addr - BASE
+            if not 0 <= i < SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i]
+
+        def slice(self, _s, addr, n):
+            i = addr - BASE
+            if i < 0 or i + n > SIZE:
+                raise IndexError("outside the image")
+            return self.rom[i:i + n]
+
+    cart = FakeCart(img)
+    im = forth.Image(cart, "rom").discover()
+
+    for name, want, got in (("NEXT", NEXT, im.next), ("DOCOL", DOCOL, im.docol),
+                            ("EXIT", EXIT, im.exit), ("literal", LIT, im.lit)):
+        if got != want:
+            raise AssertionError("%s found at %s, expected $%04X"
+                                 % (name, ("$%04X" % got) if got else "nothing",
+                                    want))
+    if im.ip_pointer() != IP:
+        raise AssertionError("thread pointer read as $%02X, expected $%02X"
+                             % (im.ip_pointer() or 0, IP))
+
+    # the branch must be seen to eat a cell, and the ordinary word must not
+    if not im.is_branch(BRANCH):
+        raise AssertionError("the branch was not recognised as taking an "
+                             "inline cell, so its destination decompiles as a "
+                             "call")
+    if im.is_branch(ADD):
+        raise AssertionError("an ordinary primitive was read as taking an "
+                             "inline cell, which swallows the word after it")
+
+    cells = im.body(DEF1)
+    kinds = [(c, k) for _a, c, k in cells]
+    want = [(LIT, "word"), (0x1234, "data"), (ADD, "word"), (DEF2, "word"),
+            (BRANCH, "word"), (0x0008, "data"), (EXIT, "word")]
+    if kinds != want:
+        raise AssertionError("the definition decompiled as %r, expected %r"
+                             % (kinds, want))
+
+    defs = im.definitions()
+    if DEF1 not in defs or DEF2 not in defs:
+        raise AssertionError("found definitions %s, expected both $%04X and "
+                             "$%04X" % (["$%04X" % d for d in defs], DEF1, DEF2))
+    callers = im.xref(defs)
+    if callers.get(DEF2) != [DEF1]:
+        raise AssertionError("cross-reference says $%04X is named by %s, "
+                             "expected [$%04X]"
+                             % (DEF2, callers.get(DEF2), DEF1))
+    if im.kind_of(DEF1) != "colon" or im.kind_of(ADD) != "code":
+        raise AssertionError("a definition and a primitive were not told apart")
+
+    return ("interpreter located by shape, thread walked, literals and branch "
+            "destinations kept out of the word stream")
+
+
+def t_a8dis():
+    """The 8-bit cartridge tracer, against a cartridge built to a known answer.
+
+    Two bugs made this worth pinning down, and both were silent rather than
+    loud. An implied-mode instruction has no operand, and the walk treated the
+    missing operand as running off the end of the window -- so every trace
+    stopped at the first INY and reported it as data. And the bank peephole
+    (LDA #n / STA $D500) is what lets the tracer follow code into a paged bank
+    at all; when it misses, the trace simply stays small and looks honest.
+
+    So the fixture is a cartridge that requires both: it switches banks, then
+    runs an implied instruction before touching anything. If either mechanism
+    breaks, the reached-byte count collapses and the hardware list empties.
+
+    It also checks that a register is named for what the instruction does to
+    it. $D010 written is GRAFP; $D010 read is TRIG0. Reporting a button poll
+    as a write to player graphics is the kind of wrong that sends someone
+    reading the wrong routine for an afternoon.
+    """
+    import a8dis
+
+    BANK = a8dis.BANK_SIZE
+    rom = bytearray(BANK * 16)
+
+    # bank 3, at $8000 once selected
+    prog = bytes([
+        0xC8,                    # INY          -- implied; used to end the walk
+        0xAD, 0x00, 0xD2,        # LDA $D200    -- POKEY AUDF1 read
+        0xAD, 0x10, 0xD0,        # LDA $D010    -- TRIG0 (a read)
+        0x8D, 0x10, 0xD0,        # STA $D010    -- GRAFP (a write)
+        0x60,                    # RTS
+    ])
+    rom[3 * BANK:3 * BANK + len(prog)] = prog
+
+    # bank 15 is fixed at $A000-$BFFF; the start vector lands at $B000
+    boot = bytes([
+        0xA9, 0x03,              # LDA #$03
+        0x8D, 0x00, 0xD5,        # STA $D500    -- select bank 3
+        0x4C, 0x00, 0x80,        # JMP $8000
+    ])
+    f = 15 * BANK
+    rom[f + 0x1000:f + 0x1000 + len(boot)] = boot
+    rom[f + 0x1FE0] = 0x60                       # init: RTS
+    rom[f + 0x1FFA:f + 0x2000] = bytes([0x00, 0xB0, 0x00, 0x04, 0xE0, 0xBF])
+
+    cart = a8dis.Cart(b"CART" + b"\x00\x00\x00\x0E" + b"\x00" * 8 + bytes(rom))
+    if cart.banks != 16 or cart.fixed != 15:
+        raise AssertionError("bank geometry read wrong: %d banks, fixed %d"
+                             % (cart.banks, cart.fixed))
+    v = cart.vectors()
+    if v["start"] != 0xB000 or v["init"] != 0xBFE0:
+        raise AssertionError("cartridge footer misread: start $%04X init $%04X"
+                             % (v["start"], v["init"]))
+
+    t = a8dis.walk(cart, [(0, v["start"], "start"), (0, v["init"], "init")])
+
+    if not any(s["to"] == 3 for s in t.switches):
+        raise AssertionError(
+            "the bank switch was not read back; without it the tracer cannot "
+            "follow code into a paged bank at all")
+    # every instruction of the fixture, at the address it was placed at. The
+    # bank-3 byte count would also cover the JMP that follows the switch, so
+    # the addresses are checked rather than the total.
+    want = [0x8000, 0x8001, 0x8004, 0x8007, 0x800A]
+    missing = [a for a in want if (3, a) not in t.code]
+    if missing:
+        raise AssertionError(
+            "never reached %s -- the walk stopped early, which is what the "
+            "implied-operand bug looked like"
+            % " ".join("$%04X" % a for a in missing))
+    if t.bailed:
+        raise AssertionError("the walk bailed on %s, and every instruction in "
+                             "the fixture is legal" % (t.bailed,))
+
+    names = {(h["op"], a8dis.reg_name(h["name"], h["write"])) for h in t.hw}
+    if ("LDA", "TRIG0") not in names:
+        raise AssertionError("a read of $D010 was not named TRIG0: %s" % names)
+    if ("STA", "GRAFM/GRAFP") not in names:
+        raise AssertionError("a write to $D010 was not named GRAFP: %s" % names)
+
+    return ("bank switch followed, implied instructions do not end the walk, "
+            "%d hardware accesses named by direction" % len(t.hw))
+
+
+def t_patchset():
+    """The patch-set format, against a cartridge invented for the purpose.
+
+    Four things have to hold, and each is a way the format could look fine and
+    be wrong:
+
+    **A float finds real free space and everything that calls it learns where.**
+    The whole reason floats exist is that a hardcoded address goes stale. This
+    checks the blob lands inside the declared free run, that the byte after the
+    run is untouched, and that the JSR operand which held a placeholder now
+    holds the address actually chosen.
+
+    **Two settings of one knob are refused.** Not applied in file order, which
+    is what a plain stack of BPS files does, and which produces a ROM that is
+    neither.
+
+    **A header is carried through untouched.** The same body ships headered and
+    bare; a bundle that only works on one of them is half a bundle.
+
+    **Applying in two goes equals applying in one.** This is the claim that
+    makes per-section checksums worth having: a ROM already patched elsewhere
+    is still a valid target for an option whose own bytes nobody has touched.
+    If those two paths ever diverge, the sections are not independent and the
+    format is lying.
+    """
+    import json
+    import zipfile
+    import bps
+    import patchset
+
+    # A cartridge: code at 0, a JSR with a placeholder operand, a run of free
+    # space, and a byte just past it that must survive.
+    rom = bytearray(0x400)
+    rom[0x00:0x08] = b"\xA9\x01\x20\xFF\xFF\x60\xEA\xEA"   # JSR $FFFF
+    rom[0x10:0x18] = bytes(range(0x10, 0x18))
+    rom[0x20:0x28] = b"\x08\x08\x08\x08\x08\x08\x08\x08"
+    rom[0x340] = 0x99                                       # just past the free run
+    body = bytes(rom)
+
+    def sec(at, n):
+        return {"addr": "0x%04X" % at, "length": n,
+                "crc32": "0x%08X" % patchset.crc32(body[at:at + n])}
+
+    sections = {"s_0000": sec(0, 8), "s_0010": sec(0x10, 8),
+                "s_0020": sec(0x20, 8)}
+
+    def patch(at, n, edit):
+        before = body[at:at + n]
+        after = bytearray(before)
+        edit(after)
+        return bps.create(bytes(before), bytes(after))
+
+    files = {
+        "p/loud.s_0010.bps": patch(0x10, 8, lambda b: b.__setitem__(0, 0xAA)),
+        "p/quiet.s_0010.bps": patch(0x10, 8, lambda b: b.__setitem__(0, 0xBB)),
+        "p/routine.s_0020.bps": patch(0x20, 8, lambda b: b.__setitem__(7, 0x60)),
+        "f/helper.bin": b"\xEE" * 12,
+    }
+    manifest = {
+        "format": patchset.FORMAT,
+        "name": "test",
+        "target": {"body_size": len(body), "headers": [0, 16], "base": "0x0000",
+                   "body_sha256": hashlib.sha256(body).hexdigest(),
+                   "anchors": [{"addr": "0x0030", "length": 16,
+                                "crc32": "0x%08X"
+                                         % patchset.crc32(body[0x30:0x40])}]},
+        "knobs": {"volume": "how loud"},
+        "sections": sections,
+        "options": [
+            {"id": "loud", "knob": "volume", "title": "loud",
+             "patches": {"s_0010": "p/loud.s_0010.bps"}},
+            {"id": "quiet", "knob": "volume", "title": "quiet",
+             "patches": {"s_0010": "p/quiet.s_0010.bps"}},
+            {"id": "routine", "title": "a routine that needs somewhere to live",
+             "patches": {"s_0020": {"bps": "p/routine.s_0020.bps"}},
+             "floats": [{"id": "helper", "length": 12, "fill": 0, "from": "end",
+                         "blob": "f/helper.bin",
+                         "search": [{"addr": "0x0300", "length": 0x40}],
+                         "fixups": [{"addr": "0x0003", "encode": "abs16",
+                                     "expect": "0xFFFF"}]}]},
+        ],
+    }
+    out = os.path.join(tempfile.mkdtemp(prefix="patchset-"), "t.patchset")
+    patchset.write_bundle(out, manifest, files)
+    ps = patchset.PatchSet(out)
+
+    # 1. the float finds room, and the caller learns where
+    got = ps.apply(body, ["routine"])
+    where = got[3] | (got[4] << 8)
+    if not (0x300 <= where <= 0x340 - 12):
+        raise AssertionError("the float landed at $%04X, outside the free run "
+                             "it was told to search" % where)
+    if got[where:where + 12] != b"\xEE" * 12:
+        raise AssertionError("the float's bytes are not at the address the "
+                             "fixup was given")
+    if got[0x340] != 0x99:
+        raise AssertionError("the float overran the free range")
+    if got[0x27] != 0x60:
+        raise AssertionError("the section patch did not apply")
+
+    # 2. two settings of one knob is a choice, not an order of application
+    try:
+        ps.apply(body, ["loud", "quiet"])
+    except patchset.PatchSetError as e:
+        if "alternative" not in str(e):
+            raise AssertionError("refused for the wrong reason: %s" % e)
+    else:
+        raise AssertionError(
+            "two settings of one knob were applied one after the other, which "
+            "produces a ROM that is neither")
+
+    # 3. a header rides along untouched
+    headered = b"\x7F" * 16 + body
+    out2 = ps.apply(headered, ["loud"])
+    if out2[:16] != b"\x7F" * 16 or len(out2) != len(headered):
+        raise AssertionError("the header was not carried through intact")
+    if out2[16 + 0x10] != 0xAA:
+        raise AssertionError("the body was located at the wrong offset")
+
+    # 4. one go and two goes agree
+    both = ps.apply(body, ["loud", "routine"])
+    step = ps.apply(ps.apply(body, ["routine"]), ["loud"])
+    if both != step:
+        raise AssertionError(
+            "applying two options together and one after the other gave "
+            "different ROMs, so the sections are not independent")
+
+    # 5. an option already on the cartridge is recognised, not refused
+    once = ps.apply(body, ["loud"])
+    if ps.option_state(bytearray(once), "loud") != "applied":
+        raise AssertionError(
+            "a cartridge that plainly has this option was not recognised as "
+            "having it, so applying twice would look like damage")
+    twice = ps.apply(once, ["loud"])
+    if twice != once:
+        raise AssertionError("applying an option twice changed the ROM the "
+                             "second time; it is not idempotent")
+
+    # 6. and the anchors identify the game whether or not it is pristine
+    if not ps.pristine and ps.find_body(once)[1] is None:
+        raise AssertionError("unreachable")
+    ps.find_body(once)
+    if ps.pristine:
+        raise AssertionError("a patched ROM was reported as the pristine dump")
+    wrong = bytearray(body)
+    wrong[0x30] ^= 0xFF                      # break an anchor
+    try:
+        ps.find_body(bytes(wrong))
+    except patchset.PatchSetError as e:
+        if "anchor" not in str(e):
+            raise AssertionError("refused for the wrong reason: %s" % e)
+    else:
+        raise AssertionError(
+            "a cartridge failing an anchor was accepted; anchors are what "
+            "identify the target once a whole-file hash cannot")
+
+    # 7. a dependency nobody declared, read out of the patches themselves
+    #
+    # "louder" is authored on top of "loud": its patch starts from the bytes
+    # loud leaves behind. Nothing says so in the manifest -- the BPS headers
+    # say it, because one patch's source CRC is the other's target CRC.
+    loud_out = bytearray(body[0x10:0x18])
+    loud_out[0] = 0xAA
+    louder = bytearray(loud_out)
+    louder[1] = 0xCC
+    files2 = dict(files)
+    files2["p/louder.s_0010.bps"] = bps.create(bytes(loud_out), bytes(louder))
+    orphan = bytearray(body[0x20:0x28])
+    orphan[0] = 0x77                      # a state nothing in the bundle makes
+    files2["p/orphan.s_0020.bps"] = bps.create(
+        bytes(orphan), bytes(bytearray(b"" * 8)))
+    m2 = json.loads(json.dumps(manifest))
+    m2["options"].append({"id": "louder", "title": "louder still",
+                          "patches": {"s_0010": "p/louder.s_0010.bps"}})
+    m2["options"].append({"id": "orphan", "title": "built on nothing here",
+                          "patches": {"s_0020": "p/orphan.s_0020.bps"}})
+    out2 = os.path.join(tempfile.mkdtemp(prefix="patchset-"), "t2.patchset")
+    patchset.write_bundle(out2, m2, files2)
+    ps2 = patchset.PatchSet(out2)
+
+    derived, unknown = ps2.derived_requires()
+    if derived.get("louder") != {"loud"}:
+        raise AssertionError(
+            "the dependency of louder on loud is written in the two patches' "
+            "CRCs and was not found: %r" % (derived.get("louder"),))
+    if derived.get("loud"):
+        raise AssertionError("loud starts from the pristine bytes and should "
+                             "need nothing: %r" % (derived["loud"],))
+    if "orphan" not in unknown:
+        raise AssertionError(
+            "a patch starting from a state nothing in the bundle produces was "
+            "not flagged; it can never apply and should say so")
+
+    # asking for louder alone brings loud along, in the right order
+    chained = ps2.apply(body, ["louder"])
+    if chained[0x10] != 0xAA or chained[0x11] != 0xCC:
+        raise AssertionError(
+            "louder was applied without loud beneath it, so the derived "
+            "dependency was found and then ignored")
+    try:
+        ps2.apply(body, ["orphan"])
+    except patchset.PatchSetError as e:
+        if "bundle does not describe" not in str(e):
+            raise AssertionError("refused for the wrong reason: %s" % e)
+    else:
+        raise AssertionError("an option built on an unknown state applied")
+
+    # 8. one patch across several sections
+    #
+    # Six two-byte edits scattered over a ROM are one change, not six. A span
+    # is the sections concatenated in address order, so the BPS is one delta
+    # with one pair of checksums -- and the pre-image of a span cannot be
+    # worked out from the sections' own CRCs, so it has to be stated.
+    span_before = body[0x00:0x08] + body[0x10:0x18]
+    span_after = bytearray(span_before)
+    span_after[1] = 0x42
+    span_after[9] = 0x43
+    files3 = dict(files)
+    files3["p/wide.bps"] = bps.create(bytes(span_before), bytes(span_after))
+    m3 = json.loads(json.dumps(manifest))
+    m3["options"] = [o for o in m3["options"] if o["id"] == "loud"]
+    m3["options"].append({
+        "id": "wide", "title": "one patch, two sections",
+        "patches": [{"sections": ["s_0010", "s_0000"], "bps": "p/wide.bps",
+                     "before": "0x%08X" % patchset.crc32(bytes(span_before))}]})
+    out3 = os.path.join(tempfile.mkdtemp(prefix="patchset-"), "t3.abp")
+    patchset.write_bundle(out3, m3,
+                          {k: v for k, v in files3.items()
+                           if k in ("p/loud.s_0010.bps", "p/wide.bps")})
+    ps3 = patchset.PatchSet(out3)
+    wide = ps3.apply(body, ["wide"])
+    if wide[0x01] != 0x42 or wide[0x11] != 0x43:
+        raise AssertionError(
+            "a patch spanning two sections did not reach both of them")
+    if wide[0x08:0x10] != body[0x08:0x10]:
+        raise AssertionError(
+            "the span wrote over the gap between its two sections; the pieces "
+            "are concatenated for the delta, not treated as one extent")
+    if ps3.option_state(bytearray(wide), "wide") != "applied":
+        raise AssertionError("a span was not recognised as already applied")
+
+    m4 = json.loads(json.dumps(m3))
+    del m4["options"][-1]["patches"][0]["before"]
+    out4 = os.path.join(tempfile.mkdtemp(prefix="patchset-"), "t4.abp")
+    patchset.write_bundle(out4, m4,
+                          {k: v for k, v in files3.items()
+                           if k in ("p/loud.s_0010.bps", "p/wide.bps")})
+    try:
+        patchset.PatchSet(out4).apply(body, ["wide"])
+    except patchset.PatchSetError as e:
+        if "before" not in str(e):
+            raise AssertionError("refused for the wrong reason: %s" % e)
+    else:
+        raise AssertionError(
+            "a multi-section span with no stated pre-image was accepted, so "
+            "nothing could tell whether it had been applied")
+
+    # 9. two options that differ only inside a float stay distinguishable
+    #
+    # Sections cover the code that calls a float; nothing covers the float. Two
+    # knockback strengths have byte-identical call sites and blobs differing in
+    # one operand, so on sections alone each reports "already applied" about a
+    # cartridge carrying the other. The fixup wrote the address down, so the
+    # blob can be checked where it actually landed.
+    m5 = json.loads(json.dumps(manifest))
+    m5["options"] = [o for o in m5["options"] if o["id"] == "routine"]
+    m5["knobs"]["strength"] = "how hard"
+    files5 = {"p/routine.s_0020.bps": files["p/routine.s_0020.bps"],
+              "f/helper.bin": bytes([0xEE]) * 12,
+              "f/helper2.bin": bytes([0xEF]) * 12}
+    m5["options"][0]["knob"] = "strength"
+    m5["options"][0]["floats"][0]["crc32"] = ("0x%08X"
+        % patchset.crc32(files5["f/helper.bin"]))
+    other = json.loads(json.dumps(m5["options"][0]))
+    other["id"] = "routine2"
+    other["floats"][0]["blob"] = "f/helper2.bin"
+    other["floats"][0]["crc32"] = ("0x%08X"
+        % patchset.crc32(files5["f/helper2.bin"]))
+    m5["options"].append(other)
+    out5 = os.path.join(tempfile.mkdtemp(prefix="patchset-"), "t5.abp")
+    patchset.write_bundle(out5, m5, files5)
+    ps5 = patchset.PatchSet(out5)
+    done = bytearray(ps5.apply(body, ["routine"]))
+    if ps5.option_state(done, "routine") != "applied":
+        raise AssertionError("an option was not recognised as applied")
+    if ps5.option_state(done, "routine2") == "applied":
+        raise AssertionError(
+            "an option whose float is not the one on the cartridge reported "
+            "itself already applied; applying it would look like a no-op and "
+            "silently leave the other one in place")
+
+    return ("floats placed in real free space with their callers fixed up, "
+            "alternatives refused, headers preserved, incremental "
+            "application converges, already-applied options recognised, and "
+            "anchors identify the target, and a dependency written only in "
+            "two patches' checksums is found and honoured, and one patch "
+            "can span several sections, and two options differing only "
+            "inside a float stay apart")
+
+
+def t_portkit_refuses_payload():
+    """A conversion recipe must carry coordinates, never content.
+
+    `portkit.py` exists because a BPS patch cannot express a build that draws
+    on two sources: the delta from a 7800 cartridge to a conversion using Atari
+    8-bit artwork would contain all of that artwork, so the "patch" would be a
+    redistribution wearing a diff's clothes. A recipe avoids that by holding
+    only hashes, offsets and lengths -- and that only holds while nobody
+    embeds "just one table" inline.
+
+    So the rule is enforced in code, and this checks the enforcement works in
+    both directions: it fires on embedded data, and it does not fire on an
+    ordinary recipe. A guard that cannot be shown to trip is decoration.
+    """
+    import base64
+    import json
+    import portkit
+
+    good = {
+        "name": "test",
+        "sources": {"disk": {"what": "a disk", "sha256": "00" * 32}},
+        "regions": {"art": {"from": "disk", "sector": 10, "sectors": 2,
+                            "sha256": "11" * 32, "what": "some artwork"}},
+        "new": ["src/main.s"],
+    }
+    path = os.path.join(tempfile.gettempdir(), "portkit-good.json")
+    with io.open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(good))
+    portkit.load_recipe(path)          # must not raise
+
+    for key in ("data", "bytes", "payload", "base64", "hex"):
+        bad = json.loads(json.dumps(good))
+        bad["regions"]["art"][key] = base64.b64encode(b"\xAA" * 400).decode()
+        p2 = os.path.join(tempfile.gettempdir(), "portkit-bad.json")
+        with io.open(p2, "w", encoding="utf-8") as f:
+            f.write(json.dumps(bad))
+        try:
+            portkit.load_recipe(p2)
+        except portkit.RecipeError:
+            continue
+        raise AssertionError(
+            "a recipe carrying %d bytes under %r was accepted; the rule that "
+            "makes this safe to publish is not being enforced"
+            % (400, key))
+
+    # a long prose note is not payload, and must still be allowed
+    wordy = json.loads(json.dumps(good))
+    wordy["note"] = "why this exists. " * 40
+    p3 = os.path.join(tempfile.gettempdir(), "portkit-wordy.json")
+    with io.open(p3, "w", encoding="utf-8") as f:
+        f.write(json.dumps(wordy))
+    portkit.load_recipe(p3)
+
+    return ("a recipe carrying embedded data is refused under every name "
+            "tried, and ordinary recipes still load")
+
+
+def t_dist_carries_no_rom():
+    """The published patches must not smuggle the cartridge out with them.
+
+    `dist/` is the one directory in this repository that holds build output,
+    and it holds it because both formats there are meant to travel without
+    the game. That is a claim about bytes, so it is checked rather than
+    believed -- the same standard `recipes carry no payload` holds
+    `portkit.py` to.
+
+    For a BPS the question is what its literals are. The encoder emits a
+    literal only for a run that differs from the source, so in principle
+    every stored byte is the patch author's; this confirms it by decoding
+    each patch and comparing every literal against the original at the same
+    address. One match would mean a byte of the game riding along.
+
+    For the patch set the question is different, because it stores whole
+    blobs. Its sections must describe their pre-image with a CRC32 and never
+    quote it, and its float blobs -- code with no fixed home -- must be
+    authored rather than lifted, so none of them may appear anywhere in the
+    cartridge.
+
+    Skips without a dump, like the other cartridge-dependent checks: with no
+    original to compare against there is nothing to be sure of.
+    """
+    import json
+    import zipfile
+
+    root = os.path.dirname(HERE)
+    dist = os.path.join(root, "dist")
+    if not os.path.isdir(dist):
+        return None
+
+    import importlib.util
+    kp = os.path.join(root, "patches", "karateka.py")
+    if not os.path.exists(kp):
+        return None
+    spec = importlib.util.spec_from_file_location("karateka_dist", kp)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        _src, _hdr, orig = mod.load_source()
+    except SystemExit:
+        return None
+
+    sys.path.insert(0, HERE)
+    import bps as bpsmod
+
+    literals = leaked = 0
+    for name in sorted(os.listdir(dist)):
+        if not name.endswith(".bps"):
+            continue
+        patch = io.open(os.path.join(dist, name), "rb").read()
+        h = bpsmod.read_header(patch)
+        i, pos = h["actions_at"], 0
+        while i < h["body_end"]:
+            v, i = bpsmod.decode_number(patch, i)
+            act, ln = v & 3, (v >> 2) + 1
+            if act == bpsmod.SOURCE_READ:
+                pos += ln
+            elif act == bpsmod.TARGET_READ:
+                for k in range(ln):
+                    literals += 1
+                    if pos + k < len(orig) and orig[pos + k] == patch[i + k]:
+                        leaked += 1
+                i += ln
+                pos += ln
+            else:
+                _o, i = bpsmod.decode_number(patch, i)
+                pos += ln
+    if leaked:
+        raise AssertionError(
+            "%d of %d literal bytes in dist/*.bps are the original "
+            "cartridge's own; these patches are not safe to publish"
+            % (leaked, literals))
+
+    abp = os.path.join(dist, "karateka.abp")
+    if os.path.exists(abp):
+        z = zipfile.ZipFile(abp)
+        man = json.loads(z.read("patchset.json"))
+        rows = man["sections"]
+        rows = rows if isinstance(rows, list) else list(rows.values())
+        for r in rows:
+            for k, v in r.items():
+                if k != "crc32" and isinstance(v, str) and len(v) >= 8 \
+                        and all(c in "0123456789abcdefABCDEF" for c in v):
+                    raise AssertionError(
+                        "section %r stores what looks like byte data in %r; "
+                        "sections must carry a CRC32 of the pre-image, not "
+                        "the pre-image" % (r.get("what", "?"), k))
+        for n in z.namelist():
+            if n.startswith("f/") and z.read(n) in orig:
+                raise AssertionError(
+                    "float blob %s appears verbatim in the cartridge, so it "
+                    "is lifted rather than authored" % n)
+
+    return "%d literal bytes across dist/, none of them the cartridge's" % literals
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__.strip().split("\n")[0],
@@ -1328,6 +2152,12 @@ def main():
     r.check("browser page scripts", t_browser_js)
     r.check("click handlers", t_handler_attributes)
     r.check("saved readings", t_direct_format)
+    r.check("engine finder", t_engine_finder)
+    r.check("forth decompiler", t_forth_decompiler)
+    r.check("8-bit cartridge tracer", t_a8dis)
+    r.check("patch sets", t_patchset)
+    r.check("recipes carry no payload", t_portkit_refuses_payload)
+    r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)

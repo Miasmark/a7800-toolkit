@@ -152,14 +152,21 @@ def pull(cart, fmt):
            "durations": durations, "waveforms": waveforms,
            "instruments": instruments,
            "engine": fmt.get("instruments", {}).get("engine"),
+           "audc_from": fmt.get("audc_from"),
            "instrument_fields": fmt.get("instruments", {}).get("fields"),
            "patterns": {}, "songs": []}
 
+    titles = songs_cfg.get("titles") or {}
     for n in range(songs_cfg["count"]):
         base = taddr + n * stride
         bank = banks.get(n)
+        # What a song *is* -- the title theme, the death jingle -- cannot be
+        # recovered from the bytes by any amount of analysis. Somebody has to
+        # play the game and say. When they have, it belongs in the format file
+        # beside everything else that was worked out, because the next person
+        # otherwise starts from "song 7".
         song = {"n": n, "bank": bank, "at": "%s:%04X" % (tsp, base),
-                "voices": []}
+                "title": titles.get(str(n)), "voices": []}
         for vi, off in enumerate(songs_cfg["voice_ptr"]):
             ptr = r.word(tsp, base + off, "song %d voice %d pointer" % (n, vi))
             voice = {"pointer": "$%04X" % ptr, "order": [], "terminator": None}
@@ -683,8 +690,17 @@ def render(songs, n):
     durations = songs.get("durations")
     waves = songs.get("waveforms")
     instruments = songs.get("instruments")
-    for need, what in ((durations, "durations"), (waves, "waveforms"),
-                       (instruments, "instruments")):
+    # Where a note's AUDC comes from is a property of the player, not a
+    # constant. Midnight Mutants spends three bits of the pitch byte on an
+    # index into a waveform table -- it can afford to, because TIA's AUDF is
+    # only five bits wide. A POKEY player has no spare bits: AUDF is the whole
+    # byte, so the control value comes from the instrument instead. Both are
+    # "a note names its timbre"; they differ in where the room was found.
+    from_instrument = songs.get("audc_from") == "instrument"
+    needed = [(durations, "durations"), (instruments, "instruments")]
+    if not from_instrument:
+        needed.append((waves, "waveforms"))
+    for need, what in needed:
         if not need:
             raise FormatError(
                 "this song carries no %s table, so it cannot be rendered. Pull "
@@ -709,12 +725,41 @@ def render(songs, n):
                 length = durations[note["duration"] % len(durations)]
                 rest = note.get("rest")
                 audf = 0 if rest else note["pitch"]
-                audc = 0 if rest else waves[note["waveform"] % len(waves)] & 0x0F
+                if rest:
+                    audc = 0
+                elif from_instrument:
+                    # POKEY keeps distortion in bits 7-5 of AUDC and volume in
+                    # 3-0, so the instrument's control byte shifts down by five
+                    # -- $A0 is distortion 5, $80 is 4. Shifting by four
+                    # instead reads $A as a distortion that does not exist and
+                    # every note comes out on the wrong waveform, which is
+                    # audible but not obviously a bug: it still plays a tune.
+                    row = instruments[note["instrument"] % len(instruments)]
+                    flags = row[fields["flags"]]
+                    audc = ((flags >> 5) & 7 if is_pokey(chip)
+                            else (flags >> 4) & 0x0F)
+                else:
+                    audc = waves[note["waveform"] % len(waves)] & 0x0F
                 v = env.note_on(note["instrument"], rest)
-                frames.append((audc, audf, v))
+                # On POKEY the timbre and the volume share one register, so
+                # what the player writes when a note finishes is the whole
+                # byte as zero -- distortion included -- and not the timbre at
+                # volume nil. A note whose release merely decays to zero keeps
+                # its distortion, so this turns on the envelope's *stage* and
+                # not on the volume being zero: the capture has 961 frames at
+                # volume zero that still carry distortion 5.
+                off = 4 if from_instrument else None
+                frames.append((0 if env.state == off else audc, audf, v))
                 for _ in range(length - 1):
+                    # The byte a frame writes belongs to the stage the
+                    # envelope was in when the frame began; `tick` advances
+                    # the stage at the end. Reading it afterwards silences the
+                    # timbre one frame early -- which looked like a fix,
+                    # because it moved the error rather than removing it.
+                    was = env.state
                     v2 = env.tick()
-                    frames.append((audc, audf, v if v2 is None else v2))
+                    frames.append((0 if was == off else audc, audf,
+                                   v if v2 is None else v2))
                     if v2 is not None:
                         v = v2
         tracks.append(frames)
@@ -938,6 +983,12 @@ def main():
         print("%s" % songs["format"])
         print("  %d songs, %d patterns, %d notes"
               % (len(songs["songs"]), n_pats, n_notes))
+        named = [s2 for s2 in songs["songs"] if s2.get("title")]
+        if named:
+            for s2 in named:
+                live = sum(1 for v in s2["voices"] if v["order"])
+                print("     song %-2d %d voices  %s"
+                      % (s2["n"], live, s2["title"]))
         print("  %d pattern references -- %d patterns are shared, and editing "
               "one\n     changes every song that names it" % (n_refs, shared))
         print("  claims %d bytes of the image in %d spans"

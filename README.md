@@ -95,6 +95,46 @@ emulator section is worth reading before you write any probe.
 | `mktone.py` | Builds a cartridge that holds one POKEY setting forever — a controlled single-tone oracle for checking the sound model against a real emulator, since comparing against a game's own audio measures the comparison more than the model. |
 | `bps.py` | BPS patches. Build them headerless. |
 | `mksite.py` | Packs generated pages into self-contained HTML. |
+| `a8dis.py` | Trace an Atari 8-bit cartridge by following its code rather than sweeping it, and reconstruct the RAM it builds. Karateka's XEGS cartridge is a disk that happens to be silicon: a 22-instruction loader copies whole 8K banks into RAM and jumps there, so a trace of the ROM reaches 75 bytes and leaves. `--overlays` shows which banks each scene loads, `--scene N` rebuilds that address space and traces the real game inside it, and `--frame` prints what the game does every vertical blank -- which is the comparison that matters against the 7800 version. |
+| `atx.py` | Read an ATX floppy image -- the format protected Atari 8-bit disks circulate in, which keeps each sector's angular position and error flags so copy protection survives. Takes the good copy of each sector, exports a plain ATR other tools read, shows the boot record, and extracts files when the disk has a directory -- saying so plainly when it does not, which for a self-booting game is the usual answer. |
+| `forth.py` | Decompile an indirect-threaded Forth image out of a cartridge. Some 7800 games are not 6502 programs -- Karateka is a Forth program with an interpreter underneath, which is why a tracing disassembler reaches 173 instructions in a 48K ROM and stops. This finds the interpreter by shape (the loop every primitive returns to, the routines that save and restore the thread pointer, the word that eats the following cell) and walks the thread: `--at` decompiles a definition, `--callers` says who names a word, `--map` summarises. It recovers structure, not names -- a shipped Forth has no dictionary. |
+| `patchset.py` | A bundle of patches you can pick from, checked a section at a time. A BPS is a delta between two whole files with a CRC of each, which is the wrong shape for "here are nine independent fixes, take the ones you want": nine fixes are 512 combinations, a whole-file CRC refuses a dump whose header differs, and two patches touching the same bytes apply cleanly and silently produce a ROM that is neither. Nothing standard covers this -- VCDIFF's windows are chosen by the compressor, NINJA and BPM bundle patches for several *files*, PPF validates one hardcoded block. So a patch set names **sections** (a byte range plus the CRC32 of its pre-image, so applying checks 168 bytes rather than 49152), **knobs** (two options turning the same one are alternatives and asking for both is refused rather than resolved by file order), and **floats** (code with no fixed home: the bundle says how much room it needs and where to look, the patcher finds a run of free bytes, and every call site learns the address it chose). Headers are handled by identifying the body rather than the file, so headered and bare dumps take the same bundle -- and because sections stand alone, a ROM already patched elsewhere is still a valid target for whatever nobody has touched. |
+| `portkit.py` | Ship a conversion as a recipe rather than as a copy. A BPS patch is a delta between two files, which breaks the moment the output draws on a second source: a 7800 build using Atari 8-bit artwork would carry every one of those bytes inside the "patch". So this ships coordinates instead -- which images are needed (by SHA-256), which extents to take from them (hashed individually), what original work goes with them, and the hash the finished cartridge must have. Everyone supplies their own copies and gets a byte-identical result. It refuses a recipe that carries embedded data, so the guarantee is enforced rather than promised. |
+| `portscan.py` | What it would take to move Atari 8-bit code to the 7800, counted rather than guessed. Both machines run a 6502, which is the least useful fact about the job; the work is everything the code says to the hardware. Sorts every hardware access into what carries over (POKEY is POKEY, at a different address), what has an equivalent needing a rewrite (joysticks), and what has none at all (player/missile graphics, hardware collision detection, ANTIC's display lists). |
+| `replay.py` | Replay a recorded session and measure what the game did. MAME reproduces a recording exactly -- two replays give byte-identical profiles -- so a before-and-after number means something, which a scripted run cannot deliver: scripted input reaches a title screen and stops. Reports dispatches a frame, how often the controls are read, and which definitions the time went to. `--compare` replays the same session against a second build, honest only where the change does not alter the game's speed. |
+| `sign7800.py` | Cartridge signatures. An NTSC 7800 hashes the cartridge and checks a signature over that hash at `$FF80`-`$FFF7`; a cartridge that fails is not refused, it is started in **2600 mode**, which looks like a black screen rather than an error. PAL consoles do not check and no emulator does, so a patched ROM works everywhere it gets tested and nowhere it gets played. Verifies, and signs -- the scheme is Rabin with public exponent 2, so a signature is a square root of the hash mod `n`, found by stepping the hash's one don't-care byte until a root exists. A port of Bruce Tomlin's `sign7800.c`, checked against stock dumps of two different games. Every build path here signs; the patch-set has to do it at apply time, since the signature covers the whole image and every combination of options has a different one. |
+| `spritedump.py` | Renders one direct-mode MARIA display-list object -- a real sprite at a known base/width/height/palette, optionally stacked from several zone-sized segments -- rather than a fixed 256-entry character sheet. Reads the palette straight out of a `dumpgfx.lua` register dump so the colours are the ones the game actually used. |
+
+### Shipping a patch, and making it boot
+
+Two things a 7800 patch needs that a diff does not give you.
+
+**A patch set.** `patchset.py` reads and writes `.abp` bundles: many
+independent fixes in one file, each option declaring which knob it turns,
+so two settings of one knob are refused as a choice not yet made rather
+than applied in file order. Sections carry a CRC32 of their pre-image, so
+applying checks a byte range instead of the whole file -- a different
+header, or another fix already applied elsewhere, still passes. Floats let
+new code find its own address at apply time. See
+[docs/patchset-format.md](docs/patchset-format.md); the format also lives
+on its own at
+[Anchored-Bundle-of-Patches](https://github.com/Miasmark/Anchored-Bundle-of-Patches)
+with the console-specific parts removed.
+
+**A signature.** `sign7800.py` verifies and regenerates the NTSC cartridge
+signature at `$FF80`-`$FFF7`. This is easy to skip and expensive to skip:
+the console hashes the cartridge and checks that signature, and on a
+mismatch it does not refuse -- it starts up in **2600 mode**, which looks
+like a black screen rather than an error. PAL consoles do not check and no
+emulator verifies it, so a patched cartridge works everywhere you test it
+and fails on the hardware it was made for. The scheme is Rabin with public
+exponent 2, so verifying is one squaring and signing is a square root of
+the hash.
+
+The division of labour is deliberate: `patchset.py` patches bytes and
+stops there, and signing is a separate step, because a checksum repair has
+to know the exact platform and wiring one into a patch format would make
+the format specific to it. **Apply, then sign.**
 
 ### On Windows
 
