@@ -654,6 +654,40 @@ frame number** -- detect the state from RAM and screenshot on that condition.
 Failing that, only trust findings of the form "this whole category of thing is
 gone", which no amount of timing drift can manufacture.
 
+Much of that drift can be the signature rather than the patch: see the next
+entry. A patched build that keeps the original signature bytes can stay in
+sync with a recording.
+
+## Re-signing a cartridge moves the start of the game, and recordings with it
+
+An NTSC 7800's BIOS hashes the cartridge and checks its signature before it
+hands over. The check's running time depends on the signature bytes
+themselves, not on whether the check passes. So a build whose only
+difference is its signature starts the game a few frames earlier or later,
+and an `.inp` recording made against one plays back as a different race on
+the other. Pole Position II VS, measured:
+
+- An edited build that keeps the retail signature untouched (and, strictly,
+  now invalid) replays `run-01.inp` exactly: the same score, gear and speed at
+  frame 8000.
+- The same build re-signed, with a valid signature, desyncs from the same
+  recording by frame 8000.
+- Zeroing the signature block gives a third, different result.
+- Where it shows: the cartridge locks INPTCTRL (its first act after the
+  hand-over) at frame 209 unsigned and frame 203 signed.
+
+All three runs are individually deterministic. They differ only in 120
+signature bytes. The previous entry's desync is this effect whenever a
+patched build was re-signed.
+
+**Test unsigned, and sign only what goes to hardware.** Record against the
+unsigned build, replay against unsigned builds, and keep a signed build
+(`sign7800.py`, or `patchset.py apply`, which signs) for a console or flash
+cart. That is how Pole Position II ran its whole regression set against
+dozens of builds from one set of recordings. A signed build replaying a
+recording made unsigned gives a playable, plausible race that is quietly
+not the one asked for, which is worse than a crash.
+
 ## Text in a tile-based game is not ASCII, and greps for it come back empty
 
 A day-one check recorded a real anomaly: unlike its sibling cartridges, this
