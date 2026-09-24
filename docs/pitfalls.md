@@ -680,6 +680,21 @@ All three runs are individually deterministic. They differ only in 120
 signature bytes. The previous entry's desync is this effect whenever a
 patched build was re-signed.
 
+*Corrected later:* whether the check passes matters too, and more than
+first thought. Traced with `probes/handover.lua`, an edited build whose
+signature no longer matches fails the check. The BIOS then takes its
+**2600-mode path**: INPTCTRL `$02`, then the 2600 bootstrap at `$0480`,
+which writes `$00` and jumps to the reset vector. MAME does not emulate 2600
+mode, so the game plays anyway, one path and several frames away from a
+signed build's. The two paths also leave different CPU state:
+- the 7800 path leaves SP `$16` and decimal mode set;
+- the 2600 path leaves SP `$FF` and decimal clear.
+
+So an unsigned test build in MAME is not only later than a signed one: it
+started differently. That is harmless for a game that sets its own stack
+and flags (Pole Position II does), and a trap for one that does not. See
+docs/bios.md.
+
 **Test unsigned, and sign only what goes to hardware.** Record against the
 unsigned build, replay against unsigned builds, and keep a signed build
 (`sign7800.py`, or `patchset.py apply`, which signs) for a console or flash

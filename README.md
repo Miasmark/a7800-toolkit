@@ -183,7 +183,9 @@ signature pass is not mistaken for use. `probes/snapwhen.lua` takes
 screenshots when a RAM byte says the moment has come.
 `probes/rendersurvey.lua` counts DLIs and WSYNCs per frame and dumps RAM for
 `zonebill.py`. All four come from the Pole Position II VS mod, where the
-wild-fetch trap ran against every build.
+wild-fetch trap ran against every build. `probes/handover.lua` records the moment a
+cartridge's reset code first runs (frame, registers, flags, INPTCTRL, RAM),
+which is how the two BIOSes in `docs/bios.md` were compared.
 
 ### Docs
 
@@ -196,6 +198,7 @@ wild-fetch trap ran against every build.
 | [`cartridges.md`](docs/cartridges.md) | Header format, mapper flags with the evidence for each, mapper layouts. |
 | [`graphics.md`](docs/graphics.md) | Line-planar layout, pixel formats, character mode, finding artwork. |
 | [`emulation.md`](docs/emulation.md) | MAME as an instrument, and how to avoid measuring nothing. |
+| [`bios.md`](docs/bios.md) | What Atari's NTSC BIOS does before a cartridge runs (self-test, signature, the state it hands over), and how 7800OpenBIOS differs. |
 | [`audio.md`](docs/audio.md) | The TIA's two voices, POKEY's four, why one chip is out of tune and the other is not, the tracker, and pulling songs out of a ROM and pushing them back. |
 
 `a7800.py` and `m6502.py` are libraries, not commands: the machine's constants
