@@ -115,11 +115,16 @@ so two settings of one knob are refused as a choice not yet made rather
 than applied in file order. Sections carry a CRC32 of their pre-image, so
 applying checks a byte range instead of the whole file -- a different
 header, or another fix already applied elsewhere, still passes. Floats let
-new code find its own address at apply time. See
-[docs/patchset-format.md](docs/patchset-format.md); the format also lives
+new code find its own address at apply time. An option can grow the
+cartridge (a 32K game made 48K, say), and the `.a78` header's ROM size
+follows; that is format `patchset/3`. An option built on another's result
+is recognised from the two patches' checksums, applied after it, and read
+back as both applied. See
+[docs/patchset-format.md](docs/patchset-format.md). The format also lives
 on its own at
-[Anchored-Bundle-of-Patches](https://github.com/Miasmark/Anchored-Bundle-of-Patches)
-with the console-specific parts removed.
+[Anchored-Bundle-of-Patches](https://github.com/Miasmark/Anchored-Bundle-of-Patches),
+with the console-specific parts removed. That copy reads `patchset/2`, and
+refuses a bundle that grows by name.
 
 **A signature.** `sign7800.py` verifies and regenerates the NTSC cartridge
 signature at `$FF80`-`$FFF7`. This is easy to skip and expensive to skip:
@@ -131,10 +136,16 @@ and fails on the hardware it was made for. The scheme is Rabin with public
 exponent 2, so verifying is one squaring and signing is a square root of
 the hash.
 
-The division of labour is deliberate: `patchset.py` patches bytes and
-stops there, and signing is a separate step, because a checksum repair has
-to know the exact platform and wiring one into a patch format would make
-the format specific to it. **Apply, then sign.**
+The division of labour is deliberate: the format carries no signature, and
+`PatchSet.apply` patches bytes and stops there, because a checksum repair
+has to know the exact platform, and wiring one into a patch format would
+make the format specific to it. The `patchset.py apply` command then signs,
+as a separate step: it signs an NTSC cartridge and leaves a PAL one alone.
+PAL consoles never check, and retail PAL dumps carry erased EPROM where a
+signature would go. The bundle's `target.region` decides, then the `.a78`
+header's TV byte. `sign7800.py` makes the same call from the header, with
+`--force` to sign anyway. Anything that patches another way: **apply, then
+sign.**
 
 ### On Windows
 
