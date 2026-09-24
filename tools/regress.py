@@ -31,7 +31,7 @@ The job file (JSON):
       ]
     }
 
-{name} anywhere is replaced from `vars`, then `vars_cmd`'s output, then
+{name} anywhere is replaced from `vars`, then --var, then `vars_cmd`'s output, then
 --var (later wins), then the job's own `for` values; `for` with several keys
 runs every combination. A job's verdict is the first line printed by its
 `verdict` command, or the last line of `verdict_file` (`"verdict_line":
@@ -156,6 +156,11 @@ def main():
 
     spec = json.load(open(args.jobs))
     env = dict(spec.get("vars", {}))
+    given = dict(kv.partition("=")[::2] for kv in args.var)
+    # --var first, so vars_cmd sees the values the jobs will (an --var out=
+    # that vars_cmd did not see sent its files to the default directory and
+    # left the jobs reading an empty one), and again after, so it still wins
+    env.update(given)
     if spec.get("vars_cmd"):
         rc, out = run_cmd(substitute(spec["vars_cmd"], env))
         if rc:
@@ -164,9 +169,7 @@ def main():
             if "=" in line:
                 k, _, v = line.partition("=")
                 env[k.strip()] = v.strip()
-    for kv in args.var:
-        k, _, v = kv.partition("=")
-        env[k] = v
+    env.update(given)
     jobs = []
     for s in spec["jobs"]:
         s = dict(s)
