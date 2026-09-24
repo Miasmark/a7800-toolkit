@@ -1861,6 +1861,25 @@ def t_patchset():
         raise AssertionError(
             "louder was applied without loud beneath it, so the derived "
             "dependency was found and then ignored")
+    # on the untouched dump, louder reads as applicable -- after loud, which
+    # apply brings along -- not as "something else edited its bytes"
+    ps2u = patchset.PatchSet(out2)
+    _hu, bu = ps2u.find_body(body)
+    if ps2u.survey(bu).get("louder") != "applies":
+        raise AssertionError("an option built on another reads as %r on the "
+                             "dump both apply to" % ps2u.survey(bu).get("louder"))
+    # ...and the chained result is recognised: loud is on it, underneath
+    # louder, so a survey calls both applied and applying again is a no-op
+    # (it once read loud as "blocked" and refused the cartridge it had made)
+    ps2c = patchset.PatchSet(out2)
+    _hc, bc = ps2c.find_body(chained)
+    st = ps2c.survey(bc)
+    if st.get("loud") != "applied" or st.get("louder") != "applied":
+        raise AssertionError("a chained result reads as %r; both options "
+                             "are on it" % ({k: st.get(k) for k in ("loud", "louder")},))
+    if patchset.PatchSet(out2).apply(chained, ["louder"]) != chained:
+        raise AssertionError("applying a chain a second time changed the "
+                             "cartridge")
     try:
         ps2.apply(body, ["orphan"])
     except patchset.PatchSetError as e:
@@ -1960,6 +1979,142 @@ def t_patchset():
             "two patches' checksums is found and honoured, and one patch "
             "can span several sections, and two options differing only "
             "inside a float stay apart")
+
+def t_patchset_grow():
+    """A bundle that grows the cartridge (patchset/3), against an invented one.
+
+    A 2K body at $F800 grows at the front to 4K at $F000 -- the shape of a
+    linear 7800 cartridge going from 32K to 48K -- with one section in the old
+    space and one in the new, patched by a single span. Six things have to
+    hold:
+
+    **The body grows where the option says, and the old bytes move with it.**
+    **The .a78 header's ROM size follows the body** -- an emulator believes
+    the header, and maps a grown body under a stale size wrong.
+    **A grown cartridge is still recognised**: check calls the option
+    applied, and applying again changes nothing.
+    **Headered and bare give the same body.**
+    **An option that does not grow leaves the size alone**, and an ungrown
+    dump still reads as a target for the one that does.
+    **A header that puts something at $4000 refuses to grow**, and a /2
+    manifest that grows is refused as a format error rather than misread.
+    """
+    import json
+    import bps
+    import patchset
+
+    old = bytes(((i * 7 + 3) & 0xFF) for i in range(0x800))
+    fill = bytes([0xFF])
+    grown_pre = fill * 0x800 + old
+    base0, base1 = 0xF800, 0xF000
+
+    def sec(addr, n):
+        at = addr - base1
+        return {"addr": "0x%04X" % addr, "length": n,
+                "crc32": "0x%08X" % patchset.crc32(grown_pre[at:at + n])}
+
+    sections = {"s_F100": sec(0xF100, 8), "s_F810": sec(0xF810, 4),
+                "s_F900": sec(0xF900, 2)}
+    before = grown_pre[0x100:0x108] + grown_pre[0x810:0x814]
+    jsr = bytes([0x20, 0x00, 0xF1, 0xEA])                # a JSR into the new space
+    after = bytes(range(0x40, 0x48)) + jsr
+    nops = bytes([0xEA, 0xEA])
+    files = {"p/big.bps": bps.create(before, after),
+             "p/small.bps": bps.create(grown_pre[0x900:0x902], nops)}
+    manifest = {
+        "format": patchset.FORMAT,              # write_bundle must raise it to /3
+        "name": "grow test",
+        "target": {"body_size": 0x800, "headers": [0, 128], "base": "0x%04X" % base0,
+                   "anchors": [{"addr": "0xFC00", "length": 64,
+                                "crc32": "0x%08X" % patchset.crc32(old[0x400:0x440])}]},
+        "sections": sections,
+        "options": [
+            {"id": "big", "title": "needs the new space",
+             "grow": {"size": 0x1000, "at": "front", "fill": "0xFF"},
+             "patches": [{"sections": ["s_F100", "s_F810"], "bps": "p/big.bps",
+                          "before": "0x%08X" % patchset.crc32(before)}]},
+            {"id": "small", "title": "fits as it is",
+             "patches": {"s_F900": "p/small.bps"}},
+        ],
+    }
+    out = os.path.join(tempfile.mkdtemp(prefix="patchset-"), "g.abp")
+    patchset.write_bundle(out, manifest, files)
+    ps = patchset.PatchSet(out)
+    if ps.m["format"] != patchset.FORMAT_GROW:
+        raise AssertionError("a growing bundle was written as %r" % ps.m["format"])
+
+    def a78(size, ctype=0):
+        hd = bytearray(128)
+        hd[0] = 4
+        hd[1:10] = b"ATARI7800"
+        hd[49:53] = size.to_bytes(4, "big")
+        hd[53:55] = ctype.to_bytes(2, "big")
+        hd[100:128] = b"ACTUAL CART DATA STARTS HERE"
+        return bytes(hd)
+
+    # 1-2. grows at the front, the header follows, the new space is patched,
+    #      the old bytes move up
+    got = patchset.PatchSet(out).apply(a78(0x800) + old, ["big"])
+    if len(got) != 128 + 0x1000:
+        raise AssertionError("grown image is %d bytes, want %d"
+                             % (len(got), 128 + 0x1000))
+    if int.from_bytes(got[49:53], "big") != 0x1000:
+        raise AssertionError("the header still says %d bytes"
+                             % int.from_bytes(got[49:53], "big"))
+    body = got[128:]
+    if body[0x100:0x108] != bytes(range(0x40, 0x48)):
+        raise AssertionError("the patch did not land in the new space")
+    if body[0x000:0x100] != fill * 0x100 or body[0x108:0x800] != fill * 0x6F8:
+        raise AssertionError("the rest of the new space is not the fill")
+    if body[0xC00:0xC40] != old[0x400:0x440] or body[0x810:0x814] != jsr:
+        raise AssertionError("the old bytes did not move up with the growth")
+
+    # 3. recognised when grown, and idempotent
+    ps3 = patchset.PatchSet(out)
+    _hdr3, body3 = ps3.find_body(got)
+    if ps3.base != base1 or ps3.survey(body3).get("big") != "applied":
+        raise AssertionError("a grown cartridge is not recognised as "
+                             "carrying the option")
+    if patchset.PatchSet(out).apply(got, ["big"]) != got:
+        raise AssertionError("applying twice changed the cartridge")
+
+    # 4. headered and bare give the same body
+    if patchset.PatchSet(out).apply(old, ["big"]) != body:
+        raise AssertionError("a headerless dump grows to a different body")
+
+    # 5. an option that does not grow leaves the size alone, and an ungrown
+    #    dump still reads as a target for the one that does
+    small = patchset.PatchSet(out).apply(a78(0x800) + old, ["small"])
+    if len(small) != 128 + 0x800 or small[128 + 0x100:128 + 0x102] != nops:
+        raise AssertionError("a non-growing option changed the size or "
+                             "missed its bytes")
+    ps5 = patchset.PatchSet(out)
+    _h5, b5 = ps5.find_body(a78(0x800) + old)
+    if ps5.survey(ps5.grown_view(b5)).get("big") != "applies":
+        raise AssertionError("an ungrown dump does not read as a target "
+                             "for growth")
+
+    # 6. a header with something at $4000 refuses; a /2 manifest that grows
+    #    is refused by name
+    try:
+        patchset.PatchSet(out).apply(a78(0x800, 0x0004) + old, ["big"])
+        raise AssertionError("grew a cartridge whose header puts RAM at $4000")
+    except patchset.PatchSetError as e:
+        if "$4000" not in str(e):
+            raise AssertionError("refused for the wrong reason: %s" % e)
+    d = tempfile.mkdtemp(prefix="patchset-")
+    with open(os.path.join(d, "patchset.json"), "w") as f:
+        f.write(json.dumps(dict(manifest, format=patchset.FORMAT)))
+    try:
+        patchset.PatchSet(d)
+        raise AssertionError("a /2 manifest that grows was accepted")
+    except patchset.PatchSetError as e:
+        if patchset.FORMAT_GROW not in str(e):
+            raise AssertionError("refused for the wrong reason: %s" % e)
+    return ("grows at the front with the header's size following, the new "
+            "space patched and the old moved up, recognised and idempotent "
+            "once grown, headered and bare alike, refused under a header "
+            "with something at $4000 and as a /2 manifest")
 
 
 def t_portkit_refuses_payload():
@@ -2094,8 +2249,11 @@ def t_dist_carries_no_rom():
             "cartridge's own; these patches are not safe to publish"
             % (leaked, literals))
 
-    abp = os.path.join(dist, "karateka.abp")
-    if os.path.exists(abp):
+    # every bundle, not just the NTSC one: the structural guarantee holds
+    # regardless of which cartridge a bundle targets, and a PAL bundle
+    # would otherwise go unchecked
+    for abp in sorted(f for f in os.listdir(dist) if f.endswith(".abp")):
+        abp = os.path.join(dist, abp)
         z = zipfile.ZipFile(abp)
         man = json.loads(z.read("patchset.json"))
         rows = man["sections"]
@@ -2156,6 +2314,7 @@ def main():
     r.check("forth decompiler", t_forth_decompiler)
     r.check("8-bit cartridge tracer", t_a8dis)
     r.check("patch sets", t_patchset)
+    r.check("patch sets that grow", t_patchset_grow)
     r.check("recipes carry no payload", t_portkit_refuses_payload)
     r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)

@@ -80,6 +80,16 @@ import bps
 
 NL2 = chr(10)          # for messages that wrap onto a second line
 FORMAT = "patchset/2"
+# A bundle with an option that grows the body is patchset/3, so a reader that
+# predates growth refuses it by name instead of applying sections to the wrong
+# offsets. Everything else is unchanged, and /2 bundles still read.
+FORMAT_GROW = "patchset/3"
+FORMATS = (FORMAT, FORMAT_GROW)
+# .a78 cart-type bits that put something at $4000-$7FFF, or bank the image:
+# growing a linear cartridge down into $4000 would collide with any of them.
+# POKEY at $0450/$0440 and the YM2151 at $0460 live elsewhere.
+A78_HEADER = 128
+A78_BUSY_4000 = 0xFFFF & ~(0x0040 | 0x0400 | 0x0800)
 ENCODINGS = ("lo8", "hi8", "abs16")
 
 
@@ -100,6 +110,18 @@ def crc32(data):
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
+def crc32_combine(crc_a, crc_b, len_b):
+    """crc32(a + b) from crc32(a), crc32(b) and len(b), without the bytes.
+
+    CRC32's register is linear: running b from register r gives Z(r) ^ R(b),
+    where Z is `len_b` zero bytes. So crc(a+b) = crc(b) ^ Z(crc(a)), and
+    Z(x) is zlib's CRC of that many zeros started from x (its init and final
+    XOR cancel out). How a span's pre-image CRC follows from its sections'.
+    """
+    z = zlib.crc32(bytes(len_b), crc_a ^ 0xFFFFFFFF) ^ 0xFFFFFFFF
+    return (crc_b ^ z) & 0xFFFFFFFF
+
+
 class PatchSet(object):
     """A manifest plus the files it names, from a directory or a zip."""
 
@@ -113,12 +135,17 @@ class PatchSet(object):
             self._zip = zipfile.ZipFile(path)
             raw = self._zip.read("patchset.json").decode("utf-8")
         self.m = json.loads(raw)
-        if self.m.get("format") != FORMAT:
-            raise PatchSetError("%s is %r, not %s"
-                                % (path, self.m.get("format"), FORMAT))
+        if self.m.get("format") not in FORMATS:
+            raise PatchSetError("%s is %r, not one of %s"
+                                % (path, self.m.get("format"), ", ".join(FORMATS)))
+        if self.m.get("format") != FORMAT_GROW and any(
+                o.get("grow") for o in self.m["options"]):
+            raise PatchSetError("%s grows the cartridge, which needs %s"
+                                % (path, FORMAT_GROW))
         self.sections = self.m["sections"]
         self.options = {o["id"]: o for o in self.m["options"]}
-        self.base = h(self.m["target"].get("base"), 0)
+        self.base0 = h(self.m["target"].get("base"), 0)   # the dump's own
+        self.base = self.base0    # the body in hand: find_body and grow move it
         self.pristine = None      # set by find_body: is this an untouched dump
         self._deps = None         # derived dependencies, read from the patches
 
@@ -126,6 +153,72 @@ class PatchSet(object):
         if self._zip is not None:
             return self._zip.read(member)
         return io.open(os.path.join(self.path, member), "rb").read()
+
+    # ------------------------------------------------------------- growth
+    def grows(self, options=None):
+        """The growth these options ask for, as (size, at, fill), or None.
+
+        An option that needs more cartridge than the dump has says so:
+
+            "grow": {"size": 49152, "at": "front", "fill": "0xFF"}
+
+        `at: "front"` is a linear 7800 cartridge: it ends at $FFFF, so a larger
+        one starts lower and the new bytes come before the old. `at: "end"`
+        appends. Options that grow must agree on where and with what; the
+        largest size wins. Sections in the new space describe the fill, so
+        they are checked like any other.
+        """
+        want = [self.options[o]["grow"] for o in (options or self.options)
+                if self.options[o].get("grow")]
+        if not want:
+            return None
+        ats = {g.get("at", "front") for g in want}
+        fills = {h(g.get("fill"), 0xFF) & 0xFF for g in want}
+        if len(ats) > 1 or len(fills) > 1:
+            raise PatchSetError("options grow the cartridge in different ways "
+                                "(at %s, fill %s)" % (sorted(ats), sorted(fills)))
+        return max(h(g["size"]) for g in want), ats.pop(), fills.pop()
+
+    def layouts(self):
+        """Every body this bundle can meet, as (size, base): the dump as it
+        was, and the dump grown by any option. A grown cartridge is found by
+        the same anchors, at their addresses in the grown body."""
+        size0 = self.m["target"]["body_size"]
+        out = [(size0, self.base0)]
+        for o in self.options:
+            g = self.options[o].get("grow")
+            if g:
+                n = h(g["size"])
+                base = self.base0 - (n - size0) if g.get("at", "front") == "front" \
+                    else self.base0
+                if (n, base) not in out:
+                    out.append((n, base))
+        return out
+
+    def grow(self, body, size, at, fill, header=b""):
+        """The body grown to `size`; the base moves with it. A header that
+        declares a cartridge type with anything at $4000-$7FFF refuses."""
+        if len(body) >= size:
+            return body
+        hd = parse_a78(header)
+        if hd and at == "front" and hd["cart_type"] & A78_BUSY_4000:
+            raise PatchSetError(
+                "this cartridge's header declares type $%04X, which puts "
+                "something at $4000 or banks the image; growing it to %dK "
+                "would collide with that" % (hd["cart_type"], size // 1024))
+        pad = bytearray([fill]) * (size - len(body))
+        if at == "front":
+            self.base -= len(pad)
+            return pad + body
+        return body + pad
+
+    def grown_view(self, body):
+        """For reporting: the body as the bundle's growth would leave it, so
+        sections in the new space can be judged on an ungrown dump."""
+        g = self.grows()
+        if not g or len(body) >= g[0]:
+            return body
+        return self.grow(bytearray(body), *g)      # moves self.base with it
 
     # ------------------------------------------------------------- the target
     def find_body(self, blob):
@@ -149,22 +242,29 @@ class PatchSet(object):
         want = self.m["target"]["body_size"]
         digest = self.m["target"].get("body_sha256")
         anchors = self.m["target"].get("anchors", [])
-        candidates = [h(x) for x in self.m["target"].get("headers", [0])]
-        if len(blob) - want > 0:
-            candidates.append(len(blob) - want)
         best = None
-        for off in dict.fromkeys(candidates):
-            if off < 0 or off + want > len(blob):
-                continue
-            body = bytearray(blob[off:off + want])
-            hit = sum(1 for a in anchors if self.anchor_ok(body, a))
-            if best is None or hit > best[0]:
-                best = (hit, off, body)
+        declared = [h(x) for x in self.m["target"].get("headers", [0])]
+        for size, base in self.layouts():
+            candidates = [h(x) for x in self.m["target"].get("headers", [0])]
+            if len(blob) - size > 0:
+                candidates.append(len(blob) - size)
+            for off in dict.fromkeys(candidates):
+                if off < 0 or off + size > len(blob):
+                    continue
+                body = bytearray(blob[off:off + size])
+                hit = sum(1 for a in anchors if self.anchor_ok(body, a, base))
+                # A grown cartridge also matches as the ungrown dump read from
+                # its tail (anchors are in the old space, which moved up
+                # intact). Ties go to a body that starts at a declared header
+                # size, then to the larger body.
+                key = (hit, off in declared, size)
+                if best is None or key > best[0]:
+                    best = (key, off, body, base)
         if best is None:
             raise PatchSetError(
                 "no %d-byte body anywhere in this file; the bundle is for %s"
                 % (want, self.m["target"].get("what", "another cartridge")))
-        hit, off, body = best
+        (hit, _at_header, _size), off, body, self.base = best
         if anchors and hit < len(anchors):
             raise PatchSetError(
                 "this is not the cartridge the bundle is for.\n"
@@ -177,13 +277,20 @@ class PatchSet(object):
                          or hashlib.sha256(bytes(body)).hexdigest() == digest)
         return blob[:off], body
 
-    def anchor_ok(self, body, a):
-        at = h(a["addr"]) - self.base
+    def anchor_ok(self, body, a, base=None):
+        at = h(a["addr"]) - (self.base if base is None else base)
+        if at < 0:
+            return False
         return crc32(bytes(body[at:at + a["length"]])) == h(a["crc32"])
 
     def section_bytes(self, body, sid):
         s = self.sections[sid]
         at = h(s["addr"]) - self.base
+        if at < 0 or at + s["length"] > len(body):
+            raise PatchSetError(
+                "section %s ($%04X) is outside this %d-byte body; the option "
+                "that uses it has to grow the cartridge first"
+                % (sid, h(s["addr"]), len(body)))
         return at, body[at:at + s["length"]]
 
     def check_sections(self, body, ids):
@@ -239,6 +346,14 @@ class PatchSet(object):
         return sorted({s for sids, _b, _v, _c in self.entries(option)
                        for s in sids})
 
+    def span_crc(self, sids):
+        """The CRC32 of a span's pre-image, from its sections' CRCs alone."""
+        crc = 0
+        for sid in sids:
+            s = self.sections[sid]
+            crc = crc32_combine(crc, h(s["crc32"]), s["length"])
+        return crc
+
     def span_bytes(self, body, sids):
         """A span's bytes, concatenated, plus where each piece came from."""
         where, data = [], bytearray()
@@ -281,7 +396,57 @@ class PatchSet(object):
                 probe[i] = 0xFF
         if crc32(bytes(probe)) == tgt:
             return "applied"
+        # A patch built on this one's result may have been applied on top:
+        # then the span holds *its* target, and this patch is applied
+        # underneath it. Follow the chain back from what is there. Without
+        # this, a chained result reads the lower option as "blocked", and
+        # applying the same selection again refuses a cartridge it made.
+        if tgt in self._chain_back(sids, crc32(bytes(data))):
+            return "applied"
         return "blocked"
+
+    def _closure(self, option):
+        """Every option this one needs, directly or through another."""
+        seen, todo = set(), [option]
+        while todo:
+            for r in self.needs(todo.pop()):
+                if r not in seen:
+                    seen.add(r)
+                    todo.append(r)
+        return seen
+
+    def _chain_forward(self, sids, crc, options):
+        """Every state these options' patches over the span can take it to."""
+        fwd = {}
+        for o in options:
+            for e_sids, member, _v, _b in self.entries(o):
+                if e_sids == tuple(sids):
+                    src, tgt = self.crcs(member)
+                    fwd.setdefault(src, set()).add(tgt)
+        seen, todo = {crc}, [crc]
+        while todo:
+            for tgt in fwd.get(todo.pop(), ()):
+                if tgt not in seen:
+                    seen.add(tgt)
+                    todo.append(tgt)
+        return seen
+
+    def _chain_back(self, sids, crc):
+        """Every state this span passed through on the way to `crc`, by
+        following each patch over the span from its target to its source."""
+        back = {}
+        for o in self.options:
+            for e_sids, member, _v, _b in self.entries(o):
+                if e_sids == tuple(sids):
+                    src, tgt = self.crcs(member)
+                    back.setdefault(tgt, set()).add(src)
+        seen, todo = set(), [crc]
+        while todo:
+            for src in back.get(todo.pop(), ()):
+                if src not in seen:
+                    seen.add(src)
+                    todo.append(src)
+        return seen
 
     def float_ok(self, body, f):
         """Is this float's blob really the one at the address it was given?
@@ -349,14 +514,17 @@ class PatchSet(object):
         section, or spanning several, costs nothing: a patch changes only the
         bytes it means to however much it covers.
         """
-        produced, pristine = {}, {}
+        produced = {}
         for o in self.options:
-            for sids, member, _v, before in self.entries(o):
-                pristine[sids] = before
+            for sids, member, _v, _before in self.entries(o):
                 produced.setdefault((sids, self.crcs(member)[1]),
                                     set()).add(o)
-        for sids, before in pristine.items():
-            produced.setdefault((sids, before), set())
+                # the pre-image, caused by nobody: from the sections' own
+                # CRCs, not from a patch's `before`. Taking it from `before`
+                # kept whichever patch over the span came last, so once two
+                # options shared a span, the first one's start looked like a
+                # state nothing produces.
+                produced.setdefault((sids, self.span_crc(sids)), set())
         requires, unknown = {}, {}
         for o in self.options:
             deps = set()
@@ -393,6 +561,32 @@ class PatchSet(object):
         for o in self.options:
             if self.entries(o):
                 out[o] = self.option_state(body, o)
+        # An option built on another's result reads as blocked until that one
+        # has run -- which `apply` does first. For the report, it applies if
+        # each blocked span of it gets to its starting point through patches
+        # of the options it needs, and those can apply themselves.
+        changed = True
+        while changed:
+            changed = False
+            for o, st in out.items():
+                if st != "blocked":
+                    continue
+                deps = self._closure(o)
+                if not all(out.get(d, "applies") in ("applies", "applied")
+                           for d in deps):
+                    continue
+                ok = True
+                for e in self.entries(o):
+                    if self.entry_state(body, e) != "blocked":
+                        continue
+                    sids, member = e[0], e[1]
+                    now = crc32(bytes(self.span_bytes(body, sids)[1]))
+                    if self.crcs(member)[0] not in self._chain_forward(sids, now, deps):
+                        ok = False
+                        break
+                if ok:
+                    out[o] = "applies"
+                    changed = True
         on = {o for o, st in out.items() if st == "applied"}
         knobs_on = {self.options[o].get("knob") for o in on}
         knobs_on.discard(None)
@@ -541,8 +735,25 @@ class PatchSet(object):
         header, body = self.find_body(blob)
         order = self.resolve(wanted)
         say("applying %d option(s): %s" % (len(order), ", ".join(order)))
+        header = bytearray(header)
+        g = self.grows(order)
+        if g and len(body) < g[0]:
+            before = len(body)
+            body = self.grow(body, g[0], g[1], g[2], bytes(header))
+            say("  cartridge grown from %dK to %dK (%s, filled with $%02X); the "
+                "body now starts at $%04X"
+                % (before // 1024, len(body) // 1024, g[1], g[2], self.base))
         if header:
-            say("  %d-byte header kept as it was" % len(header))
+            if set_a78_size(header, len(body)):
+                say("  %d-byte header kept, its ROM size set to %d"
+                    % (len(header), len(body)))
+            elif parse_a78(header) is None and len(header) > A78_HEADER:
+                # e.g. a cartridge another bundle grew: this bundle's body is
+                # its tail, and what comes before is carried through untouched
+                say("  the %d bytes before the body kept as they were"
+                    % len(header))
+            else:
+                say("  %d-byte header kept as it was" % len(header))
         if not self.pristine:
             say("  not the pristine dump, which is fine: the anchors say it "
                 "is the right game, and")
@@ -555,7 +766,11 @@ class PatchSet(object):
         # before its predecessor has run and "applies" after, and evaluating
         # everything up front would refuse exactly the case the derived
         # dependencies exist to support.
-        initial = self.survey(body)
+        # judged on the grown view, so an option with sections in space this
+        # cartridge does not have yet reads as applicable rather than failing
+        keep = self.base
+        initial = self.survey(self.grown_view(body))
+        self.base = keep
         todo, taken = [], []
         for o in order:
             st = self.option_state(body, o)
@@ -580,12 +795,28 @@ class PatchSet(object):
                         "  %s is half applied: some of its sections carry it "
                         "and some do not.%s  Something edited this ROM by "
                         "hand, and no automatic answer is right." % (o, NL2))
-                who = ["+".join(e[0]) for e in self.entries(o)
-                       if self.entry_state(body, e) == "blocked"]
+                blocked = [e for e in self.entries(o)
+                           if self.entry_state(body, e) == "blocked"]
+                who = [_span_name(e[0]) for e in blocked]
+                # A span is judged as a whole, so a clash in one section of a
+                # 33-section span names all 33. The option is not on this
+                # cartridge (that was "applied" or "partial" above), so a
+                # section that no longer holds the dump's bytes is the one
+                # something else changed.
+                moved = [sid for e in blocked for sid in e[0]
+                         if crc32(bytes(self.section_bytes(body, sid)[1]))
+                         != h(self.sections[sid]["crc32"])]
                 raise PatchSetError(
-                    "  %s cannot apply: section(s) %s hold neither the bytes "
-                    "it expects nor%s  the bytes it would write. Something "
-                    "else has changed them." % (o, ", ".join(who), NL2))
+                    "  %s cannot apply: the bytes it covers (%s) hold neither "
+                    "what it expects nor%s  what it would write. Something "
+                    "else has changed them%s." % (
+                        o, "; ".join(who), NL2,
+                        ": %s" % ", ".join(
+                            "%s ($%04X, %d bytes)" % (sid, h(self.sections[sid]["addr"]),
+                                                      self.sections[sid]["length"])
+                            for sid in moved)
+                        if moved and len(moved) < sum(len(e[0]) for e in blocked)
+                        else ""))
             todo.append(o)
             for sids, member, _vol, _before in self.entries(o):
                 where, before = self.span_bytes(body, sids)
@@ -598,8 +829,7 @@ class PatchSet(object):
                                         len(after)))
                 self.write_span(body, where, after)
                 taken.extend((at, at + n) for at, n in where)
-                say("  %-16s -> %-22s %d bytes"
-                    % (o, "+".join(sids), len(after)))
+                say("  %-16s -> %-22s %d bytes" % (o, _span_name(sids), len(after)))
         if not todo:
             say("  nothing left to do -- this cartridge already has all of it")
             return bytes(header) + bytes(body)
@@ -631,6 +861,34 @@ class PatchSet(object):
                 self.fixup(body, site, placed[f["id"]], fx["encode"])
         return bytes(header) + bytes(body)
 
+def _span_name(sids):
+    """A span for a message: its sections, or first..last past six."""
+    return "+".join(sids) if len(sids) <= 6 else (
+        "%d sections, %s..%s" % (len(sids), sids[0], sids[-1]))
+
+
+# --------------------------------------------------------------------- headers
+def parse_a78(header):
+    """The fields growth cares about, from a 128-byte .a78 header, or None."""
+    if len(header) != A78_HEADER or bytes(header[1:10]) != b"ATARI7800":
+        return None
+    return {"rom_size": int.from_bytes(bytes(header[49:53]), "big"),
+            "cart_type": int.from_bytes(bytes(header[53:55]), "big")}
+
+
+def set_a78_size(header, size):
+    """Make a .a78 header's ROM size (bytes 49-52, big-endian, excluding the
+    header) say `size`. True if it changed. A grown body under a header that
+    still says 32K is read as 32K by an emulator, which then maps it wrong."""
+    if parse_a78(header) is None:
+        return False
+    new = size.to_bytes(4, "big")
+    if bytes(header[49:53]) == new:
+        return False
+    header[49:53] = new
+    return True
+
+
 # --------------------------------------------------------------------- making
 def write_bundle(out, manifest, files):
     """Write a bundle: the manifest, plus every member it names.
@@ -646,6 +904,8 @@ def write_bundle(out, manifest, files):
             named.add(spec if isinstance(spec, str) else spec["bps"])
         for f in o.get("floats", []):
             named.add(f["blob"])
+    if any(o.get("grow") for o in manifest["options"]):
+        manifest["format"] = FORMAT_GROW       # see FORMAT_GROW
     missing = sorted(named - set(files))
     if missing:
         raise PatchSetError("the manifest names files that were not supplied: "
@@ -681,9 +941,12 @@ def cmd_list(ps):
             print("  independent")
         for o in by_knob[knob]:
             req = o.get("requires", [])
-            print("    %-18s %s%s" % (o["id"], o["title"],
-                                      "   [needs %s]" % ", ".join(req)
-                                      if req else ""))
+            print("    %-18s %s%s%s" % (o["id"], o["title"],
+                                        "   [needs %s]" % ", ".join(req)
+                                        if req else "",
+                                        "   [grows the cartridge to %dK]"
+                                        % (h(o["grow"]["size"]) // 1024)
+                                        if o.get("grow") else ""))
             if o.get("note"):
                 for line in _wrap(o["note"], 66):
                     print("        %s" % line)
@@ -759,6 +1022,14 @@ def cmd_check(ps, rom):
     print("%s" % os.path.basename(rom))
     print("  body at offset %d, %d bytes; anchors all match, so this is %s"
           % (len(header), len(body), ps.m["target"].get("what", "the target")))
+    if len(body) != ps.m["target"]["body_size"]:
+        print("  grown from the dump's %d bytes; it now starts at $%04X"
+              % (ps.m["target"]["body_size"], ps.base))
+    hd = parse_a78(header)
+    if hd and hd["rom_size"] != len(body):
+        print("  its header says %d bytes, not %d -- apply would correct it"
+              % (hd["rom_size"], len(body)))
+    body = ps.grown_view(body)
     print("  %s" % ("an untouched dump" if ps.pristine
                     else "modified -- which options is what follows"))
     print("")
@@ -779,7 +1050,7 @@ def cmd_check(ps, rom):
 def cmd_apply(ps, rom, wanted, out):
     blob = io.open(rom, "rb").read()
     result = ps.apply(blob, wanted, report=lambda s: print(s))
-    result, note = _resign(result)
+    result, note = _resign(result, ps.m.get("target", {}).get("region"))
     io.open(out, "wb").write(result)
     print("")
     print("  wrote %s" % out)
@@ -789,7 +1060,7 @@ def cmd_apply(ps, rom, wanted, out):
     return 0
 
 
-def _resign(image):
+def _resign(image, declared=None):
     """Give a freshly assembled image a cartridge signature.
 
     This is the one case a patch file cannot carry. An NTSC 7800 checks a
@@ -810,10 +1081,28 @@ def _resign(image):
         return image, "signature: not checked (tools/sign7800.py missing)"
     body = image[128:] if len(image) % 0x1000 == 128 else image
     head = image[:len(image) - len(body)]
+    # PAL cartridges are never checked and carry no signature -- the block
+    # is erased EPROM in the retail dumps -- so signing one writes 120
+    # bytes over filler and changes the CRC for nothing.
+    #
+    # Where the region comes from matters. A headered .a78 declares it,
+    # but a headerless dump does not, and it cannot be recovered from the
+    # bytes: an unsigned NTSC homebrew and a PAL cartridge look identical
+    # from the inside. So the *bundle* is asked first -- it knows which
+    # cartridge it was built for even when the file handed to it has had
+    # its header stripped.
+    where = declared or sign7800.region(image)
+    if where == "pal":
+        return image, "signature: not needed, this is a PAL cartridge"
     try:
-        return head + sign7800.signed(body),             "signature: valid for a real NTSC 7800"
+        out = head + sign7800.signed(body)
     except sign7800.SignError as e:
         return image, "signature: NOT SIGNED -- %s" % e
+    if where:
+        return out, "signature: valid for a real NTSC 7800"
+    return out, ("signature: valid for a real NTSC 7800 -- assumed, since a "
+                 "headerless image declares no region and this bundle does "
+                 "not either")
 
 
 def _andlist(names):
