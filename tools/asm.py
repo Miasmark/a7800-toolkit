@@ -17,6 +17,10 @@ Supported:
     MNEM / MNEM operand   all documented addressing modes
     MNEM.w operand        force absolute where a zero-page form also exists
 
+A name defined twice with different values is an error (the same value
+twice is not: listings from disasm.py before its fix repeat a block's
+label at the same address).
+
 Usage:
     python asm.py <file.asm> [-o out.bin]
 """
@@ -134,13 +138,35 @@ class Assembler:
         # ---- pass 1: addresses and labels ----
         pc = None
         layout = []
+        # Where each name was defined in this source, and how. A name defined
+        # twice used to be taken silently, the later definition winning, and
+        # every reference going to it: a routine named like a table elsewhere
+        # in the same block sent a branch 322 bytes astray (Pole Position II,
+        # checkpoint 84) and nothing said so. A name defined again with a
+        # different value is refused. The same value again is harmless and
+        # allowed: disasm.py used to write every named byte block's label
+        # twice, and listings made then still exist. Names from an earlier assemble() on this Assembler are
+        # left alone -- seeding `sym` is how a caller carries symbols in.
+        defined = {}
+
+        def define(ln, name, kind, v):
+            if name in defined:
+                was_ln, was_kind, was_v = defined[name]
+                if v != was_v:
+                    raise AsmError(
+                        "line %d: %r is already defined, as %s on line %d"
+                        % (ln, name, "an equate" if was_kind == "equate"
+                           else "a label", was_ln))
+            defined[name] = (ln, kind, v)
+            self.sym[name] = v
+
         for ln, raw in enumerate(lines, 1):
             line = strip_comment(raw)
             if not line.strip():
                 continue
             m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$", line)
             if m:
-                self.sym[m.group(1)] = self.value(m.group(2), True)
+                define(ln, m.group(1), "equate", self.value(m.group(2), True))
                 continue
             m = re.match(r"^\s*\.org\s+(\S+)\s*$", line, re.I)
             if m:
@@ -151,7 +177,7 @@ class Assembler:
             if m:
                 if pc is None:
                     raise AsmError("line %d: label before .org" % ln)
-                self.sym[m.group(1)] = pc
+                define(ln, m.group(1), "label", pc)
                 continue
             m = re.match(r"^\s*\.res\s+(.*)$", line, re.I)
             if m:

@@ -15,6 +15,7 @@ had quietly stopped being true. So the doc checks sit here alongside the code
 checks, and they are not softer.
 """
 import argparse
+import collections
 import glob
 import hashlib
 import io
@@ -1662,6 +1663,261 @@ def t_a8dis():
             "%d hardware accesses named by direction" % len(t.hw))
 
 
+def t_asm_names():
+    """A name defined twice is refused, unless it is the same value again.
+
+    The assembler used to take a second definition silently and resolve every
+    reference to it. In Pole Position II a new routine label collided with a
+    text table of the same name, and a branch went 322 bytes astray with no
+    error. The same value twice is allowed: disasm.py used to write every
+    named byte block's label twice, and listings made then still exist.
+    """
+    import asm
+
+    def refused(src, why):
+        try:
+            asm.Assembler().assemble(src)
+        except asm.AsmError as e:
+            if "already defined" not in str(e):
+                raise AssertionError("%s: refused for the wrong reason: %s"
+                                     % (why, e))
+            return
+        raise AssertionError("%s was accepted" % why)
+
+    refused([".org $F000", "Loop:", "  NOP", "Loop:", "  BNE Loop"],
+            "a label defined at two addresses")
+    refused(["X = $10", ".org $F000", "X:", "  NOP"],
+            "a name that is an equate and a label")
+    refused(["X = $10", "X = $11", ".org $F000", "  LDA X"],
+            "an equate given two values")
+    a = asm.Assembler()
+    if bytes(a.assemble([".org $F000", "Here:", "Here:", "  NOP"])) != b"\xea":
+        raise AssertionError("a label repeated at one address changed the code")
+    a = asm.Assembler()
+    a.sym["Loop"] = 0x1234                   # carried in by the caller
+    if bytes(a.assemble([".org $F000", "Loop:", "  BNE Loop"])) != b"\xd0\xfe":
+        raise AssertionError("a seeded symbol could not be defined by the source")
+    return ("a label at two addresses, an equate and label sharing a name, and "
+            "an equate with two values are refused; the same value twice and a "
+            "seeded symbol are allowed")
+
+
+def t_bundle_reproducible():
+    """The same manifest and patches give the same bundle, byte for byte.
+
+    A zip member's header carries a date and the writing OS, and writestr()
+    with a bare name fills both in from the moment and the machine. Every
+    rebuild of a published bundle was then a new file with a new hash, though
+    nothing in it had changed.
+    """
+    import zipfile
+    import bps
+    import patchset
+
+    body = bytes(range(256))
+    manifest = {
+        "format": patchset.FORMAT, "name": "reproducible",
+        "target": {"body_size": 256, "headers": [0], "base": "0x0000",
+                   "anchors": [{"addr": "0x80", "length": 64, "crc32": "0x%08X"
+                                % patchset.crc32(body[0x80:0xC0])}]},
+        "sections": {"s_0010": {"addr": "0x10", "length": 4, "crc32": "0x%08X"
+                                % patchset.crc32(body[0x10:0x14])}},
+        "options": [{"id": "x", "title": "x",
+                     "patches": {"s_0010": "p/x.bps"}}],
+    }
+    files = {"p/x.bps": bps.create(body[0x10:0x14], b"\xEA" * 4)}
+    d = tempfile.mkdtemp(prefix="patchset-")
+    a, b = os.path.join(d, "a.abp"), os.path.join(d, "b.abp")
+    patchset.write_bundle(a, json.loads(json.dumps(manifest)), files)
+    patchset.write_bundle(b, json.loads(json.dumps(manifest)), files)
+    for info in zipfile.ZipFile(a).infolist():
+        if info.date_time != (1980, 1, 1, 0, 0, 0) or info.create_system != 3:
+            raise AssertionError("%s carries %r from system %d; the header "
+                                 "should say nothing about when or where"
+                                 % (info.filename, info.date_time,
+                                    info.create_system))
+    if io.open(a, "rb").read() != io.open(b, "rb").read():
+        raise AssertionError("two writes of one bundle differ")
+    return "fixed date and system on every member; two writes identical"
+
+
+def t_bundle_from_images():
+    """A bundle built from each option's finished cartridge, not by hand.
+
+    A generator that already makes the cartridge for each option should not
+    have to work out sections, spans, anchors and which patch starts from
+    which state. Two options here: `base` grows a 2K body to 4K and changes
+    bytes in the old and new space; `detail` is built on it and changes some
+    of the same bytes and some of its own -- the shape of Pole Position II
+    VS and its higher-detail car.
+    """
+    import patchset
+
+    dump = bytes(((i * 29 + 7) & 0xFF) for i in range(0x800))
+    grown = b"\xFF" * 0x800 + dump                      # at the front, $F000
+    base_img = bytearray(grown)
+    base_img[0x100:0x108] = bytes(range(0x30, 0x38))    # new space
+    base_img[0xA00:0xA04] = b"\x4C\x00\xF1\xEA"         # old space, calls it
+    detail_img = bytearray(base_img)
+    detail_img[0x102:0x104] = b"\x99\x98"               # on top of base's bytes
+    detail_img[0xC00:0xC02] = b"\x55\xAA"               # its own
+    options = [{"id": "base", "title": "grows", "image": bytes(base_img)},
+               {"id": "detail", "title": "on base", "on": "base",
+                "image": bytes(detail_img)}]
+    d = tempfile.mkdtemp(prefix="patchset-")
+    out = patchset.bundle_from_images(
+        os.path.join(d, "b.abp"), dump, 0xF800, options, "builder test",
+        grow={"size": 0x1000, "at": "front", "fill": "0xFF"})
+    ps = patchset.PatchSet(out)
+    if ps.m["format"] != patchset.FORMAT_GROW:
+        raise AssertionError("a bundle that grows was written as %r" % ps.m["format"])
+    if ps.needs("detail") != {"base"}:
+        raise AssertionError("detail's dependency on base was not read from "
+                             "the patches: %r" % ps.needs("detail"))
+    for o, img in (("base", base_img), ("detail", detail_img)):
+        if patchset.PatchSet(out).apply(dump, [o]) != bytes(img):
+            raise AssertionError("%s applied to the dump is not its image" % o)
+    ps2 = patchset.PatchSet(out)
+    _h, b = ps2.find_body(bytes(detail_img))
+    st = ps2.survey(b)
+    if st != {"base": "applied", "detail": "applied"}:
+        raise AssertionError("a cartridge with both reads as %r" % st)
+    for bad, why in (([dict(options[1], on="nothing")], "an option on nothing"),
+                     ([dict(options[0], image=bytes(base_img[:-1]))],
+                      "an image of the wrong size")):
+        try:
+            patchset.bundle_from_images(os.path.join(d, "x.abp"), dump, 0xF800,
+                                        bad, "x", grow={"size": 0x1000})
+        except patchset.PatchSetError:
+            continue
+        raise AssertionError("%s was accepted" % why)
+    return ("sections, shared spans, anchors and the dependency worked out "
+            "from two finished images; each applies to its image, both read "
+            "as applied, and a bad option is refused")
+
+
+def t_modmap():
+    """modmap.py sorts a grown mod's bytes into kept, overwritten and new.
+
+    An invented 2K original grown to 4K: two bytes overwritten, some new
+    code, a labelled table, a read $FF that must count as data rather than
+    empty, and coverage saying which original bytes were read.
+    """
+    import modmap
+    orig = bytes(((i * 13 + 1) & 0xFF) for i in range(0x800))
+    mod = bytearray(b"\xFF" * 0x800 + orig)          # $F000-$FFFF
+    mod[0x800 + 0x10:0x800 + 0x12] = b"\xEA\xEA"      # overwritten, $F810
+    mod[0x000:0x020] = bytes(range(1, 0x21))          # new, $F000
+    mod[0x100:0x110] = bytes(range(0x40, 0x50))       # labelled, $F100
+    read = [False] * 0x1000
+    for i in range(0x800, 0x900):
+        read[i] = True                                # $F800-$F8FF read
+    read[0x200] = True                                # a read $FF at $F200
+    cat = modmap.classify(orig, bytes(mod), read,
+                          [("tables", modmap.parse_ranges("F100-F10F"))])
+    got = collections.Counter(cat)
+    want = {"original, read": 0x100 - 2, "original, not read": 0x700,
+            "overwritten": 2, "tables": 0x10, "new": 0x20 + 1,
+            "new, empty": 0x800 - 0x20 - 0x10 - 1}
+    if dict(got) != want:
+        raise AssertionError("classes %r, want %r" % (dict(got), want))
+    return ("kept (read and not), overwritten, labelled, new and empty counted; "
+            "a read $FF is data")
+
+
+def t_zonebill():
+    """zonebill.py walks a RAM dump's display list list and bills each zone.
+
+    An invented dump: 31 zones of 8 lines, each pointing at one display list
+    with a single 4-byte object 4 bytes wide.
+    """
+    import zonebill
+    ram = bytearray(0x1000)                           # $1800-$27FF
+    for z in range(31):
+        ram[z * 3:z * 3 + 3] = bytes([0x07, 0x19, 0x00])   # 8 lines, DL at $1900
+    ram[0x100:0x106] = bytes([0x00, 0x1C, 0xA0, 0x10, 0x00, 0x00])
+    d = tempfile.mkdtemp(prefix="zonebill-")
+    path = os.path.join(d, "t-ram-00001.bin")
+    open(path, "wb").write(bytes(ram))
+    open(os.path.join(d, "t-ram-00001.txt"), "w").write("dpph=18 dppl=00 ctrl=40\n")
+    zones, _ctrl = zonebill.bill(path)
+    if len(zones) != 31 or sum(z["lines"] for z, _, _, _ in zones) != 248:
+        raise AssertionError("walked %d zones" % len(zones))
+    if any(len(o) != 1 or o[0]["width"] != 4 for _, o, _, _ in zones):
+        raise AssertionError("objects misread: %r" % [len(o) for _, o, _, _ in zones])
+    return "31 zones of 8 lines, one 4-byte-wide object each, billed"
+
+
+def t_regress():
+    """regress.py expands jobs, fills variables, and compares verdicts.
+
+    MAME is replaced by a stand-in that writes the file the job names, so the
+    job file, the substitution, the verdict rules and --against are tested
+    without an emulator.
+    """
+    import regress
+    d = tempfile.mkdtemp(prefix="regress-")
+    jobs = {
+        "vars": {"out": d.replace("\\", "/")},
+        "cart": "{rom}",
+        "jobs": [
+            {"name": "echo {k}", "for": {"k": ["a", "b"]}, "script": "x.lua",
+             "env": {"WRITE": "{out}/{k}.txt", "SAY": "line one|verdict {k}"},
+             "verdict_file": "{out}/{k}.txt"},
+            {"name": "grep", "script": "x.lua",
+             "env": {"WRITE": "{out}/g.txt", "SAY": "noise|CC23=100|more"},
+             "verdict_file": "{out}/g.txt", "verdict_grep": "CC23=([0-9]+)"},
+        ]}
+    jf = os.path.join(d, "jobs.json")
+    json.dump(jobs, open(jf, "w"))
+    stand_in = ("import os; open(os.environ['WRITE'], 'w').write("
+                "os.environ['SAY'].replace('|', chr(10)) + chr(10))")
+    real = regress.mame_line
+    regress.mame_line = lambda job, cfg: [sys.executable, "-c", stand_in]
+    try:
+        base = os.path.join(d, "base.json")
+        saved_argv = sys.argv
+        sys.argv = ["regress.py", jf, "--var", "rom=x.a78", "--save", base]
+        if regress.main() != 0:
+            raise AssertionError("a first run failed")
+        got = json.load(open(base))
+        want = {"echo a": "verdict a", "echo b": "verdict b", "grep": "100"}
+        if got != want:
+            raise AssertionError("verdicts %r, want %r" % (got, want))
+        json.dump(dict(want, grep="99"), open(base, "w"))
+        sys.argv = ["regress.py", jf, "--var", "rom=x.a78", "--against", base]
+        if regress.main() != 1:
+            raise AssertionError("a changed verdict was not reported")
+    finally:
+        regress.mame_line = real
+        sys.argv = saved_argv
+    return "two expanded jobs and a grep verdict; a changed verdict fails --against"
+
+
+def t_mame_palette():
+    """palette.py carries MAME's colour table, and A7800_PALETTE switches to it."""
+    import palette
+    if palette.mame7800(0x17) != (145, 126, 9) or palette.mame7800(0x0D) != (221, 221, 221):
+        raise AssertionError("MAME's table reads %r and %r"
+                             % (palette.mame7800(0x17), palette.mame7800(0x0D)))
+    if len(palette.MAME_NTSC) != 256 or len(palette.MAME_PAL) != 256:
+        raise AssertionError("a table is not 256 entries")
+    keep = os.environ.get("A7800_PALETTE")
+    try:
+        os.environ["A7800_PALETTE"] = "mame"
+        if palette.ntsc7800(0x17) != (145, 126, 9):
+            raise AssertionError("A7800_PALETTE=mame did not switch ntsc7800()")
+        os.environ["A7800_PALETTE"] = ""
+        if palette.ntsc7800(0x17) == (145, 126, 9):
+            raise AssertionError("the approximation is no longer the default")
+    finally:
+        if keep is None:
+            os.environ.pop("A7800_PALETTE", None)
+        else:
+            os.environ["A7800_PALETTE"] = keep
+    return "MAME's $17 gold and $0D grey; A7800_PALETTE=mame switches ntsc7800()"
+
+
 def t_patchset():
     """The patch-set format, against a cartridge invented for the purpose.
 
@@ -2313,8 +2569,15 @@ def main():
     r.check("engine finder", t_engine_finder)
     r.check("forth decompiler", t_forth_decompiler)
     r.check("8-bit cartridge tracer", t_a8dis)
+    r.check("assembler names", t_asm_names)
     r.check("patch sets", t_patchset)
     r.check("patch sets that grow", t_patchset_grow)
+    r.check("bundles are reproducible", t_bundle_reproducible)
+    r.check("bundles built from images", t_bundle_from_images)
+    r.check("mod maps", t_modmap)
+    r.check("zone bills", t_zonebill)
+    r.check("regression runner", t_regress)
+    r.check("MAME palette", t_mame_palette)
     r.check("recipes carry no payload", t_portkit_refuses_payload)
     r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)
