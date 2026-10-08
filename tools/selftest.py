@@ -658,6 +658,8 @@ def t_helps():
             continue
         p = subprocess.run([sys.executable, f, "--help"],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if p.returncode != 0 and b"No module named 'PIL'" in p.stdout:
+            continue    # Pillow is optional; a tool that needs it says so
         if p.returncode != 0:
             bad.append("%s (exit %d)" % (name, p.returncode))
     if bad:

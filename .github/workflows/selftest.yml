@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - run: python -m pip install flake8
+      - run: python -m pip install flake8 pillow
       - run: python tools/selftest.py
 
   # The same self-test with a real MAME and the open BIOS, so the Lua probes are
@@ -38,6 +38,7 @@ jobs:
           (cd 7800OpenBIOS && dasm 7800openbios.asm -f3 -v0 -I. -o7800openbios.bin)
           mkdir -p bios/a7800
           cp 7800OpenBIOS/7800openbios.bin bios/a7800/c300558-001a.u7
+      - run: python -m pip install pillow
       - run: python tools/selftest.py
         env:
           A7800_MAME: /usr/games/mame
