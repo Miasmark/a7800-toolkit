@@ -344,13 +344,13 @@ class Screen(object):
         writes = self.d.get("writes") or []
         out, fired = [], 0
         for _y, z in zones:
+            if z["dli"]:
+                fired += 1              # the handler runs before this zone
             st = dict(base)
             for n, a, v in writes:
                 if n <= fired:
                     st[a] = v
             out.append(st)
-            if z["dli"]:
-                fired += 1
         return out
 
     def zones(self):

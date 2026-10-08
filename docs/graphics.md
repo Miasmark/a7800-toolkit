@@ -64,6 +64,11 @@ modes:
   *colour 2* (not 1); a clear bit is transparent. Display-list positions stay in
   160-pixel units, so a 320 pixel is half a position. Real HUD text uses it
   (Triple Punch switches CTRL to read mode 3 from its display-list interrupt).
+  A zone whose display-list-list entry has the interrupt bit is drawn *after* its
+  handler has run, so the handler's CHARBASE, CTRL and palette writes apply to
+  that zone, not the one below it (Triple Punch's "1UP / HI SCORE" row is drawn
+  with the font the handler selects; reading it with the previous registers gave
+  noise).
 * **320D and the rest of the 320 modes** -- read mode 2, and read mode 3 with
   write mode 1, were seen to draw something other than one bit per pixel (bits
   are paired across the byte) and are *not* decoded; `mariapix.py` returns
