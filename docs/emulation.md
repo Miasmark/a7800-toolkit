@@ -270,6 +270,17 @@ Things this turned up that the notes above did not say:
 * **`whocalls.lua` needs the debugger**, which a headless run does not have.
 * **Read-modify-write instructions write twice** -- see `pcwrites.lua`.
 
+* **The debugger works headless**, which gives instruction traces and what
+  `whocalls.lua` needs, if Qt is told not to look for a display:
+
+      QT_QPA_PLATFORM=offscreen mame a7800 ... -video none -debug \
+          -debugscript trace.txt -seconds_to_run 12
+
+  with `trace out.log,0,noloop` then `go` in the script (`noloop` keeps a wait
+  loop to one line -- `docs/pitfalls.md` explains why a diff needs it). A
+  12-second Triple Punch run gives 3.9 million lines. The trace has no bank
+  number: a line in `$8000-$BFFF` does not say which bank ran.
+
 ## Probe index
 
 Every file in `probes/`. All are parameterised by environment variables (each

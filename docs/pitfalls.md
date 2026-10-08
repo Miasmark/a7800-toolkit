@@ -855,6 +855,13 @@ negatives:
   interrupts by tapping the handler's entry address reports zero, which reads
   exactly like "no interrupts are being raised". Write taps on RAM and on
   MARIA registers are unaffected.
+  *Not true everywhere.* Re-checked on MAME 0.264, with the open BIOS: read taps on
+  opcode addresses in both the fixed bank and the switched `$8000` window counted
+  exactly what the debugger's trace did (an NMI handler 1,332 of 1,332 entries; a
+  window routine 23,976 of 23,976), and a once-a-frame instruction counted 238 in
+  240 frames. So the failure above belongs to a particular MAME build, mapper or
+  the a7800 fork. Do not trust either claim: tap one address whose executions you
+  can count from a trace, and compare, before building on it.
 * **A tap can stop firing when the driver remaps.** One installed over
   `$0000-$03FF` here went quiet at frame 81, and a trace that simply stops
   looks like a machine that has gone idle. It happened twice, at different
