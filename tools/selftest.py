@@ -959,6 +959,23 @@ def t_annotations_lint():
         "; %d real files clean" % n if n else "")
 
 
+def t_pcmap():
+    """pcmap.py groups samples under the nearest label below them, in their own
+    space, and says so honestly when there is no label."""
+    import pcmap
+    samples = pcmap.parse_samples("f7:C010 30\nf7:C012 10\nf7:C100 50\nb3:8004 5\nf7:BFFF 5\n")
+    assert samples[("f7", 0xC010)] == 30
+    labels = {("f7", 0xC000): "RESET", ("f7", 0xC100): "Update", ("b3", 0x8000): "Tune"}
+    rows = pcmap.profile(samples, labels)
+    got = {r[0]: r[3] for r in rows}
+    assert got == {"Update": 50, "RESET": 40, "Tune": 5, "f7:BFFF?": 5}, got
+    assert rows[0][0] == "Update" and rows[0][4] == {0xC100: 50}, rows[0]
+    assert pcmap.labels_from_annotations({"labels": {"f7:$C000": "A", "b3:0x8000": "B",
+                                                      "junk": "C"}}) == {
+        ("f7", 0xC000): "A", ("b3", 0x8000): "B"}
+    return "samples grouped under the nearest label in their own space"
+
+
 def t_dynamic():
     """dyn.py turns an exectrace log into annotations that reach code the
     vectors alone cannot: the handler behind a RAM vector, and every bank a
@@ -1220,6 +1237,17 @@ def t_probes_mame(rom):
         assert re.search(r"^S %s %d x\d+$" % (sw, b), xt, re.M), (b, xt[:400])
         assert "X b%d:8000" % b in xt, b
     assert not any("X b%d:" % b in xt for b in facts["never_executed_banks"]), xt
+    sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "4",
+                                 "-autoboot_script",
+                                 os.path.join(ROOT, "probes", "pcprof.lua")],
+                        cwd=work, env=env, timeout=300,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    import pcmap
+    prof = pcmap.profile(pcmap.parse_samples(io.open(os.path.join(work, "pcprof.log"),
+                                                     encoding="utf-8").read()),
+                         {("f7", facts["sym"][k]): k for k in ("reset", "wait_low", "wait_high", "synth_tick")})
+    # the synthetic cartridge spends the visible frame waiting for vertical blank
+    assert prof[0][0] in ("wait_high", "wait_low") and prof[0][3] > 0.9 * sum(r[3] for r in prof), prof[:3]
     sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
                                  "-autoboot_script",
                                  os.path.join(ROOT, "probes", "audio.lua")],
@@ -1266,7 +1294,7 @@ def t_probes_mame(rom):
         note = " (WARNING: MAME %s; these notes were measured on %s)" % (
             _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
     return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
-            "exectrace, a recording, the banked cart's facts, and a whole first look, under MAME"
+            "exectrace, pcprof, a recording, the banked cart's facts, and a whole first look, under MAME"
             + note)
 
 
@@ -3295,6 +3323,7 @@ def main():
     r.check("doc references", t_docrefs)
     r.check("synthetic banked cart", t_synth_static)
     r.check("annotations lint", t_annotations_lint)
+    r.check("profile mapping", t_pcmap)
     r.check("dynamic annotations", t_dynamic)
     r.check("first look (static)", t_firstlook_static)
 
