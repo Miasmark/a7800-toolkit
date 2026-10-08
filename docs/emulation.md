@@ -244,6 +244,8 @@ as `$1878` or `$186D` are that game's); treat those as templates.
 | `watch.lua` | See what a running game does: write taps and logging. |
 | `audio.lua` | Log audio register writes for `tracker.py` (`A7800_POKEY=<base>` for cartridge POKEY). |
 | `a7800-frames.lua` | Frame markers for the `a7800` fork, alongside a debugger watchpoint log. |
+| `threadprof.lua` | Profile a threaded-code (Forth) game while a person plays; read with `forth.py --profile`. Used by `replay.py`. |
+| `dumpgfx.lua` | Dump a live game's graphics and palette registers (`dumpgfx_regs.txt`) for `spritedump.py`. |
 | `dumpdl.lua`, `dumpdl-spin2.lua` | Find the display list list and dump RAM so `dlwalk.py` can decode it. |
 | `rendersurvey.lua` | MARIA and CPU spend per frame; dumps RAM for `zonebill.py`. |
 | `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
