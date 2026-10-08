@@ -64,7 +64,8 @@ def replay(mame, rom, inp, log, seconds, rompath, loop=None, skip=None):
     env = dict(os.environ)
     env["A7800_PROF_LOG"] = os.path.abspath(log)
     if loop:
-        env["A7800_LOOP"] = str(int(loop.lstrip("$"), 16))
+        from addr import parse_addr
+        env["A7800_LOOP"] = str(parse_addr(loop))
     if skip:
         env["A7800_PROF_SKIP"] = str(skip)
     r = subprocess.run(cmd, capture_output=True, text=True, env=env,

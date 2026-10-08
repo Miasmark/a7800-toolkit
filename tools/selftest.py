@@ -671,7 +671,7 @@ def t_readme():
     claimed = set(re.findall(r"^\| `([a-z0-9_]+\.py)`", s, re.M))
     actual = set(os.path.basename(f)
                  for f in glob.glob(os.path.join(HERE, "*.py")))
-    libs = set(["a7800.py", "m6502.py"])
+    libs = set(["a7800.py", "m6502.py", "addr.py"])
     missing = sorted(claimed - actual)
     undocumented = sorted(actual - claimed - libs)
     if missing:
@@ -957,6 +957,54 @@ def t_annotations_lint():
             n += 1
     return "typos, repeats, clashes, bad shapes and bad locations flagged; ROM checks%s" % (
         "; %d real files clean" % n if n else "")
+
+
+def t_addresses():
+    """$C000, 0xC000 and C000 mean the same everywhere an address is typed, and a
+    tool copied on its own into an empty folder still accepts all three."""
+    import addr
+    for text in ("$C000", "0xC000", "0xc000", "C000", " c000 "):
+        assert addr.parse_addr(text) == 0xC000, text
+    for bad in ("zzz", "", "$", "0x"):
+        try:
+            addr.address(bad)
+        except Exception as e:                               # noqa: BLE001
+            assert "is not an address" in str(e), (bad, e)
+        else:
+            raise AssertionError("%r was accepted as an address" % bad)
+    synth = _synth()
+    data, f = synth.build()
+    d = tempfile.mkdtemp(prefix="addr-")
+    rom = os.path.join(d, "s.a78")
+    io.open(rom, "wb").write(data)
+    outs = set()
+    for spelling in ("$D000", "0xD000", "D000"):
+        png = os.path.join(d, "g%s.png" % spelling.strip("$"))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "gfx.py"), rom, "--space",
+                            "f7", "--base", spelling, "--direct", "4", "--lines", "8", "-o", png],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode and b"PIL" in r.stdout:
+            return None                              # no Pillow: nothing to compare
+        assert r.returncode == 0, r.stdout[-300:]
+        outs.add(hashlib.md5(io.open(png, "rb").read()).hexdigest())
+    assert len(outs) == 1, "three spellings of one address drew different pictures"
+    # a standalone tool, copied alone, takes the same spellings
+    alone = os.path.join(d, "alone")
+    os.makedirs(alone)
+    for tool, args in (("dlwalk.py", ["--selftest"]), ("modmap.py", ["--help"])):
+        shutil.copy(os.path.join(HERE, tool), alone)
+    ram = os.path.join(alone, "ram.bin")
+    io.open(ram, "wb").write(bytes(4096))
+    for spelling in ("$1800", "0x1800", "1800"):
+        r = subprocess.run([sys.executable, os.path.join(alone, "dlwalk.py"), "--raw", ram,
+                            "--at", spelling, "--dll", spelling],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        assert b"Traceback" not in r.stdout and b"invalid" not in r.stdout, \
+            (spelling, r.stdout[-300:])
+    r = subprocess.run([sys.executable, os.path.join(alone, "modmap.py"), "--help"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    assert r.returncode == 0 and b"Traceback" not in r.stdout
+    return "three spellings give one answer; standalone tools carry their own copy of the rule"
 
 
 def t_pcmap():
@@ -3323,6 +3371,7 @@ def main():
     r.check("doc references", t_docrefs)
     r.check("synthetic banked cart", t_synth_static)
     r.check("annotations lint", t_annotations_lint)
+    r.check("address spellings", t_addresses)
     r.check("profile mapping", t_pcmap)
     r.check("dynamic annotations", t_dynamic)
     r.check("first look (static)", t_firstlook_static)

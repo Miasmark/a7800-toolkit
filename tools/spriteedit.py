@@ -73,6 +73,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 import cart as cart_module
 import palette as palette_mod
 
@@ -770,7 +771,7 @@ def main():
     ap.add_argument("rom")
     ap.add_argument("--manifest", help="an assets.py manifest to open")
     ap.add_argument("--space")
-    ap.add_argument("--base", type=lambda v: int(v, 0))
+    ap.add_argument("--base", type=address)
     ap.add_argument("--width", type=int, default=1,
                     help="bytes per cell per line (1 for a character set)")
     ap.add_argument("--height", type=int, default=8, help="lines per cell")

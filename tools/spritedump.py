@@ -56,6 +56,7 @@ import sys
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 from disasm import Cart
 from palette import ntsc7800
 
@@ -155,7 +156,7 @@ def main():
                     help="bank/space name, for a mapped cartridge "
                          "(default: the cart's only space, or its first)")
     ap.add_argument("--side", choices=["sally", "maria"], default="sally")
-    ap.add_argument("--base", type=lambda v: int(v, 0),
+    ap.add_argument("--base", type=address,
                     help="graphics address of the object's lowest page")
     ap.add_argument("--width", type=int, help="bytes per line")
     ap.add_argument("--lines", type=int, help="scanlines")

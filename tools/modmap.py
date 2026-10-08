@@ -46,11 +46,18 @@ def body(path):
     return blob
 
 
+def _hex(text):
+    """$C000, 0xC000 and C000 all mean 49152 (tools/addr.py, inline: this tool
+    runs as a single copied file)."""
+    s = text.strip()
+    return int(s[1:] if s[:1] == "$" else s[2:] if s[:2].lower() == "0x" else s, 16)
+
+
 def parse_ranges(text):
     out = []
     for part in text.split(","):
         lo, _, hi = part.strip().partition("-")
-        out.append((int(lo, 16), int(hi or lo, 16)))
+        out.append((_hex(lo), _hex(hi or lo)))
     return out
 
 
@@ -99,7 +106,7 @@ def main():
                          "other way round")
     base = 0x10000 - len(mod)
     read = [False] * len(mod)
-    cfrom = int(args.cov_from, 16)
+    cfrom = _hex(args.cov_from)
     for fn in args.coverage:
         s = open(fn).read().strip()
         for j, ch in enumerate(s):

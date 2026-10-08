@@ -208,7 +208,7 @@ which is how the two BIOSes in `docs/bios.md` were compared.
 | [`bios.md`](docs/bios.md) | What Atari's NTSC BIOS does before a cartridge runs (self-test, signature, the state it hands over), and how 7800OpenBIOS differs. |
 | [`audio.md`](docs/audio.md) | The TIA's two voices, POKEY's four, why one chip is out of tune and the other is not, the tracker, and pulling songs out of a ROM and pushing them back. |
 
-`a7800.py` and `m6502.py` are libraries, not commands: the machine's constants
+`a7800.py`, `m6502.py` and `addr.py` are libraries, not commands: the machine's constants
 and the 6502 opcode and cycle tables. Everything else runs from the shell.
 
 ### Templates
@@ -237,6 +237,15 @@ a static tracer on purpose -- a bank switch whose number comes from a table, a
 `facts()` says what a correct tool must find. With MAME and a BIOS configured
 ([`docs/emulation.md`](docs/emulation.md#running-mame-with-no-atari-bios)),
 selftest also runs the probes against it and checks what they observe.
+
+## Addresses, on the command line
+
+Every option that takes an address reads `$C000`, `0xC000` and `C000` the same --
+hexadecimal, because that is how addresses on this machine are written (`tools/addr.py`).
+Before this, `--base 8000` in `gfx.py`, `assets.py`, `dlwalk.py` and the sprite tools
+meant *decimal* 8000 and `$8000` was refused, while `a8dis.py` and `modmap.py`
+refused `0x8000`. Bank numbers, counts, frames and lines are not addresses and stay
+decimal.
 
 ## The one rule
 

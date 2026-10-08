@@ -41,6 +41,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 import a7800
 import audiotrace
 import cart as cart_module
@@ -324,9 +325,9 @@ def main():
     ap.add_argument("--ram", metavar="DUMP",
                     help="a RAM dump from probes/dumpdl.lua, so the live "
                          "display list can be followed to the artwork")
-    ap.add_argument("--at", type=lambda v: int(v, 0), default=0x1800,
+    ap.add_argument("--at", type=address, default=0x1800,
                     help="CPU address the --ram dump starts at")
-    ap.add_argument("--dll", type=lambda v: int(v, 0),
+    ap.add_argument("--dll", type=address,
                     help="the display-list-list address dumpdl.lua printed")
     ap.add_argument("--zones", type=int, default=25)
     ap.add_argument("--min", type=int, default=16,

@@ -58,6 +58,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import parse_addr  # noqa: E402
 import cart as cart_module
 import tracker
 
@@ -831,7 +832,7 @@ def main():
     from_scan = False
     if args.at:
         sp, _, a = args.at.partition(":")
-        space, addr = sp, int(a.lstrip("$"), 16)
+        space, addr = sp, parse_addr(a)
     else:
         # No address given: ask audiotrace where the music is.
         try:
