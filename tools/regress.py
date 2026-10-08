@@ -93,7 +93,9 @@ def run_cmd(cmd):
 
 
 def mame_line(job, cfg):
-    cmd = [cfg["mame"], "a7800", "-rompath", cfg["bios"], "-cart", job["cart"],
+    bios = os.environ.get("A7800_BIOS")      # e.g. a7800pr for the open BIOS
+    cmd = [cfg["mame"], "a7800"] + (["-bios", bios] if bios else []) + [
+           "-rompath", cfg["bios"], "-cart", job["cart"],
            "-skip_gameinfo", "-keyboardprovider", "none",
            "-input_directory", cfg["input_dir"]]
     if job.get("playback"):

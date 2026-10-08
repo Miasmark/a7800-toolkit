@@ -22,11 +22,12 @@ different moments in the game. To compare an original with a patch, record a
 session on each.
 
 Play to the point you want captured, then close MAME. To measure a recording,
-run a probe over it with `-playback` (probes/reclength.lua first, to learn how
-long it really is) or hand it to tools/regress.py.
+run a probe over it with `-playback` (probes/reclength.lua first, with
+`-exit_after_playback`, to learn how long it really is) or hand it to tools/regress.py.
 
 MAME and the BIOS are found the way tools/capture.py finds them:
---mame / A7800_MAME and --rompath / A7800_ROMPATH.
+--mame / A7800_MAME and --rompath / A7800_ROMPATH. Set A7800_BIOS=a7800pr to
+use the open BIOS in that slot (docs/bios.md).
 """
 import argparse
 import glob
@@ -77,7 +78,8 @@ def launch(args, extra):
                  "A7800_ROMPATH to the folder holding it.")
     folder = rec_dir(args.rom)
     os.makedirs(folder, exist_ok=True)
-    cmd = [mame, machine_for(args.rom), "-rompath", rompath,
+    cmd = [mame, machine_for(args.rom)] + capture.bios_args() + [
+           "-rompath", rompath,
            "-cart", os.path.abspath(args.rom), "-skip_gameinfo", "-window",
            "-input_directory", folder] + extra
     print(" ".join('"%s"' % c if " " in c else c for c in cmd))

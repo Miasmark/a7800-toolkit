@@ -1,13 +1,18 @@
 -- reclength.lua -- a recording's TRUE length in frames, before any other analysis.
 --
 --   mame a7800 -rompath ../bios -cart game.a78 -skip_gameinfo -video none \
---        -sound none -nothrottle -playback run-01.inp \
+--        -sound none -nothrottle -playback run-01.inp -exit_after_playback \
 --        -autoboot_script probes/reclength.lua
 --
 -- Never trust an early or short exit threshold as "the recording's length".
 -- An analysis that stops at frame 6000 of a 20000-frame recording reports on
 -- the first third and says nothing about it. Let MAME's own playback run out
 -- against a generous cap instead, and read the length from here.
+--
+-- -exit_after_playback is what makes MAME stop where the recording stops. Without
+-- it the machine carries on under live control after the last recorded input,
+-- the count keeps growing, and only the cap ends the run (the line then says so).
+-- (Checked on MAME 0.264: a 4-second recording reports 241 frames.)
 --
 -- Prints "recording length: N frames" when the machine stops (playback ended,
 -- or the cap was hit -- the line says which). The cap defaults to 600000
@@ -31,5 +36,6 @@ FRAME_CB = emu.register_frame_done(function()
   if F % 50000 == 0 then print("progress frame " .. F) end
   if F >= CAP then capped = true MACHINE:exit() end
 end)
-if emu.register_stop then emu.register_stop(report)
-elseif emu.add_machine_stop_notifier then emu.add_machine_stop_notifier(report) end
+-- held in a global; register_stop is the older spelling (deprecated in new MAME)
+if emu.add_machine_stop_notifier then STOP_CB = emu.add_machine_stop_notifier(report)
+else emu.register_stop(report) end

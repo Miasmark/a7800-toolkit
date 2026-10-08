@@ -108,5 +108,6 @@ FRAME_CB = emu.register_frame_done(function()
   if F > SETTLE and dpph and dppl then walk_dll((dpph << 8) | dppl) end
   if F % 300 == 0 then dump() end
 end)
-if emu.register_stop then emu.register_stop(dump)
-elseif emu.add_machine_stop_notifier then emu.add_machine_stop_notifier(dump) end
+-- held in a global; register_stop is the older spelling (deprecated in new MAME)
+if emu.add_machine_stop_notifier then STOP_CB = emu.add_machine_stop_notifier(dump)
+else emu.register_stop(dump) end

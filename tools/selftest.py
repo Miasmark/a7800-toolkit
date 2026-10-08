@@ -861,6 +861,64 @@ def t_flake8():
     return "no unused or undefined names"
 
 
+def t_probes_mame(rom):
+    """Run the generic probes under real MAME on a cartridge we know the answers
+    for. Skipped when there is no MAME or no BIOS to boot it."""
+    import capture
+    exe = capture.find_mame()
+    roms = capture.find_rompath(rom or "x") if rom else None
+    if not (exe and roms and rom):
+        return None
+    work = tempfile.mkdtemp(prefix="mame-")
+    base = [exe, "a7800"] + capture.bios_args() + [
+        "-rompath", roms, "-cart", os.path.abspath(rom), "-video", "none",
+        "-sound", "none", "-skip_gameinfo"]
+    env = dict(os.environ, XDG_RUNTIME_DIR=work, SDL_AUDIODRIVER="dummy")
+
+    def run(probe, seconds, extra=(), **vars):
+        e = dict(env, **vars)
+        p = subprocess.run(base + ["-nothrottle", "-seconds_to_run", str(seconds),
+                                   "-autoboot_script",
+                                   os.path.join(ROOT, "probes", probe)] + list(extra),
+                           cwd=work, env=e, timeout=180,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return p.stdout.decode("utf-8", "replace")
+
+    # the synthetic cartridge: sprite row at $D000 (width 4), frame counter $81
+    out = run("reclength.lua", 4)
+    m = re.search(r"recording length: (\d+) frames", out)
+    assert m and 235 <= int(m.group(1)) <= 245, out[-300:]
+    run("liveslots.lua", 5, A7800_SETTLE="30")
+    d = json.load(io.open(os.path.join(work, "liveslots-out.json"), encoding="utf-8"))
+    assert {"addr": 0xD000, "width": 4} in d["refs"], d
+    run("ramsnap.lua", 5, A7800_PAGES="0000", A7800_EVERY="30")
+    d = json.load(io.open(os.path.join(work, "ramsnap-out.json"), encoding="utf-8"))
+    row = d["pages"]["0000"].get("129")
+    assert row and row[1] - row[0] == 30, d       # the frame counter at $81
+    out = run("freeram.lua", 4, A7800_CANDIDATES="80-83", A7800_CONTROL="81")
+    assert "control $81 saw" in out and "taps worked" in out, out[-300:]
+    run("pcwrites.lua", 3, A7800_PW_LO="0x81", A7800_PW_HI="0x81",
+        A7800_PW_FROM="60", A7800_PW_TO="62")
+    log = io.open(os.path.join(work, "pcwrites.log"), encoding="utf-8").read().split("\n")
+    assert len(log) > 4 and "$0081" in log[1], log[:4]
+    run("inputreaders.lua", 3, A7800_IR_NOBANK="1")
+    log = io.open(os.path.join(work, "inputreaders.log"), encoding="utf-8").read()
+    assert "SWCHA <-" in log, log
+    # a recording, then its length: -exit_after_playback must stop it at the end
+    os.mkdir(os.path.join(work, "rec"))
+    subprocess.run(base + ["-seconds_to_run", "3", "-input_directory",
+                           os.path.join(work, "rec"), "-record", "t.inp"],
+                   cwd=work, env=env, timeout=120,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = run("reclength.lua", 60,
+              ["-input_directory", os.path.join(work, "rec"),
+               "-playback", "t.inp", "-exit_after_playback"])
+    m = re.search(r"recording length: (\d+) frames\n", out)
+    assert m and 175 <= int(m.group(1)) <= 185 and "CAP" not in out, out[-300:]
+    shutil.rmtree(work, True)
+    return "reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders and a recording, under MAME"
+
+
 # ------------------------------------------------------------ with a cartridge
 
 def _pull(rom, fmt):
@@ -2711,7 +2769,10 @@ def hermetic(keep_env=False):
     --keep-env opts out.
     """
     if not keep_env:
-        for k in [k for k in os.environ if k.startswith("A7800_")]:
+        # A7800_MAME / _ROMPATH / _BIOS only say where things are; they cannot
+        # change a result, and the MAME checks need them to find anything.
+        keep = ("A7800_MAME", "A7800_ROMPATH", "A7800_BIOS")
+        for k in [k for k in os.environ if k.startswith("A7800_") and k not in keep]:
             del os.environ[k]
     root = tempfile.mkdtemp(prefix="selftest-")
     tempfile.tempdir = root
@@ -2808,6 +2869,7 @@ def main():
             lambda: t_songs_from_rom(args.rom, args.format))
     r.check("workbench", lambda: t_workbench(args.rom))
     r.check("disassembler runs", lambda: t_disasm(args.rom))
+    r.check("probes under MAME", lambda: t_probes_mame(args.rom))
 
     n_ok = sum(1 for x in r.rows if x[1] == PASS)
     n_skip = sum(1 for x in r.rows if x[1] == SKIP)

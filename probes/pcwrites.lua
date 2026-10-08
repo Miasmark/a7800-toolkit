@@ -17,6 +17,9 @@
 -- Output, one write per line:   frame $addr old new $pc
 -- Keep the window narrow: a full RAM range over many frames is a very large
 -- log (probes/diffwrites.lua is the cheap first look, one line per address).
+-- Read-modify-write instructions (INC, DEC, ASL, LSR, ROL, ROR) write twice: the
+-- old value back first, then the new one. So `INC counter` appears as two lines,
+-- `98 98` then `98 99`, and a byte's write count is double its instruction count.
 -- Under MARIA DMA the PC at a tap is the PC of the next instruction fetched
 -- (docs/pitfalls.md); read a "writer" with that in mind.
 local MACHINE = (type(manager.machine) == "function")

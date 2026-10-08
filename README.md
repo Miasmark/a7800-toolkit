@@ -235,7 +235,9 @@ Watch the coverage figure too, and treat a bank stuck low as an open question.
 ## Requirements
 
 Python 3, no dependencies. MAME with 7800 BIOS images for the probes (`a7800`
-for NTSC, `a7800p` for PAL).
+for NTSC, `a7800p` for PAL). With no Atari BIOS, 7800OpenBIOS works in its place:
+[`docs/emulation.md`](docs/emulation.md#running-mame-with-no-atari-bios) has the
+setup, and `A7800_BIOS=a7800pr` points the tools at it.
 
 ## Status
 

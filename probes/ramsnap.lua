@@ -88,5 +88,6 @@ FRAME_CB = emu.register_frame_done(function()
   end
   if CAP and F >= CAP then dump() MACHINE:exit() end
 end)
-if emu.register_stop then emu.register_stop(dump)
-elseif emu.add_machine_stop_notifier then emu.add_machine_stop_notifier(dump) end
+-- held in a global; register_stop is the older spelling (deprecated in new MAME)
+if emu.add_machine_stop_notifier then STOP_CB = emu.add_machine_stop_notifier(dump)
+else emu.register_stop(dump) end

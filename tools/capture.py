@@ -54,6 +54,17 @@ def find_mame(explicit=None):
     return None
 
 
+def bios_args():
+    """`-bios NAME` when A7800_BIOS is set, else nothing.
+
+    MAME's a7800 has a second NTSC BIOS slot, `a7800pr`, which is where an
+    open BIOS goes when Atari's is not to hand (docs/bios.md, "Running
+    OpenBIOS in MAME").
+    """
+    name = os.environ.get("A7800_BIOS")
+    return ["-bios", name] if name else []
+
+
 def find_rompath(rom, explicit=None):
     """Where the 7800 BIOS images live.
 
@@ -268,13 +279,13 @@ def capture(rom, out=None, seconds=40, frames=None, skip=0, drive=True,
             f.write(watch_script(info))
         if os.path.exists(errlog):
             os.remove(errlog)
-        cmd = [exe, info["machine"], "-rompath", roms, "-cart",
+        cmd = [exe, info["machine"]] + bios_args() + ["-rompath", roms, "-cart",
                os.path.abspath(rom), "-debug", "-debugscript", wp,
                "-autoboot_script", FRAME_PROBE, "-autoboot_delay", "1", "-log",
                "-sound", "none", "-video", "none", "-nothrottle",
                "-seconds_to_run", str(int(seconds) + 8)]
     else:
-        cmd = [exe, info["machine"], "-rompath", roms, "-cart",
+        cmd = [exe, info["machine"]] + bios_args() + ["-rompath", roms, "-cart",
                os.path.abspath(rom), "-autoboot_script", PROBE,
                "-sound", "none", "-video", "none", "-nothrottle",
                "-seconds_to_run", str(int(seconds) + 5)]

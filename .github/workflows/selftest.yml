@@ -20,3 +20,26 @@ jobs:
           python-version: "3.x"
       - run: python -m pip install flake8
       - run: python tools/selftest.py
+
+  # The same self-test with a real MAME and the open BIOS, so the Lua probes are
+  # run rather than only linted. The steps are the ones in docs/emulation.md.
+  # NOT YET RUN ON GITHUB: they were run by hand, on Ubuntu 24.04 with MAME 0.264.
+  selftest-mame:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: sudo apt-get update && sudo apt-get install -y mame dasm
+      - name: Build the open BIOS
+        run: |
+          git clone --depth 1 https://github.com/7800-devtools/7800OpenBIOS
+          (cd 7800OpenBIOS && dasm 7800openbios.asm -f3 -v0 -I. -o7800openbios.bin)
+          mkdir -p bios/a7800
+          cp 7800OpenBIOS/7800openbios.bin bios/a7800/c300558-001a.u7
+      - run: python tools/selftest.py
+        env:
+          A7800_MAME: /usr/games/mame
+          A7800_ROMPATH: ${{ github.workspace }}/bios
+          A7800_BIOS: a7800pr

@@ -49,7 +49,9 @@ def find_mame(explicit=None):
 
 def replay(mame, rom, inp, log, seconds, rompath, loop=None, skip=None):
     inp = os.path.abspath(inp)
-    cmd = [mame, "a7800", "-cart", os.path.abspath(rom),
+    import capture
+    cmd = [mame, "a7800"] + capture.bios_args() + [
+           "-cart", os.path.abspath(rom),
            "-autoboot_script", PROBE,
            "-input_directory", os.path.dirname(inp),
            "-playback", os.path.basename(inp),
