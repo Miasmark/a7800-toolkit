@@ -48,7 +48,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -212,7 +211,7 @@ def cmd_extract(recipe, root, supplied, out):
 
 def cmd_build(recipe, root, supplied, out):
     """Assemble the cartridge, and refuse to be quietly wrong about it."""
-    sources = resolve(recipe, root, supplied)
+    resolve(recipe, root, supplied)
     steps = recipe.get("build")
     if not steps:
         print("This recipe has no build section yet -- it can locate and check "

@@ -84,10 +84,6 @@ emulator section is worth reading before you write any probe.
 | `songfmt.py` | Pulls a game's songs out of the ROM as editable data and pushes edited songs back in place, driven by a JSON description of the player's format. Refuses any write that would grow a pattern or touch a byte the format did not declare. `render` turns a pulled song into a tracker file, and `--verify` checks it against a capture frame by frame. |
 | `assets.py` | Finds the artwork and the music *as data*: traces MARIA and audio register writes back to what feeds them, follows a captured display list to the graphics it names, and writes annotation blocks plus a manifest the asset tools consume. Bank-ambiguous finds are reported as candidates, not findings. |
 | `sim.py` | **A TIA tool, and it works.** A 6502 core that runs a cartridge's own code and traps its audio writes, so a player is its own authority on its format. It follows MARIA's display interrupts and agrees with MAME instruction for instruction over the first 427,399 instructions after a cartridge takes control. Scored against like-for-like captures it reproduces **four of five** TIA cartridges -- Ikari Warriors 99.4%, Midnight Mutants 99.0%, Donkey Kong 89.0%, Dark Chambers 78.4% -- with the frame clock exact in each. The fifth diverges because its attract demo does. The POKEY path is NOT validated; see the module docstring. |
-
-
-
-
 | `capture.py` | Cartridge to song in one step: reads the header for the sound chip — both of them, on the eighteen images that carry two POKEYs — runs MAME with the probe, converts the log. Recognises the `a7800` fork and switches to debugger watchpoints, which is the only route that works there. |
 | `midi.py` | Reads a Standard MIDI File: tracks, names, note ranges, polyphony and timing. Handles running status and tempo changes, which is where naive parsers quietly lose notes. |
 | `trackeredit.py` | The tracker itself: a grid in the browser where you type notes, hear them and save. Imports a MIDI track straight into one voice, leaving the rest of the song alone. Backed by the same renderer that exports, so there is only one sound model. |
@@ -171,9 +167,10 @@ the cartridge header so nothing needs choosing.
 `probes/dma-count.lua` and `probes/dma-costcart.py` — MAME scripts
 for watching writes, capturing a live display list, and logging every audio
 register write (TIA, or cartridge POKEY via `A7800_POKEY=<base>`) so
-`tracker.py` can turn a running game's music into an editable song. All three
-carry the garbage-collection warning inline, because a dead tap does not
-announce itself.
+`tracker.py` can turn a running game's music into an editable song. The Lua
+probes among them carry the garbage-collection warning inline, because a dead
+tap does not announce itself. Every other probe is listed, one line each, in
+[`docs/emulation.md`](docs/emulation.md#probe-index).
 
 `probes/wildfetch.lua` stops at the first instruction fetched from where no
 code should be (a bad jump, a bad return) and writes the registers and the
@@ -211,12 +208,14 @@ All human judgement goes here; generated listings stay disposable.
 
 `templates/format.json` — a player-format description for `songfmt.py`, with
 every key explained: where a game keeps its songs, what the bits of a note mean,
-and which envelope engine to run. `formats/` holds two filled in for real
-engines and verified at 100% against hardware: `mm-tia.json` (53 images) and
-`aa-pokey.json` (58 images across 27 titles), plus `rmt.json`, which
-identifies the 84 cartridges carrying a Raster Music Tracker module without
-pretending it can play one. Between them, 23% of every cartridge in the library
-with a recognisable player or module.
+and which envelope engine to run. `formats/` holds the filled-in descriptions: `mm-tia.json` (53 images) and
+`aa-pokey.json` (58 images across 27 titles), both verified at 100% against
+hardware, and four single-title descriptions of the same Atari in-house engine --
+`commando-pokey.json`, `fatal-run-tia.json`, `meltdown-tia.json` and
+`missing-in-action-tia.json`. `rmt.json` identifies the 84 cartridges carrying a
+Raster Music Tracker module without pretending it can play one. The three
+shared descriptions cover 23% of the cartridges that have a recognisable player
+or module (195 of 841; see `docs/audio.md`).
 
 ## The one rule
 
@@ -264,8 +263,9 @@ the split. The display-list decoder was
 checked against a live list pulled out of a running game, not only against its
 own self-test.
 
-Activision banking, Bankset and SOUPER are recognised and refused with an
-explanation rather than laid out wrongly.
+Activision banking and Bankset are laid out (see
+[`docs/cartridges.md`](docs/cartridges.md)). SOUPER and the 512K flat layout are
+recognised and refused with an explanation rather than laid out wrongly.
 
 ## Examples
 

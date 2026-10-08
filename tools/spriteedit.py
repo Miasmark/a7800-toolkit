@@ -763,7 +763,7 @@ def from_manifest(path, cart):
 
 
 def main():
-    global CART, DATA, REGION, PATH, PALETTE, CANDIDATES
+    global CART, DATA, REGION, PATH, CANDIDATES
     ap = argparse.ArgumentParser(
         description=__doc__.strip().split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -570,7 +570,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "no such thing"})
 
     def do_POST(self):
-        global STATE
         n = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(n) or b"{}")

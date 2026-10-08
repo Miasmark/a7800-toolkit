@@ -135,11 +135,14 @@ Two prototypes in the library declare a POKEY at `$4000` *and* ROM there.
 
 ## Coverage
 
-Running `cart.py` over the 1,309-image library: 1,284 laid out, 25 refused
-(Bankset, Activision, SOUPER, and two images whose declared size cannot be
-mapped at all), no crashes. Three layouts were actively disputed by the reset
-probe -- two files whose names say "Overdump" and one prototype, which is the
-probe doing its job.
+*Historical figures.* Over the 1,309-image library, `cart.py` first laid out
+1,284 and refused 25 (Bankset, Activision, SOUPER, and two images whose declared
+size cannot be mapped at all), with no crashes. Activision, Bankset and 52K are
+now supported (next section), so only the "Still unsupported" list at the end of
+this file remains refused: four images in all. The larger library the README
+quotes has not been re-tallied here. Three layouts were actively disputed by the
+reset probe -- two files whose names say "Overdump" and one prototype, which is
+the probe doing its job.
 
 # Activision, Bankset, and 52K
 

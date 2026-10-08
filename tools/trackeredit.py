@@ -33,7 +33,6 @@ import sys
 import tempfile
 import threading
 import webbrowser
-import wave
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -142,7 +141,6 @@ def render_range(lo, hi):
     part.add(list(state), audctl=s.all_ctls(lo))
     for i in range(lo + 1, hi):
         part.add(list(s.rows[i]), audctl=s.all_ctls(i))
-    buf = io.BytesIO()
     tmp = os.path.join(os.path.dirname(os.path.abspath(PATH or ".")),
                        "._trackeredit_preview.wav")
     tracker.render(part, tmp)

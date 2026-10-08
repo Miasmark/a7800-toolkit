@@ -41,7 +41,6 @@ import io as _io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import disasm as D
-import a7800
 import cart as cart_module
 
 # The registers worth watching, by offset from their chip's base.

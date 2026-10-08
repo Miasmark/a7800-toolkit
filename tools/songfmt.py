@@ -118,7 +118,6 @@ def pull(cart, fmt):
     tsp, taddr = parse_loc(songs_cfg["table"])
     stride = songs_cfg["stride"]
     banks = {int(k): v for k, v in songs_cfg.get("banks", {}).items()}
-    tk, pat_cfg, note_cfg = fmt["track"], fmt["pattern"], fmt["note"]
 
     durations = None
     if "durations" in fmt:

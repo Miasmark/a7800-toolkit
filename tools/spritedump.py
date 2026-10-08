@@ -121,7 +121,6 @@ def render_stack(cart, space, segments, colours, descending=True):
 
 def read_palette_regs(path, index):
     """Pull one palette's three colour bytes out of a dumpgfx_regs.txt."""
-    want = "$%02X" % (0x21 + index * 4)   # P{n}C1's register address
     lines_by_addr = {}
     for ln in open(path, encoding="utf-8"):
         ln = ln.strip()

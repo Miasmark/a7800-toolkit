@@ -15,7 +15,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from disasm import Cart, BANK_SIZE
+from disasm import Cart
 from asm import Assembler
 
 

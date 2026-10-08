@@ -34,7 +34,6 @@ byte, one row per 256-byte page.
 """
 import argparse
 import collections
-import os
 import sys
 
 A78 = 128

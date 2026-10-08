@@ -1505,8 +1505,10 @@ player reads for waveforms, pitches and control values.
 
 **The format is what the bytes mean as music.** Which notes, in what order, for
 how long, how they are grouped into patterns and songs -- that is the player's
-own invention, and nothing in `formats/` describes Commando's. Finding a table
-tells you nothing about the structure that indexes it.
+own invention. (When this walkthrough was written nothing in `formats/`
+described Commando's; `formats/commando-pokey.json` has since been worked out
+and shows where it ends up.) Finding a table tells you nothing about the
+structure that indexes it.
 
 So: `audiotrace` gets you to the data. `songfmt` reads it, but only if someone
 has written the description. Between the two sits the actual reverse

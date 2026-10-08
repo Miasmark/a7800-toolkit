@@ -26,7 +26,6 @@ skipping the frame waits certainly does -- record a session on each build and
 compare the profiles rather than expecting the same fight twice.
 """
 import argparse
-import io
 import os
 import subprocess
 import sys

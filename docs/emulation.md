@@ -233,3 +233,30 @@ mapper, but the `$0440` chip is still not there. This is why the toolkit
 captures POKEY from the **CPU bus** instead of the device: it records what the
 game writes to both chips whether or not anything is listening, and
 `tracker.py` renders all eight voices from that. See `docs/audio.md`.
+
+## Probe index
+
+Every file in `probes/`. Several were written against one game (addresses such
+as `$1878` or `$186D` are that game's); treat those as templates.
+
+| probe | what it does |
+|---|---|
+| `watch.lua` | See what a running game does: write taps and logging. |
+| `audio.lua` | Log audio register writes for `tracker.py` (`A7800_POKEY=<base>` for cartridge POKEY). |
+| `a7800-frames.lua` | Frame markers for the `a7800` fork, alongside a debugger watchpoint log. |
+| `dumpdl.lua`, `dumpdl-spin2.lua` | Find the display list list and dump RAM so `dlwalk.py` can decode it. |
+| `rendersurvey.lua` | MARIA and CPU spend per frame; dumps RAM for `zonebill.py`. |
+| `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
+| `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
+| `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
+| `romcoverage.lua` | Which cartridge bytes a run reads (feeds `modmap.py`). |
+| `handover.lua` | State at the moment a cartridge's reset code first runs (see `bios.md`). |
+| `snap.lua`, `snapat.lua`, `snaprange.lua`, `snapstop.lua`, `snapwhen.lua` | Screenshots at chosen frames, an exact frame, every Nth frame, machine stop, or when a RAM byte says so. |
+| `ramdump.lua` | Dump a RAM range to a file at machine stop. |
+| `peek.lua` | Read fixed addresses at chosen frames. |
+| `diffwrites.lua` | Which RAM addresses are written in a frame window. |
+| `freeram2.lua` | Find RAM a game never touches, over a wide candidate set. |
+| `tracewrites.lua`, `tracedir.lua`, `whocalls.lua` | Who writes an address; combined position trace; log callers of an address via an execution breakpoint. |
+| `inputtrace.lua`, `buttonstate.lua`, `slotinput.lua`, `slots.lua` | Log joystick, fire-button and per-player input state. |
+| `framecounter.lua` | Show the running frame number on screen. |
+| `spacelist.lua` | Space-list probe (no header comment; read the source). |

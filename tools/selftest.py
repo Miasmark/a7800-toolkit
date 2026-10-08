@@ -352,7 +352,7 @@ def t_sim_random():
     silence through a player that is working perfectly. That was a real bug
     here and it took a long time to find, so this pins the register down.
     """
-    import sim, cart as cart_module
+    import sim
 
     class FakeCart(object):
         nbanks = 1
@@ -1944,7 +1944,6 @@ def t_patchset():
     format is lying.
     """
     import json
-    import zipfile
     import bps
     import patchset
 
