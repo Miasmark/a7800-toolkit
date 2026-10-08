@@ -19,10 +19,16 @@
 --                 space starts); objects pointing into RAM are ignored
 --   A7800_LINES   scanlines of display to walk (default 242; use 192 for a
 --                 shorter picture)
+--   A7800_SETTLE  frames to ignore at boot (default 200; see below)
 --   A7800_OUT     output file (default liveslots-out.json)
 --
 -- Output: {"frames":N,"refs":[{"addr":32768,"width":4},...]}, checkpointed every
 -- 300 frames so a long run still leaves output if killed.
+--
+-- Boot: DPPH/DPPL hold the BIOS's own list for a long time (Dig Dug: frame 16 to
+-- 165), so nothing is recorded before A7800_SETTLE frames. Past that, a few
+-- references can still be torn reads -- the callback races the CPU -- and are
+-- discarded when they fall below A7800_ROMLO. docs/pitfalls.md has the story.
 --
 -- Caveat: this reads the lists as they stand at the end of each frame. A game
 -- that rebuilds its lists mid-frame, or switches them in a display interrupt,
@@ -35,6 +41,7 @@ local mem = MACHINE.devices[":maincpu"].spaces["program"]
 local ROMLO = tonumber(os.getenv("A7800_ROMLO") or "4000", 16)
 local OUT   = os.getenv("A7800_OUT") or "liveslots-out.json"
 local SCREEN = tonumber(os.getenv("A7800_LINES") or "") or 242
+local SETTLE = tonumber(os.getenv("A7800_SETTLE") or "") or 200
 
 local F, dpph, dppl = 0, nil, nil
 local refs = {}          -- addr -> max width seen
@@ -98,7 +105,7 @@ end
 
 FRAME_CB = emu.register_frame_done(function()
   F = F + 1
-  if dpph and dppl then walk_dll((dpph << 8) | dppl) end
+  if F > SETTLE and dpph and dppl then walk_dll((dpph << 8) | dppl) end
   if F % 300 == 0 then dump() end
 end)
 if emu.register_stop then emu.register_stop(dump)

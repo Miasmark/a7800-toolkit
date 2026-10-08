@@ -1033,3 +1033,53 @@ finished projects.
 exist (something increments this, something clears that) and check the listing
 actually contains each one. And treat a gap adjacent to an unconditional jump
 as suspect by default -- that is precisely where a tracer is blind.
+
+
+## An 8-bit HPOS wraps, so "large x" can be correct and "small x" can be the bug
+
+MARIA's horizontal position is eight bits against a 160-wide line, and it wraps
+at 255/0. That makes an x in `$A0..$FF` draw *correctly* as a negative
+position: the head lands past column 159 and is invisible, and only the part
+that runs past 255 comes back at column 0, which is where an object positioned
+off the left edge belongs. Code that scrolls objects leftward relies on this
+constantly.
+
+The failure is the object positioned so far left that its byte drops back into
+`$00..$9F`. An x of -117 is the byte `$8B` = 139, an ordinary on-screen column,
+and MARIA draws it there as a detached slab at the right-hand edge.
+
+**A clamp on x therefore fails**: it eats visible scenery on ordinary frames,
+because on ordinary frames the large values are the correct ones. The repairable
+case is the second one only. Park the object at a position whose span ends at
+255 -- an object N pixels wide at `256 - N` ends exactly at the boundary and
+wraps nothing -- and leave the legitimate wrap alone. Found in Pole Position
+II's road bands, where the symptom was a second run of road-coloured pixels on
+a scanline (count pixel runs per scanline to detect it).
+
+## A display-list probe that reads once a frame sees boot garbage and torn lists
+
+Walking the live display list from a once-per-frame Lua callback has two
+failure modes, and both produce confident nonsense.
+
+**Boot takes longer to settle than a round number suggests.** In Dig Dug DPPH
+sat at a bogus `$1F` (pointing at `$1F84`, the BIOS's list) from frame 16 until
+frame 165. A 120-frame grace period still produced garbage; a 200-frame gate
+did not. Read the per-frame history of DPPH/DPPL instead of guessing, and note
+that a genuine double buffer alternates DPPL every frame without being a bug.
+
+**The callback races the CPU.** Even after settling, a third of the references
+landed below the cartridge's ROM, because the callback read an entry the CPU
+was part-way through writing. They recurred across the recording, so it was not
+boot. Filter rather than trust: an address that cannot be real is disqualifying
+whatever produced it. `probes/liveslots.lua` does both (`A7800_SETTLE`,
+`A7800_ROMLO`).
+
+## Bank switching mid-zone pulls the graphics out from under MARIA
+
+On a bank-switched cartridge, MARIA fetches graphics through the same window
+the CPU switches. Paging a bank in while a zone is being drawn changes what
+MARIA reads for the rest of that zone. Midnight Mutants avoids it by spinning
+in foreground code on a flag a display-list interrupt sets (`BIT flag / BEQ`),
+and writing the bank register only once the raster has passed; it also keeps
+the current bank in RAM so interrupt handlers can restore it. A routine that
+switches banks without that wait works in a test and tears the picture in play.
