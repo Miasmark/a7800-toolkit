@@ -1112,3 +1112,30 @@ the same trap: `wmic os get localdatetime`, once the usual locale-independent
 timestamp, is removed from recent Windows 11 -- stamp names from Python
 instead -- and a hard-coded `%LOCALAPPDATA%\Programs\MAME` or `..\bios` works
 on one machine only; let `A7800_MAME` and `A7800_ROMPATH` decide.
+
+
+## The write-mode bit was in the wrong place, and the way to find out was to ask MARIA
+
+`dlwalk.py` (and `docs/hardware.md`) took the write mode of a five-byte
+display-list header from bit 6 of its second byte. A cartridge using `$60`
+headers (character mode, plain 160A pixels) was therefore reported as "write
+mode 1", and the first tool built on that refused to draw its artwork -- then,
+when forced to, drew a tile sheet that looked like noise. Both were wrong in a
+way that read as a finding: "this is a pixel format the toolkit does not decode".
+
+It was an unsupported claim about hardware, and the hardware was in reach.
+`probes/forcedl.lua` writes a chosen display-list entry, graphics and palettes into
+a running machine and screenshots it. Header byte `$40` drew exactly the pixels
+160A predicts; `$C0` drew the 160B pattern, each pixel from the palette its own bits
+named. So the write mode is bit 7. What bit 6 does, and why a bare `$80` is read
+as a four-byte entry (palette 4, width 32) rather than a five-byte one, is not
+established -- say so rather than inventing a rule.
+
+Two things went wrong that are worth naming. The character set was rendered as
+a 256-glyph grid, which for a tile-based game is a sheet of fragments that looks
+like corruption; the check that mattered was rebuilding the *screen* from the
+display list and comparing it with a screenshot, where the title read at once. And
+CTRL bit 4 had been assumed one-byte characters, which halves every glyph's
+width; the same rebuild showed it. **Before reporting that a format is
+unsupported, reproduce what the machine draws with the format you assumed, and
+look.**

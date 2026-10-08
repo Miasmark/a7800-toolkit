@@ -53,7 +53,8 @@ byte 3:  horizontal position
 
 ```
 byte 0:  graphics address, low
-byte 1:  bit 6 write mode, bit 5 indirect (character) mode, bits 4-0 zero
+byte 1:  bit 7 write mode, bit 6 (set in every real header seen), bit 5 indirect
+         (character) mode, bits 4-0 zero
 byte 2:  graphics address, high
 byte 3:  palette | width          <-- moved
 byte 4:  horizontal position

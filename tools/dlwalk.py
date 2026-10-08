@@ -30,9 +30,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# In a five-byte header, bit 6 of byte 1 is the write-mode bit and bit 5 marks
+# In a five-byte header, bit 7 of byte 1 is the write-mode bit and bit 5 marks
 # indirect (character) mode. Write mode does not name a graphics mode on its
 # own: it combines with CTRL's read-mode bits to pick one of 160A/160B/320A-D.
+# (Measured on MAME 0.264 with probes/forcedl.lua: a header byte of $40 draws
+# as plain 160A and $C0 as 160B, so the bit is 7. This file used to say 6.
+# Every header seen in real games also has bit 6 set; what bit 6 means, and why
+# a bare $80 is not read as a five-byte header, is not established.)
 WRITE_MODE = {0: "write mode 0", 1: "write mode 1"}
 
 
@@ -93,7 +97,7 @@ def decode_entry(src, addr):
             "width": width,
             "hpos": b4,
             "indirect": bool(b1 & 0x20),
-            "write_mode": (b1 >> 6) & 1,
+            "write_mode": (b1 >> 7) & 1,
             "raw": [b0, b1, b2, b3, b4],
         }, 5
 

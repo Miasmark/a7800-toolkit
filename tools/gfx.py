@@ -10,8 +10,12 @@ graphics as
 
 so a character set is stored *line-planar*: page CHARBASE+0 holds line 0 of all
 256 characters, page CHARBASE+1 holds line 1, and so on.  Midnight Mutants runs
-with CTRL = $50 (read mode 00 = 160x2, one-byte characters), so each character
-is one byte = 4 pixels wide, and each byte holds four 2-bit pixels, MSB first.
+with CTRL = $50 (read mode 00 = 160x2). CTRL bit 4 is SET there, which makes each
+list entry select TWO consecutive bytes of graphics (docs/hardware.md; measured
+on MAME with probes/forcedl.lua), so a glyph on screen is the code's byte and the
+next one. This renderer draws every code as its own four-pixel cell -- each byte
+holds four 2-bit pixels, MSB first -- so such a glyph shows as two neighbouring
+cells, left half then right.
 This is the default mode -- it draws all 256 characters as a grid, right for
 reading a font or a character-mode sprite sheet.
 

@@ -278,7 +278,7 @@ def step_screens(mame, out, args, rep):
 
 
 def parse_regs(path):
-    d = {"palettes": {}}
+    d = {"regs": {}}
     for ln in io.open(path, encoding="utf-8"):
         ln = ln.strip()
         m = re.match(r"frame (\d+)", ln)
@@ -293,7 +293,118 @@ def parse_regs(path):
         m = re.match(r"CHARBASE=\$(\w+) OFFSET=\$(\w+) CTRL=\$(\w+) BACKGRND=\$(\w+)", ln)
         if m:
             d["charbase"], d["ctrl"] = int(m.group(1), 16), int(m.group(3), 16)
+            d["regs"][0x20] = int(m.group(4), 16)
+        m = re.match(r"\$(\w\w) = \$(\w\w)", ln)
+        if m:
+            d["regs"][int(m.group(1), 16)] = int(m.group(2), 16)
     return d
+
+
+class Screen(object):
+    """Rebuild what MARIA draws from a RAM dump, the registers, and the ROM."""
+
+    def __init__(self, c, ram, d):
+        import dlwalk
+        self.c, self.d, self.dlwalk = c, d, dlwalk
+        self.ram = ram
+        # display lists, character lists and graphics may be in RAM or in ROM
+        # (several zones of a real game keep their lists in the fixed bank)
+        self.src = type("Mem", (), {"byte": staticmethod(self.byte)})
+
+    def byte(self, addr):
+        addr = self.dlwalk.unmirror(addr)
+        if 0x1800 <= addr <= 0x27FF:
+            return self.ram[addr - 0x1800]
+        sp = self.c.space_of(addr, bank=self.d.get("bank"))
+        return self.c.byte(sp, addr) if sp else 0
+
+    def rgb(self, palette, colour):
+        import palette as pal
+        reg = 0x21 + 4 * palette + colour - 1
+        return pal.mame7800(self.d["regs"].get(reg, 0))
+
+    def zones(self):
+        total = 0
+        for i in range(40):
+            z = self.dlwalk.decode_dll_entry(self.src, self.d["dll"] + 3 * i)
+            if z["dl"] == 0 or total >= 242:
+                break
+            yield total, z
+            total += z["lines"]
+
+    def rows(self, e, lines, wm):
+        """[(palette, colour)] per scanline of one entry, top line first."""
+        import mariapix
+        fmt = mariapix.pixel_format(self.d["ctrl"] & 3, wm)
+        if fmt is None:
+            return None
+        two = bool(self.d["ctrl"] & 0x10)
+        out = []
+        for ln in range(lines):
+            page = lines - 1 - ln                  # MARIA counts the offset down
+            if e["indirect"]:
+                data = []
+                for k in range(e["width"]):
+                    code = self.src.byte(e["gfx"] + k)
+                    a = (((self.d["charbase"] + page) & 0xFF) << 8) | code
+                    data.append(self.byte(a))
+                    if two:
+                        data.append(self.byte(a + 1))
+            else:
+                data = [self.byte((e["gfx"] + page * 256 + k) & 0xFFFF)
+                        for k in range(e["width"])]
+            out.append(mariapix.row_pixels(fmt, data, e["palette"]))
+        return out
+
+    def objects(self):
+        """Every distinct entry the display list holds: (entry, lines, wm)."""
+        wm = 0
+        seen, found = set(), []
+        for _y, z in self.zones():
+            try:
+                entries = self.dlwalk.walk_dl(self.src, z["dl"])
+            except IndexError:
+                continue
+            for e in entries:
+                if e.get("write_mode") is not None:
+                    wm = e["write_mode"]
+                key = (e["gfx"], e["width"], z["lines"], e["palette"], e["indirect"], wm)
+                if key not in seen:
+                    seen.add(key)
+                    found.append((e, z["lines"], wm))
+        return found
+
+    def image(self):
+        """The reconstructed screen as a PIL image, or (None, why)."""
+        from PIL import Image
+        import palette as pal
+        if self.d["ctrl"] & 3:
+            return None, ("CTRL read mode %d is a 320-pixel mode, which is not "
+                          "decoded" % (self.d["ctrl"] & 3))
+        zones = list(self.zones())
+        if not zones:
+            return None, "no zones in the display list list"
+        height = zones[-1][0] + zones[-1][1]["lines"]
+        img = Image.new("RGB", (160, height), pal.mame7800(self.d["regs"].get(0x20, 0)))
+        px = img.load()
+        wm = 0
+        for y, z in zones:
+            try:
+                entries = self.dlwalk.walk_dl(self.src, z["dl"])
+            except IndexError:
+                continue
+            for e in entries:
+                if e.get("write_mode") is not None:
+                    wm = e["write_mode"]
+                rows = self.rows(e, z["lines"], wm)
+                if rows is None:
+                    return None, "unsupported pixel format"
+                for ln, row in enumerate(rows):
+                    for j, (p, colour) in enumerate(row):
+                        x = e["hpos"] + j
+                        if colour and 0 <= x < 160 and y + ln < height:
+                            px[x, y + ln] = self.rgb(p, colour)
+        return img, None
 
 
 def step_graphics(rom, mame, out, c, args, rep):
@@ -312,139 +423,85 @@ def step_graphics(rom, mame, out, c, args, rep):
     if not (os.path.exists(ram) and os.path.exists(regs)):
         return ["The graphics run wrote no dump."]
     d = parse_regs(regs)
-    import dlwalk
-    src = dlwalk.Source(io.open(ram, "rb").read(), 0x1800)
-    lines = ["Display list list at `$%04X` at frame %d; CTRL `$%02X`, CHARBASE "
-             "`$%02X`%s." % (d["dll"], d["frame"], d["ctrl"], d["charbase"],
-                            "" if "bank" not in d else
-                            "; bank %d was selected at that moment" % d["bank"])]
-    objs, indirect, total = {}, set(), 0
-    ind_info = []                       # (palette, zone lines) of character-mode entries
-    wmodes = set()                      # write modes the 5-byte headers set
-    try:
-        for i in range(40):
-            z = dlwalk.decode_dll_entry(src, d["dll"] + 3 * i)
-            if z["dl"] == 0:
-                break
-            total += z["lines"]
-            try:
-                entries = dlwalk.walk_dl(src, z["dl"])
-            except IndexError:
-                continue                    # a list in ROM: not in the RAM dump
-            for e in entries:
-                if e.get("write_mode") is not None:
-                    wmodes.add(e["write_mode"])
-                if e["indirect"]:
-                    indirect.add(e["gfx"])
-                    ind_info.append((e["palette"], z["lines"]))
-                elif e["gfx"] >= 0x4000:
-                    objs.setdefault((e["gfx"], e["width"], z["lines"],
-                                     e["palette"]), 0)
-                    objs[(e["gfx"], e["width"], z["lines"], e["palette"])] += 1
-            if total >= 242:
-                break
-    except IndexError:
-        lines.append("The display list list is not in RAM at that address.")
-    lines.append("%d distinct direct-mode objects in ROM, %d character-mode "
-                 "pointers." % (len(objs), len(indirect)))
-    rmode = d["ctrl"] & 3
-    plain = rmode == 0 and 1 not in wmodes
-    lines.append("Pixel format: CTRL read mode %d, write mode%s %s. %s" % (
-        rmode, "" if len(wmodes) == 1 else "s",
-        ", ".join(map(str, sorted(wmodes))) or "not set by any 5-byte header",
-        "That is the two-bits-per-pixel 160A form the renderers read."
-        if plain else
-        "That is NOT plain 160A (docs/graphics.md, Pixel formats): `gfx.py` and "
-        "this report decode 160A and the 1-bit 320 forms only, so artwork in "
-        "this mode would come out as noise and is not rendered. The bytes are "
-        "in `graphics/ram.bin` and the ROM; the screenshots show the real picture."))
-    rep.facts["graphics"] = {"objects": len(objs), "indirect": sorted(indirect),
-                             "read_mode": rmode, "write_modes": sorted(wmodes),
-                             "plain_160a": plain}
-    if not plain:
-        return lines
+    scr = Screen(c, io.open(ram, "rb").read(), d)
+    import mariapix
+    objs = scr.objects()
+    direct = [o for o in objs if not o[0]["indirect"] and o[0]["gfx"] >= 0x4000]
+    chars = [o for o in objs if o[0]["indirect"]]
+    wmodes = sorted({wm for _e, _l, wm in objs})
+    lines = ["Display list list at `$%04X` at frame %d; CTRL `$%02X`, CHARBASE `$%02X`%s."
+             % (d["dll"], d["frame"], d["ctrl"], d["charbase"],
+                "" if "bank" not in d else
+                "; bank %d was selected at that moment" % d["bank"]),
+             "%d direct-mode objects in ROM, %d character-mode entries "
+             "(%s per character)." % (len(direct), len(chars),
+                                      "two bytes" if d["ctrl"] & 0x10 else "one byte")]
+    fmt = [mariapix.pixel_format(d["ctrl"] & 3, wm) for wm in (wmodes or [0])]
+    lines.append("Pixel format: %s (CTRL read mode %d, header write mode %s)." % (
+        "/".join(sorted({f or "a 320 mode (not decoded)" for f in fmt})),
+        d["ctrl"] & 3, ", ".join(map(str, wmodes)) or "never set"))
+    rep.facts["graphics"] = {
+        "direct_objects": len(direct), "char_entries": len(chars),
+        "read_mode": d["ctrl"] & 3, "write_modes": wmodes,
+        "two_byte_chars": bool(d["ctrl"] & 0x10),
+        "formats": sorted({f for f in fmt if f})}
     try:
         from PIL import Image
-        import spritedump
     except ImportError:
         lines.append("Pictures skipped: Pillow is not installed "
                      "(`python -m pip install pillow`).")
         return lines
-    rendered, tiles = 0, []
-    unresolved = []
-    for (gfx, width, ln, pal), _n in sorted(objs.items())[:80]:
-        sp = c.space_of(gfx, bank=d.get("bank"))
-        if sp is None:
-            unresolved.append("$%04X" % gfx)
+    img, why = scr.image()
+    if img is None:
+        lines.append("Screen not rebuilt: %s." % why)
+        return lines
+    big = img.resize((img.width * 4, img.height * 2), Image.NEAREST)
+    big.save(os.path.join(gdir, "screen.png"))
+    zl = [z for _y, z in scr.zones()]
+    dli = sum(1 for z in zl if z["dli"])
+    lines += ["", "![rebuilt screen](graphics/screen.png)", "",
+              "The screen as the display list, character sets and graphics in "
+              "the ROM describe it at that frame -- a reconstruction, not a "
+              "screenshot. The registers are as they stood at the dump, once for "
+              "the whole screen."]
+    if dli:
+        lines.append(
+            "**%d of %d zones raise a display-list interrupt**, which is where a "
+            "game repaints palettes and switches CHARBASE partway down the "
+            "screen. Zones drawn after the first one may be wrong here -- wrong "
+            "colours, or another font's characters read from this one's pages "
+            "(the garbled rows below). Compare with the screenshots above; "
+            "recording the registers per zone is not done." % (dli, len(zl)))
+    tiles = []
+    for e, ln, wm in direct[:64]:
+        rows = scr.rows(e, ln, wm)
+        if not rows:
             continue
-        try:
-            colours = spritedump.read_palette_regs(regs, pal)
-        except SystemExit:
-            colours = [0x0F, 0x2A, 0x45]
-        try:
-            im = spritedump.render_object(c, sp, gfx, width, ln, colours)
-        except Exception:                                    # noqa: BLE001
+        w = len(rows[0])
+        if w == 0:
             continue
-        name = "obj-%s-%04X-%dx%d.png" % (sp, gfx, width, ln)
-        im.resize((im.width * 4, im.height * 4), Image.NEAREST).save(
-            os.path.join(gdir, name))
-        tiles.append((name, im))
-        rendered += 1
+        im = Image.new("RGB", (w, ln), (255, 0, 255))
+        ip = im.load()
+        for y, row in enumerate(rows):
+            for x, (p, colour) in enumerate(row):
+                if colour:
+                    ip[x, y] = scr.rgb(p, colour)
+        name = "obj-%04X-%dx%d-pal%d.png" % (e["gfx"], e["width"], ln, e["palette"])
+        im.resize((w * 4, ln * 4), Image.NEAREST).save(os.path.join(gdir, name))
+        tiles.append(im)
     if tiles:
-        cell = max(max(t.width, t.height) for _n, t in tiles)
+        cell = max(max(t.width, t.height) for t in tiles)
         cols = 8
-        rows = (len(tiles) + cols - 1) // cols
-        sheet = Image.new("RGB", (cols * (cell + 4), rows * (cell + 4)), (40, 40, 60))
-        for i, (_n, t) in enumerate(tiles):
+        sheet = Image.new("RGB", (cols * (cell + 4), ((len(tiles) + cols - 1) // cols) * (cell + 4)),
+                          (40, 40, 60))
+        for i, t in enumerate(tiles):
             sheet.paste(t, ((i % cols) * (cell + 4) + 2, (i // cols) * (cell + 4) + 2))
-        sheet = sheet.resize((sheet.width * 3, sheet.height * 3), Image.NEAREST)
-        sheet.save(os.path.join(gdir, "contact.png"))
+        sheet.resize((sheet.width * 3, sheet.height * 3), Image.NEAREST).save(
+            os.path.join(gdir, "contact.png"))
         lines += ["", "![objects](graphics/contact.png)", "",
-                  "%d objects rendered, one file each in `graphics/`." % rendered]
-    if unresolved:
-        lines.append("%d in a switched window with no known bank (%s...); "
-                     "run with a mapper whose bank register is the SuperGame "
-                     "one, or find the bank with `exectrace.lua`."
-                     % (len(unresolved), ", ".join(unresolved[:4])))
-    if indirect and ind_info:
-        lines += _charset(c, d, gdir, regs, ind_info, indirect)
+                  "%d direct-mode objects, one file each in `graphics/` (pink is "
+                  "transparent)." % len(tiles)]
     return lines
-
-
-def _charset(c, d, gdir, regs, ind_info, indirect):
-    """Render the character set the live display list draws its text from."""
-    out = []
-    base = d["charbase"] * 256
-    from collections import Counter
-    pal_no = Counter(p for p, _l in ind_info).most_common(1)[0][0]
-    zl = Counter(l for _p, l in ind_info).most_common(1)[0][0]
-    sp = c.space_of(base, bank=d.get("bank"))
-    out.append("Character-mode text and tiles: %d character-list pointers in RAM "
-               "(`$%04X`...), characters at CHARBASE `$%02X00`, %d scanlines "
-               "tall." % (len(indirect), min(indirect), d["charbase"], zl))
-    if sp is None:
-        return out + ["That address is in a switched window and no bank was "
-                      "seen; try `gfx.py --base` with each bank."]
-    try:
-        import gfx
-        import spritedump
-        from PIL import Image                     # noqa: F401
-        try:
-            cols = spritedump.read_palette_regs(regs, pal_no)
-        except SystemExit:
-            cols = [0x0F, 0x2A, 0x45]
-        pal = [(0, 0, 0)] + [gfx.ntsc(x) for x in cols]
-        im = gfx.render_charset(c, sp, base, zl, pal, scale=3)
-        name = "charset-%s-%04X.png" % (sp, base)
-        im.save(os.path.join(gdir, name))
-        out += ["", "![character set](graphics/%s)" % name, "",
-                "All 256 characters from `%s:%04X` (palette %d, colours as the "
-                "registers held them). The alphabet is whatever order this "
-                "shows -- compare it with the text on screen to read a custom "
-                "alphabet." % (sp, base, pal_no)]
-    except Exception as e:                           # noqa: BLE001
-        out.append("Not rendered: %s" % e)
-    return out
 
 
 def step_sprites(mame, out, args, rep):

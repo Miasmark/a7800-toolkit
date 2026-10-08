@@ -987,6 +987,109 @@ def _fmt_ver(v):
     return "%.3f" % v
 
 
+def _mame_ctx():
+    """(command, env, workdir) to run the committed synthetic cartridge under
+    MAME, or None if there is no usable MAME and BIOS."""
+    import capture
+    exe = capture.find_mame()
+    cart = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    roms = capture.find_rompath(cart) if os.path.exists(cart) else None
+    if not (exe and roms):
+        return None
+    ver = mame_version(exe)
+    if ver is not None and ver < MAME_OLDEST:
+        return None
+    work = tempfile.mkdtemp(prefix="mame-")
+    base = [exe, "a7800"] + capture.bios_args() + [
+        "-rompath", roms, "-cart", cart, "-video", "none", "-sound", "none",
+        "-skip_gameinfo", "-nothrottle", "-seconds_to_run", "2"]
+    return base, dict(os.environ, XDG_RUNTIME_DIR=work, SDL_AUDIODRIVER="dummy"), work
+
+
+def _forced_shot(ctx, name, writes, ctrl):
+    """Force a display-list entry (probes/forcedl.lua) and return the PNG."""
+    base, env, work = ctx
+    shots = os.path.join(work, name)
+    os.makedirs(shots)
+    subprocess.run(base + ["-snapshot_directory", shots, "-autoboot_script",
+                           os.path.join(ROOT, "probes", "forcedl.lua")],
+                   cwd=work, timeout=120, stdout=subprocess.PIPE,
+                   stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_FD_WRITES=writes, A7800_FD_CTRL=ctrl))
+    pngs = sorted(os.path.join(r, f) for r, _d, fs in os.walk(shots)
+                  for f in fs if f.endswith(".png"))
+    assert pngs, "MAME wrote no screenshot for %s" % name
+    return pngs[-1]
+
+
+def _labels(pixels):
+    """[(palette, colour)] or RGB tuples as '.ABC' by first appearance."""
+    seen, out = {}, []
+    for px in pixels:
+        if px is None:
+            out.append(".")
+        else:
+            out.append(chr(65 + seen.setdefault(px, len(seen))))
+    return "".join(out)
+
+
+def _drawn_row(png, n):
+    """What MAME drew in zone 3, as labels: one per 160-wide pixel, starting at
+    the first pixel that is not background (four screen pixels each)."""
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    bg = im.getpixel((5, 5))
+    rows = [y for y in range(0, 150)
+            if any(im.getpixel((x, y)) != bg for x in range(0, im.width, 2))]
+    assert rows, "nothing was drawn in the forced zone"
+    y = rows[len(rows) // 2]
+    x0 = min(x for x in range(im.width) if im.getpixel((x, y)) != bg)
+    px = [im.getpixel((x0 + 4 * k + 2, y)) for k in range(n)]
+    return _labels([None if c == bg else c for c in px])
+
+
+def t_pixel_formats():
+    """tools/mariapix.py predicts what MAME draws: 160A, 160B, and one- and
+    two-byte characters. This is the check that found a wrong bit in dlwalk."""
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        return None
+    ctx = _mame_ctx()
+    if ctx is None:
+        return None
+    import mariapix
+    cols = [0x46, 0x86, 0xC6, 0x1E, 0x7E, 0xAE, 0x34, 0x94, 0xD4, 0x56, 0xB6,
+            0xE6, 0x2C, 0x6C, 0xAC, 0x4A, 0x8A, 0xCA, 0x3A, 0x9A, 0xDA, 0x5E,
+            0xBE, 0xEE]
+    pal = "; ".join("%X=%s" % (0x21 + 4 * n, " ".join("%02X" % c for c in cols[3 * n:3 * n + 3]))
+                    for n in range(1, 8))
+    data = [0x1B, 0xE4, 0x6C, 0xC6]
+    P = 5                                        # base palette; group 4-7 is ours
+    direct = "1930=00 %02X 20 %02X 28 00; 2000*16/100=%s; " + pal
+    chars = "1930=00 60 1A %02X 28 00; 1A00=01 02 03; 2000*16/100=00 %s; 34=20; " + pal
+    cases = [
+        ("160A", direct % (0x40, (P << 5) | 0x1C, " ".join("%02X" % b for b in data)),
+         "40", mariapix.row_pixels("160A", data, P)),
+        ("160B", direct % (0xC0, (P << 5) | 0x1C, " ".join("%02X" % b for b in data)),
+         "40", mariapix.row_pixels("160B", data, P)),
+        ("chars, one byte", chars % ((P << 5) | 29, "1B E4 6C C6"), "40",
+         mariapix.row_pixels("160A", [0x1B, 0xE4, 0x6C], P)),
+        ("chars, two bytes", chars % ((P << 5) | 29, "1B E4 6C C6"), "50",
+         mariapix.row_pixels("160A", [0x1B, 0xE4, 0xE4, 0x6C, 0x6C, 0xC6], P)),
+    ]
+    done = []
+    for name, writes, ctrl, predicted in cases:
+        want = _labels([None if c == 0 else (pl, c) for pl, c in predicted]).lstrip(".")
+        want = want.rstrip(".")
+        got = _drawn_row(_forced_shot(ctx, name.replace(",", "").replace(" ", "-"),
+                                      writes, ctrl), len(want) + 4)
+        assert got.startswith(want), "%s: MAME drew %r, mariapix predicts %r" % (name, got, want)
+        done.append(name)
+    shutil.rmtree(ctx[2], True)
+    return "mariapix matches MAME for " + ", ".join(done)
+
+
 def t_probes_mame(rom):
     """Run the generic probes under real MAME on a cartridge we know the answers
     for. Skipped when there is no MAME or no BIOS to boot it."""
@@ -1094,7 +1197,9 @@ def t_probes_mame(rom):
     ff = json.load(io.open(os.path.join(fl, "firstlook.json"), encoding="utf-8"))
     assert ff["music"]["changes"] > 5, ff.get("music")
     assert os.path.getsize(os.path.join(fl, "music", "song.wav")) > 1000
-    assert ff["graphics"]["objects"] == 1 and ff["graphics"]["plain_160a"], ff["graphics"]
+    assert ff["graphics"]["direct_objects"] == 1, ff["graphics"]
+    assert ff["graphics"]["formats"] == ["160A"], ff["graphics"]
+    assert os.path.exists(os.path.join(fl, "graphics", "screen.png"))
     assert ff["sprite_refs"] == 1, ff["sprite_refs"]
     assert ff["screens"], "no screenshots"
     ann = json.load(io.open(os.path.join(fl, "annotations.json"), encoding="utf-8"))
@@ -3066,6 +3171,7 @@ def main():
     r.check("workbench", lambda: t_workbench(args.rom))
     r.check("disassembler runs", lambda: t_disasm(args.rom))
     r.check("probes under MAME", lambda: t_probes_mame(args.rom))
+    r.check("pixel formats vs MAME", t_pixel_formats)
 
     n_ok = sum(1 for x in r.rows if x[1] == PASS)
     n_skip = sum(1 for x in r.rows if x[1] == SKIP)

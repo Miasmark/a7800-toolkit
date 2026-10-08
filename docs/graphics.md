@@ -46,18 +46,34 @@ where the lines really do ascend.
 
 ## Pixel formats
 
-`CTRL`'s read mode plus the display list entry's write mode select the format.
-The two that matter most:
+`CTRL`'s read mode (bits 1-0) plus the display list entry's write mode (bit 7 of
+a five-byte header's second byte) select the format. For read mode 0, the 160
+modes:
 
-* **160A/160B** -- two bits per pixel, four pixels per byte, MSB first. Each
-  2-bit value indexes into the entry's palette (value 0 is transparent /
-  background).
+* **160A** (write mode 0) -- two bits per pixel, four pixels per byte, MSB first.
+  Each 2-bit value indexes into the entry's own palette: value 0 is transparent,
+  1-3 are that palette's three colours. Most artwork is this: three colours and
+  transparent ("3 + 1").
+* **160B** (write mode 1) -- two pixels per byte, and each pixel carries its own
+  palette bits: bits 7-6 are pixel 0's colour, 5-4 pixel 1's colour, 3-2 pixel 0's
+  palette-select, 1-0 pixel 1's. The palette used is `(entry palette & 4) |
+  select`, so one entry draws from four palettes -- the group the entry's palette
+  bit 2 picks. Colour 0 is transparent whatever the palette.
 * **320A and 320D** -- one bit per pixel, eight per byte, twice the horizontal
   resolution and correspondingly fewer colours.
 * **320B and 320C** reach four colours at 320 resolution by pairing bytes, so
   they are *not* the same shape as 320A. `gfx.py` and `spriteedit.py` read the
   1-bit form only; artwork in B or C comes out the right size and the wrong
   image.
+
+`tools/mariapix.py` decodes the two 160 modes, and `selftest.py` has MAME draw
+each one (`probes/forcedl.lua`) and checks the decoder against the picture. That
+check exists because this section used to say 160B was the same shape as 160A
+and `dlwalk.py` took the write-mode flag from bit 6: an entry whose byte is `$40`
+draws as 160A, `$C0` as 160B. (Every real header seen has bit 6 set; what it
+means is not established.) Character mode is unaffected by the write mode but
+not by `CTRL` bit 4: clear, each list entry selects one byte of graphics per
+scanline; set, two consecutive bytes (the code's and the next), eight pixels.
 
 The same bytes decode differently under each, so if artwork comes out as noise
 in one mode, try the other before concluding it is compressed.
