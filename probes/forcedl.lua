@@ -24,6 +24,8 @@
 --                     palette is just "21=46 86 C6" (P0C1-P0C3).
 --   A7800_FD_CTRL     hex value for CTRL ($3C), written after the others
 --   A7800_FD_AT       frame at which to write (default 30)
+--   A7800_FD_ROW      "y0-y1": at stop, print the framebuffer pixels of the first
+--                     line drawn in that range (see below), exact rather than scaled
 --   A7800_FD_REPEAT   rewrite every this many frames (default 15), so the game
 --                     cannot quietly undo it
 --
@@ -65,7 +67,33 @@ FRAME_CB = emu.register_frame_done(function()
   if F >= AT and (F - AT) % EVERY == 0 then apply() end
 end)
 
--- the snapshot is taken at machine stop, not mid-stream (see snapstop.lua)
-local function snap() pcall(function() MACHINE.video:snapshot() end) end
+-- At machine stop: a screenshot (not mid-stream; see snapstop.lua), and, if asked,
+-- the pixels MAME actually drew. The screenshot is scaled; this is not.
+--   A7800_FD_ROW="y0-y1"   scan these emulated-screen lines for the first one that
+--                          differs from the line's own left edge, and print
+--                          "ROW y x0 v v v ..." -- the framebuffer values from the
+--                          first differing pixel on, as hex. One value per emulated
+--                          pixel: a 160-mode pixel is two of them, a 320-mode pixel one.
+local ROW = os.getenv("A7800_FD_ROW")
+local function snap()
+  pcall(function() MACHINE.video:snapshot() end)
+  if not ROW then return end
+  local y0, y1 = ROW:match("^(%d+)%-(%d+)$")
+  local scr = MACHINE.screens[":screen"]
+  for y = tonumber(y0), tonumber(y1) do
+    local bg = scr:pixel(2, y)
+    local first
+    for x = 20, 300 do
+      if scr:pixel(x, y) ~= bg then first = x break end
+    end
+    if first then
+      local out = {}
+      for x = first, first + 47 do out[#out + 1] = string.format("%x", scr:pixel(x, y) & 0xFFFFFF) end
+      print(string.format("ROW %d %d bg=%x %s", y, first, bg & 0xFFFFFF, table.concat(out, " ")))
+      return
+    end
+  end
+  print("ROW none")
+end
 if emu.add_machine_stop_notifier then STOP_CB = emu.add_machine_stop_notifier(snap)
 else emu.register_stop(snap) end

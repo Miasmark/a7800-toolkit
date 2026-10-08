@@ -1006,55 +1006,34 @@ def _mame_ctx():
     return base, dict(os.environ, XDG_RUNTIME_DIR=work, SDL_AUDIODRIVER="dummy"), work
 
 
-def _forced_shot(ctx, name, writes, ctrl):
-    """Force a display-list entry (probes/forcedl.lua) and return the PNG."""
+def _forced_row(ctx, name, writes, ctrl):
+    """Force a display-list entry (probes/forcedl.lua); return the framebuffer
+    values MAME drew on the first line it touched, from the first drawn pixel on
+    (one per emulated pixel: a 160-mode pixel is two, a 320-mode pixel one)."""
     base, env, work = ctx
-    shots = os.path.join(work, name)
-    os.makedirs(shots)
-    subprocess.run(base + ["-snapshot_directory", shots, "-autoboot_script",
-                           os.path.join(ROOT, "probes", "forcedl.lua")],
-                   cwd=work, timeout=120, stdout=subprocess.PIPE,
-                   stderr=subprocess.STDOUT,
-                   env=dict(env, A7800_FD_WRITES=writes, A7800_FD_CTRL=ctrl))
-    pngs = sorted(os.path.join(r, f) for r, _d, fs in os.walk(shots)
-                  for f in fs if f.endswith(".png"))
-    assert pngs, "MAME wrote no screenshot for %s" % name
-    return pngs[-1]
+    out = subprocess.run(
+        base + ["-autoboot_script", os.path.join(ROOT, "probes", "forcedl.lua")],
+        cwd=work, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env=dict(env, A7800_FD_WRITES=writes, A7800_FD_CTRL=ctrl,
+                 A7800_FD_ROW="30-140")).stdout.decode("utf-8", "replace")
+    rows = [l for l in out.splitlines() if l.startswith("ROW ")]
+    assert rows and not rows[0].startswith("ROW none"), \
+        "%s: nothing was drawn (%s)" % (name, out[-200:])
+    return [int(v, 16) for v in rows[0].split()[4:]]
 
 
-def _labels(pixels):
-    """[(palette, colour)] or RGB tuples as '.ABC' by first appearance."""
+def _labels(pixels, background=0):
+    """Values (or (palette, colour) pairs) as '.ABC': first appearance order."""
     seen, out = {}, []
     for px in pixels:
-        if px is None:
-            out.append(".")
-        else:
-            out.append(chr(65 + seen.setdefault(px, len(seen))))
+        out.append("." if px == background else
+                   chr(65 + seen.setdefault(px, len(seen))))
     return "".join(out)
-
-
-def _drawn_row(png, n):
-    """What MAME drew in zone 3, as labels: one per 160-wide pixel, starting at
-    the first pixel that is not background (four screen pixels each)."""
-    from PIL import Image
-    im = Image.open(png).convert("RGB")
-    bg = im.getpixel((5, 5))
-    rows = [y for y in range(0, 150)
-            if any(im.getpixel((x, y)) != bg for x in range(0, im.width, 2))]
-    assert rows, "nothing was drawn in the forced zone"
-    y = rows[len(rows) // 2]
-    x0 = min(x for x in range(im.width) if im.getpixel((x, y)) != bg)
-    px = [im.getpixel((x0 + 4 * k + 2, y)) for k in range(n)]
-    return _labels([None if c == bg else c for c in px])
 
 
 def t_pixel_formats():
     """tools/mariapix.py predicts what MAME draws: 160A, 160B, and one- and
     two-byte characters. This is the check that found a wrong bit in dlwalk."""
-    try:
-        import PIL  # noqa: F401
-    except ImportError:
-        return None
     ctx = _mame_ctx()
     if ctx is None:
         return None
@@ -1066,24 +1045,27 @@ def t_pixel_formats():
                     for n in range(1, 8))
     data = [0x1B, 0xE4, 0x6C, 0xC6]
     P = 5                                        # base palette; group 4-7 is ours
+    hexs = lambda bs: " ".join("%02X" % b for b in bs)      # noqa: E731
     direct = "1930=00 %02X 20 %02X 28 00; 2000*16/100=%s; " + pal
     chars = "1930=00 60 1A %02X 28 00; 1A00=01 02 03; 2000*16/100=00 %s; 34=20; " + pal
     cases = [
-        ("160A", direct % (0x40, (P << 5) | 0x1C, " ".join("%02X" % b for b in data)),
-         "40", mariapix.row_pixels("160A", data, P)),
-        ("160B", direct % (0xC0, (P << 5) | 0x1C, " ".join("%02X" % b for b in data)),
-         "40", mariapix.row_pixels("160B", data, P)),
-        ("chars, one byte", chars % ((P << 5) | 29, "1B E4 6C C6"), "40",
-         mariapix.row_pixels("160A", [0x1B, 0xE4, 0x6C], P)),
-        ("chars, two bytes", chars % ((P << 5) | 29, "1B E4 6C C6"), "50",
-         mariapix.row_pixels("160A", [0x1B, 0xE4, 0xE4, 0x6C, 0x6C, 0xC6], P)),
+        ("160A", direct % (0x40, (P << 5) | 0x1C, hexs(data)), "40", "160A", data),
+        ("160B", direct % (0xC0, (P << 5) | 0x1C, hexs(data)), "40", "160B", data),
+        ("320A", direct % (0x40, (P << 5) | 0x1C, hexs([0xA5, 0x3C, 0xF0, 0x0F])), "43",
+         "320A", [0xA5, 0x3C, 0xF0, 0x0F]),
+        ("chars, one byte", chars % ((P << 5) | 29, "1B E4 6C C6"), "40", "160A",
+         [0x1B, 0xE4, 0x6C]),
+        ("chars, two bytes", chars % ((P << 5) | 29, "1B E4 6C C6"), "50", "160A",
+         [0x1B, 0xE4, 0xE4, 0x6C, 0x6C, 0xC6]),
     ]
     done = []
-    for name, writes, ctrl, predicted in cases:
-        want = _labels([None if c == 0 else (pl, c) for pl, c in predicted]).lstrip(".")
-        want = want.rstrip(".")
-        got = _drawn_row(_forced_shot(ctx, name.replace(",", "").replace(" ", "-"),
-                                      writes, ctrl), len(want) + 4)
+    for name, writes, ctrl, fmt, bytes_ in cases:
+        w = mariapix.width(fmt)
+        predicted = []
+        for pl, c in mariapix.row_pixels(fmt, bytes_, P):
+            predicted += [None if c == 0 else (pl, c)] * w
+        want = _labels(predicted, None).lstrip(".").rstrip(".")
+        got = _labels(_forced_row(ctx, name, writes, ctrl))
         assert got.startswith(want), "%s: MAME drew %r, mariapix predicts %r" % (name, got, want)
         done.append(name)
     shutil.rmtree(ctx[2], True)
@@ -1199,7 +1181,19 @@ def t_probes_mame(rom):
     assert os.path.getsize(os.path.join(fl, "music", "song.wav")) > 1000
     assert ff["graphics"]["direct_objects"] == 1, ff["graphics"]
     assert ff["graphics"]["formats"] == ["160A"], ff["graphics"]
-    assert os.path.exists(os.path.join(fl, "graphics", "screen.png"))
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+    if Image:
+        # the synthetic cartridge repaints BACKGRND from its display-list interrupt
+        # on zone 5: black above, $92 below. A reconstruction that cannot tell
+        # zones apart would paint one colour over the lot.
+        import palette
+        scr = Image.open(os.path.join(fl, "graphics", "screen.png")).convert("RGB")
+        assert scr.getpixel((2, 4)) == palette.mame7800(0x00), scr.getpixel((2, 4))
+        assert scr.getpixel((2, scr.height - 4)) == palette.mame7800(0x92), \
+            scr.getpixel((2, scr.height - 4))
     assert ff["sprite_refs"] == 1, ff["sprite_refs"]
     assert ff["screens"], "no screenshots"
     ann = json.load(io.open(os.path.join(fl, "annotations.json"), encoding="utf-8"))

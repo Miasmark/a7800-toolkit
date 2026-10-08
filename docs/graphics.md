@@ -59,8 +59,15 @@ modes:
   palette-select, 1-0 pixel 1's. The palette used is `(entry palette & 4) |
   select`, so one entry draws from four palettes -- the group the entry's palette
   bit 2 picks. Colour 0 is transparent whatever the palette.
-* **320A and 320D** -- one bit per pixel, eight per byte, twice the horizontal
-  resolution and correspondingly fewer colours.
+* **320A** (read mode 3, write mode 0) -- one bit per pixel, eight per byte, MSB
+  first, twice the horizontal resolution. A set bit is the entry's palette
+  *colour 2* (not 1); a clear bit is transparent. Display-list positions stay in
+  160-pixel units, so a 320 pixel is half a position. Real HUD text uses it
+  (Triple Punch switches CTRL to read mode 3 from its display-list interrupt).
+* **320D and the rest of the 320 modes** -- read mode 2, and read mode 3 with
+  write mode 1, were seen to draw something other than one bit per pixel (bits
+  are paired across the byte) and are *not* decoded; `mariapix.py` returns
+  nothing for them rather than guess.
 * **320B and 320C** reach four colours at 320 resolution by pairing bytes, so
   they are *not* the same shape as 320A. `gfx.py` and `spriteedit.py` read the
   1-bit form only; artwork in B or C comes out the right size and the wrong

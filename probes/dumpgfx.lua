@@ -36,6 +36,10 @@
 --                        dump is written to the regs file as "bank N", so a
 --                        graphics address in a switched window can be attributed.
 --   A7800_GFX_BANKS      number of banks (default 8; the bank is the value & N-1).
+--                        The regs file also lists, for the dump frame, the registers
+--                        at its start (`s $xx = $vv`) and every MARIA register write
+--                        in it (`w <NMIs so far> $xx = $vv`), so a reader can give
+--                        each zone the palettes and CHARBASE it was drawn with.
 --   A7800_GFX_RAM        output, $1800-$27FF, the 7800's whole RAM
 --                        (default dumpgfx_ram.bin)
 --   A7800_GFX_REGS       output, every MARIA register write seen and the frame
@@ -63,10 +67,24 @@ local REG_OUT  = os.getenv("A7800_GFX_REGS") or "dumpgfx_regs.txt"
 
 local cons = SELECT and MACHINE.ioport.ports[":console_buttons"] or nil
 
+-- Registers per zone. A game repaints palettes and switches CHARBASE or CTRL from
+-- its display-list interrupt, so the values at the end of a frame say little
+-- about the zones above. Every write in the frame is logged with the number of
+-- NMIs (display-list interrupts) that had fired before it; the writes before
+-- the first NMI plus the state at the frame's start are what zone 0 was drawn
+-- with, and each NMI hands the next zone the registers written since.
 local regs = {}
+local nmi, log, start = 0, {}, {}
+local last_log, last_start = {}, {}
 TAPS = {}
 TAPS[1] = mem:install_write_tap(0x20, 0x3F, "maria", function(offset, data)
   regs[offset] = data
+  log[#log + 1] = { nmi, offset, data }
+  return data
+end)
+-- an NMI shows as a read of its vector
+TAPS[3] = mem:install_read_tap(0xFFFA, 0xFFFA, "nmi", function(offset, data)
+  nmi = nmi + 1
   return data
 end)
 
@@ -95,6 +113,13 @@ local function dump()
   g:write(string.format("DPPH=$%02X DPPL=$%02X\n", regs[0x2C] or 0, regs[0x30] or 0))
   g:write(string.format("CHARBASE=$%02X OFFSET=$%02X CTRL=$%02X BACKGRND=$%02X\n",
     regs[0x34] or 0, regs[0x38] or 0, regs[0x3C] or 0, regs[0x20] or 0))
+  -- registers as they stood when this frame began, then every write in it
+  for a = 0x20, 0x3F do
+    if last_start[a] then g:write(string.format("s $%02X = $%02X\n", a, last_start[a])) end
+  end
+  for _, w in ipairs(last_log) do
+    g:write(string.format("w %d $%02X = $%02X\n", w[1], w[2], w[3]))
+  end
   g:write("palettes (P0C1-P7C3), 21-3F:\n")
   for a = 0x21, 0x3F do
     if a % 8 ~= 4 and a % 4 ~= 0 then   -- skip WSYNC(24)/MSTAT(28) slots roughly
@@ -116,6 +141,10 @@ end
 -- held in a global: a dead callback does not announce itself
 FRAME_CB = emu.register_frame_done(function()
   frame = frame + 1
+  -- the interval that just ended is what dump() describes; start the next one
+  last_log, last_start = log, start
+  log, start, nmi = {}, {}, 0
+  for k, v in pairs(regs) do start[k] = v end
 
   if phase == "boot" then
     if SELECT and cons then

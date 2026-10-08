@@ -32,17 +32,34 @@ Character mode adds one thing: CTRL bit 4 clear makes each list entry select one
 byte of graphics per scanline (four 160A pixels), set makes it two consecutive
 bytes -- the code's and the next -- eight pixels wide.
 
-The 320 modes (read mode 2 and 3) are not decoded here.
+  320A   CTRL read mode 3 with write mode 0: eight pixels per byte, one bit each,
+         most significant first, twice the horizontal resolution. A set bit is
+         the entry's palette colour 2 (not 1); a clear bit is transparent. Used
+         for HUD text on real cartridges (Triple Punch's score row switches CTRL
+         to read mode 3 from its display-list interrupt).
+
+The other 320 modes (read mode 2, and read mode 3 with write mode 1) pair bits
+across the byte; they were seen to draw something other than 1 bit per pixel and
+are not decoded here. `pixel_format` returns None for them, and callers must say
+so rather than guess. A display-list entry's horizontal position is in 160-pixel
+units whatever the mode, so a 320 pixel is half a position.
 """
 
-A160, B160 = "160A", "160B"
+A160, B160, A320 = "160A", "160B", "320A"
 
 
 def pixel_format(read_mode, write_mode):
     """'160A', '160B', or None for a mode this module does not decode."""
-    if read_mode != 0:
-        return None
-    return B160 if write_mode else A160
+    if read_mode == 0:
+        return B160 if write_mode else A160
+    if read_mode == 3 and not write_mode:
+        return A320
+    return None
+
+
+def width(fmt):
+    """Screen pixels (on a 320-wide framebuffer) one pixel of `fmt` covers."""
+    return 1 if fmt == A320 else 2
 
 
 def decode(fmt, byte):
@@ -53,6 +70,8 @@ def decode(fmt, byte):
     if fmt == B160:
         return [((byte >> 2) & 3, (byte >> 6) & 3),
                 (byte & 3, (byte >> 4) & 3)]
+    if fmt == A320:
+        return [(None, 2 if (byte >> (7 - i)) & 1 else 0) for i in range(8)]
     raise ValueError("not a decoded format: %r" % (fmt,))
 
 

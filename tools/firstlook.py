@@ -297,6 +297,13 @@ def parse_regs(path):
         m = re.match(r"\$(\w\w) = \$(\w\w)", ln)
         if m:
             d["regs"][int(m.group(1), 16)] = int(m.group(2), 16)
+        m = re.match(r"s \$(\w\w) = \$(\w\w)", ln)
+        if m:
+            d.setdefault("start", {})[int(m.group(1), 16)] = int(m.group(2), 16)
+        m = re.match(r"w (\d+) \$(\w\w) = \$(\w\w)", ln)
+        if m:
+            d.setdefault("writes", []).append(
+                (int(m.group(1)), int(m.group(2), 16), int(m.group(3), 16)))
     return d
 
 
@@ -307,6 +314,7 @@ class Screen(object):
         import dlwalk
         self.c, self.d, self.dlwalk = c, d, dlwalk
         self.ram = ram
+        self.skipped = {}                   # (read mode, write mode) -> zone count
         # display lists, character lists and graphics may be in RAM or in ROM
         # (several zones of a real game keep their lists in the fixed bank)
         self.src = type("Mem", (), {"byte": staticmethod(self.byte)})
@@ -318,10 +326,32 @@ class Screen(object):
         sp = self.c.space_of(addr, bank=self.d.get("bank"))
         return self.c.byte(sp, addr) if sp else 0
 
-    def rgb(self, palette, colour):
+    def rgb(self, palette, colour, st=None):
         import palette as pal
         reg = 0x21 + 4 * palette + colour - 1
-        return pal.mame7800(self.d["regs"].get(reg, 0))
+        return pal.mame7800((st or self.d["regs"]).get(reg, 0))
+
+    def states(self, zones):
+        """The MARIA registers each zone was drawn with.
+
+        The dump holds the registers as they stood when the frame began and every
+        write in it, each tagged with how many display-list interrupts had fired
+        before it. A zone is drawn with the start state plus the writes made
+        after as many interrupts as there were DLI zones above it. Without the
+        per-write record (an older dump) every zone gets the final registers.
+        """
+        base = dict(self.d.get("start") or self.d["regs"])
+        writes = self.d.get("writes") or []
+        out, fired = [], 0
+        for _y, z in zones:
+            st = dict(base)
+            for n, a, v in writes:
+                if n <= fired:
+                    st[a] = v
+            out.append(st)
+            if z["dli"]:
+                fired += 1
+        return out
 
     def zones(self):
         total = 0
@@ -332,13 +362,16 @@ class Screen(object):
             yield total, z
             total += z["lines"]
 
-    def rows(self, e, lines, wm):
+    def rows(self, e, lines, wm, st=None):
         """[(palette, colour)] per scanline of one entry, top line first."""
         import mariapix
-        fmt = mariapix.pixel_format(self.d["ctrl"] & 3, wm)
+        st = st or self.d["regs"]
+        ctrl = st.get(0x3C, self.d["ctrl"])
+        charbase = st.get(0x34, self.d["charbase"])
+        fmt = mariapix.pixel_format(ctrl & 3, wm)
         if fmt is None:
             return None
-        two = bool(self.d["ctrl"] & 0x10)
+        two = bool(ctrl & 0x10)
         out = []
         for ln in range(lines):
             page = lines - 1 - ln                  # MARIA counts the offset down
@@ -346,7 +379,7 @@ class Screen(object):
                 data = []
                 for k in range(e["width"]):
                     code = self.src.byte(e["gfx"] + k)
-                    a = (((self.d["charbase"] + page) & 0xFF) << 8) | code
+                    a = (((charbase + page) & 0xFF) << 8) | code
                     data.append(self.byte(a))
                     if two:
                         data.append(self.byte(a + 1))
@@ -378,17 +411,20 @@ class Screen(object):
         """The reconstructed screen as a PIL image, or (None, why)."""
         from PIL import Image
         import palette as pal
-        if self.d["ctrl"] & 3:
-            return None, ("CTRL read mode %d is a 320-pixel mode, which is not "
-                          "decoded" % (self.d["ctrl"] & 3))
         zones = list(self.zones())
         if not zones:
             return None, "no zones in the display list list"
+        states = self.states(zones)
         height = zones[-1][0] + zones[-1][1]["lines"]
-        img = Image.new("RGB", (160, height), pal.mame7800(self.d["regs"].get(0x20, 0)))
+        img = Image.new("RGB", (320, height))
         px = img.load()
+        import mariapix
         wm = 0
-        for y, z in zones:
+        for (y, z), st in zip(zones, states):
+            bg = pal.mame7800(st.get(0x20, 0))
+            for ln in range(z["lines"]):
+                for x in range(320):
+                    px[x, y + ln] = bg
             try:
                 entries = self.dlwalk.walk_dl(self.src, z["dl"])
             except IndexError:
@@ -396,14 +432,21 @@ class Screen(object):
             for e in entries:
                 if e.get("write_mode") is not None:
                     wm = e["write_mode"]
-                rows = self.rows(e, z["lines"], wm)
+                rows = self.rows(e, z["lines"], wm, st)
                 if rows is None:
-                    return None, "unsupported pixel format"
+                    key = (st.get(0x3C, 0) & 3, wm)
+                    self.skipped[key] = self.skipped.get(key, 0) + 1
+                    continue
+                fmt = mariapix.pixel_format(st.get(0x3C, 0) & 3, wm)
+                w = mariapix.width(fmt)
                 for ln, row in enumerate(rows):
                     for j, (p, colour) in enumerate(row):
-                        x = e["hpos"] + j
-                        if colour and 0 <= x < 160 and y + ln < height:
-                            px[x, y + ln] = self.rgb(p, colour)
+                        if not colour:
+                            continue
+                        for k in range(w):
+                            x = e["hpos"] * 2 + j * w + k
+                            if 0 <= x < 320 and y + ln < height:
+                                px[x, y + ln] = self.rgb(p, colour, st)
         return img, None
 
 
@@ -455,23 +498,33 @@ def step_graphics(rom, mame, out, c, args, rep):
     if img is None:
         lines.append("Screen not rebuilt: %s." % why)
         return lines
-    big = img.resize((img.width * 4, img.height * 2), Image.NEAREST)
+    big = img.resize((img.width * 2, img.height * 2), Image.NEAREST)
     big.save(os.path.join(gdir, "screen.png"))
     zl = [z for _y, z in scr.zones()]
     dli = sum(1 for z in zl if z["dli"])
+    nw = len(d.get("writes") or [])
     lines += ["", "![rebuilt screen](graphics/screen.png)", "",
               "The screen as the display list, character sets and graphics in "
               "the ROM describe it at that frame -- a reconstruction, not a "
-              "screenshot. The registers are as they stood at the dump, once for "
-              "the whole screen."]
-    if dli:
+              "screenshot."]
+    if d.get("writes") is not None and dli:
         lines.append(
-            "**%d of %d zones raise a display-list interrupt**, which is where a "
-            "game repaints palettes and switches CHARBASE partway down the "
-            "screen. Zones drawn after the first one may be wrong here -- wrong "
-            "colours, or another font's characters read from this one's pages "
-            "(the garbled rows below). Compare with the screenshots above; "
-            "recording the registers per zone is not done." % (dli, len(zl)))
+            "%d of %d zones raise a display-list interrupt; the %d MARIA register "
+            "writes made during the frame were applied zone by zone (palettes, "
+            "CHARBASE and CTRL as each zone was drawn)." % (dli, len(zl), nw))
+    elif dli:
+        lines.append(
+            "**%d of %d zones raise a display-list interrupt**, and this dump has "
+            "no per-write record, so every zone is drawn with the final "
+            "registers: zones below the first interrupt may be wrong." % (dli, len(zl)))
+    if scr.skipped:
+        lines.append("**Left blank: %s** -- 320-pixel formats that are not decoded "
+                     "(`mariapix.py`)." % ", ".join(
+                         "%d entries with read mode %d, write mode %d" % (n, rm, wm)
+                         for (rm, wm), n in sorted(scr.skipped.items())))
+    lines.append("Not modelled: a register written by the main program at an "
+                 "unknown moment inside the frame, holey DMA, and the 320 modes "
+                 "other than 320A.")
     tiles = []
     for e, ln, wm in direct[:64]:
         rows = scr.rows(e, ln, wm)
