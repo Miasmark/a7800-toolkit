@@ -42,10 +42,9 @@ MAME_GUESSES = [
 
 
 def find_mame(explicit=None):
-    for p in ([explicit] if explicit else []) + MAME_GUESSES:
-        if p and os.path.exists(p):
-            return p
-    return None
+    # one finder for every tool: capture.py also reads A7800_MAME and PATH
+    import capture
+    return capture.find_mame(explicit)
 
 
 def replay(mame, rom, inp, log, seconds, rompath, loop=None, skip=None):
