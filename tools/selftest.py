@@ -942,6 +942,26 @@ def t_dynamic():
         % len(f["executed_banks"])
 
 
+MAME_MEASURED = 0.287        # what docs/emulation.md was measured on
+MAME_OLDEST = 0.250          # below this the Lua API the probes use is not there
+
+
+def mame_version(exe):
+    """MAME's version as a float (0.264), or None if it will not say."""
+    try:
+        out = subprocess.run([exe, "-version"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, timeout=30
+                             ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"\s*(\d+)\.(\d+)", out)
+    return float("%s.%s" % (m.group(1), m.group(2).zfill(3))) if m else None
+
+
+def _fmt_ver(v):
+    return "%.3f" % v
+
+
 def t_probes_mame(rom):
     """Run the generic probes under real MAME on a cartridge we know the answers
     for. Skipped when there is no MAME or no BIOS to boot it."""
@@ -950,6 +970,9 @@ def t_probes_mame(rom):
     roms = capture.find_rompath(rom or "x") if rom else None
     if not (exe and roms and rom):
         return None
+    ver = mame_version(exe)
+    if ver is not None and ver < MAME_OLDEST:
+        return None          # too old for the Lua these probes use: skip, say so below
     work = tempfile.mkdtemp(prefix="mame-")
     base = [exe, "a7800"] + capture.bios_args() + [
         "-rompath", roms, "-cart", os.path.abspath(rom), "-video", "none",
@@ -1038,7 +1061,13 @@ def t_probes_mame(rom):
     heard = {int(r[1], 16) for r in rows if int(r[2], 16) == facts["tune_c"]}
     assert heard and heard <= set(facts["tune_f"]), heard
     shutil.rmtree(work, True)
-    return "reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, a recording, and the banked cart's facts, under MAME"
+    note = ""
+    if ver is not None and abs(ver - MAME_MEASURED) > 1e-9:
+        note = " (WARNING: MAME %s; these notes were measured on %s)" % (
+            _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
+    return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
+            "exectrace, a recording, and the banked cart's facts, under MAME"
+            + note)
 
 
 # ------------------------------------------------------------ with a cartridge
