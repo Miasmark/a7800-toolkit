@@ -28,6 +28,12 @@
 -- Set A7800_IP to the zero-page pair if the game is not Karateka; find it with
 -- `tools/forth.py <rom> --map`, which prints "the thread pointer lives at $xx".
 
+-- Env: A7800_IP (the interpreter's thread-pointer address, default $E8);
+--      A7800_PROF_LOG (output, default threadprof.log);
+--      A7800_PROF_SKIP (ignore the first N frames); A7800_PORT (stick port to
+--      count reads of, default $0280); A7800_LOOP (one thread address inside
+--      the main loop, to measure its period).
+
 local MACHINE = (type(manager.machine) == "function")
                 and manager:machine() or manager.machine
 local mem = MACHINE.devices[":maincpu"].spaces["program"]

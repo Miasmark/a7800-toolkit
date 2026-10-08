@@ -5,8 +5,9 @@
 -- it is known to be stalled, and diff the two address sets -- whatever
 -- writes during panning and not during the stall is a candidate.
 --
--- Env: A7800_DW_LOG (default diffwrites.log), A7800_DW_FROM/TO (frame
--- window), A7800_DW_LO/HI (address range, default $1800-$20FF).
+-- Env: A7800_DW_LOG (default diffwrites.log); A7800_DW_FROM and A7800_DW_TO
+-- (frame window, default the whole run); A7800_DW_LO and A7800_DW_HI
+-- (address range, default $1800-$20FF).
 
 local MACHINE = (type(manager.machine) == "function")
                 and manager:machine() or manager.machine

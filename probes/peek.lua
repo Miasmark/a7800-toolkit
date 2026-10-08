@@ -1,7 +1,7 @@
 -- peek.lua -- read a fixed set of addresses at chosen frames and print them.
 --
 -- Env: A7800_PEEK_FRAMES = "600,1170" (comma-separated)
---      A7800_PEEK_ADDRS  = "186D,188C,2537,2575" (comma-separated hex, no $)
+--      A7800_PEEK_ADDRS  = "1800,1801,0080" (comma-separated hex, no $)
 
 local MACHINE = (type(manager.machine) == "function")
                 and manager:machine() or manager.machine

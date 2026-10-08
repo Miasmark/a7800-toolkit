@@ -11,7 +11,24 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from disasm import Cart
-from asm import Assembler, AsmError
+from asm import Assembler, AsmError, item_at
+import m6502
+
+
+def decode(data, i):
+    """One instruction at data[i:], as text -- enough to read a difference."""
+    if i >= len(data):
+        return "(end of data)"
+    op = m6502.OPCODES.get(data[i])
+    if not op:
+        return ".byte $%02X" % data[i]
+    mn, mode, _ill = op
+    n = m6502.MODES[mode]
+    ob = data[i + 1:i + 1 + n]
+    if len(ob) < n:
+        return "%s (truncated)" % mn
+    v = "$%0*X" % (2 * n, int.from_bytes(bytes(ob), "little")) if n else ""
+    return (mn + " " + m6502.FMT[mode].format(v=v)).strip()
 
 
 def main():
@@ -24,6 +41,11 @@ def main():
                     help="override the mapper the header declares")
     args = ap.parse_args()
 
+    if not os.path.isfile(args.rom):
+        sys.exit("verify: no such cartridge: %s" % args.rom)
+    if not os.path.isdir(args.dir):
+        sys.exit("verify: no such listing directory: %s (generate one with "
+                 "disasm.py -o %s)" % (args.dir, args.dir))
     cart = Cart(args.rom, mapper=args.mapper, low=args.low)
     ok = True
     for name in sorted(os.listdir(args.dir)):
@@ -32,11 +54,12 @@ def main():
         space = name[:-4]
         path = os.path.join(args.dir, name)
         want = cart.slice(space, cart.base_of(space), cart.size_of(space))
+        asm = Assembler()
+        src = open(path, encoding="utf-8").read().splitlines()
         try:
-            got = Assembler().assemble(
-                open(path, encoding="utf-8").read().splitlines())
+            got = asm.assemble(src)
         except AsmError as e:
-            print("  %-4s FAIL  %s" % (space, e))
+            print("  %-4s FAIL  %s: %s" % (space, path, e))
             ok = False
             continue
         if got == want:
@@ -51,6 +74,12 @@ def main():
                      cart.base_of(space) + first,
                      got[first:first + 6].hex(" ") if first < len(got) else "-",
                      want[first:first + 6].hex(" ")))
+            hit = item_at(asm.linemap, first)
+            if hit:
+                start, ln = hit
+                print("         %s:%d: %s" % (path, ln, src[ln - 1].strip()))
+                print("         got  %s   (at +$%04X)" % (decode(got, start), start))
+                print("         want %s" % decode(want, start))
     print("\nROUND-TRIP", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 

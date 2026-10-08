@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from disasm import Cart
-from asm import Assembler
+from asm import Assembler, AsmError
 
 
 def main():
@@ -30,6 +30,10 @@ def main():
     ap.add_argument("-o", "--out", default="build/rebuilt.a78")
     args = ap.parse_args()
 
+    if not os.path.isfile(args.rom):
+        sys.exit("build: no such reference cartridge: %s" % args.rom)
+    if not os.path.isdir(args.dir):
+        sys.exit("build: no such listing directory: %s" % args.dir)
     cart = Cart(args.rom, mapper=args.mapper, low=args.low)
     banks = {}
     for name in sorted(os.listdir(args.dir)):
@@ -40,8 +44,12 @@ def main():
         # prefer the listing whose .org matches where the bank really lives
         if b in banks and space.startswith("b"):
             continue
-        data = Assembler().assemble(
-            open(os.path.join(args.dir, name), encoding="utf-8").read().splitlines())
+        path = os.path.join(args.dir, name)
+        try:
+            data = Assembler().assemble(
+                open(path, encoding="utf-8").read().splitlines())
+        except AsmError as e:
+            sys.exit("build: %s: %s" % (path, e))
         want = cart.size_of(space)
         if len(data) != want:
             print("  %s: %d bytes, expected %d" % (space, len(data), want))

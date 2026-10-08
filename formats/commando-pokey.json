@@ -1,7 +1,7 @@
 {
   "name": "Commando -- POKEY music player",
 
-  "note": [
+  "_about": [
     "The same engine as Midnight Mutants, on a different chip.",
     "",
     "That is not a guess from the sound of it. The two players lay their",

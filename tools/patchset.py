@@ -1258,6 +1258,8 @@ def cmd_apply(ps, rom, wanted, out):
     print("  %d bytes, sha256 %s"
           % (len(result), hashlib.sha256(result).hexdigest()[:16] + "..."))
     print("  %s" % note)
+    print("  note: a recording (.inp) made on the original will not line up with "
+          "this build -- record again (docs/pitfalls.md).")
     return 0
 
 

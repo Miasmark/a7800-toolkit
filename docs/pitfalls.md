@@ -1083,3 +1083,25 @@ in foreground code on a flag a display-list interrupt sets (`BIT flag / BEQ`),
 and writing the bank register only once the raster has passed; it also keeps
 the current bank in RAM so interrupt handlers can restore it. A routine that
 switches banks without that wait works in a test and tears the picture in play.
+
+
+## A batch file's `%~dp0` ends in a backslash, and `"...\"` swallows the quote
+
+`%~dp0` is the folder the batch file lives in, *with a trailing backslash*. On a
+Windows command line a backslash before a double quote escapes the quote, so
+
+    mame.exe -input_directory "%~dp0" -record run-01.inp
+
+reaches the program as one argument that runs on to the end of the line, and
+every option after it is silently eaten. MAME did not complain; it simply never
+saw `-record`, and the recorder that was meant to save a session saved nothing.
+Three game repos' launchers carry the comment describing exactly this.
+
+Build paths without a trailing backslash (`%HERE:~0,-1%` strips it) or put a
+file name after the folder before the closing quote. `tools/session.py` avoids
+the whole class by passing arguments as a list rather than a command line, so
+the `.bat` files here only ever hand it a single quoted path. Two neighbours of
+the same trap: `wmic os get localdatetime`, once the usual locale-independent
+timestamp, is removed from recent Windows 11 -- stamp names from Python
+instead -- and a hard-coded `%LOCALAPPDATA%\Programs\MAME` or `..\bios` works
+on one machine only; let `A7800_MAME` and `A7800_ROMPATH` decide.

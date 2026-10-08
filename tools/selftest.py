@@ -15,6 +15,7 @@ had quietly stopped being true. So the doc checks sit here alongside the code
 checks, and they are not softer.
 """
 import argparse
+import atexit
 import collections
 import glob
 import hashlib
@@ -22,6 +23,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,8 +76,19 @@ def t_json():
     files = (glob.glob(os.path.join(ROOT, "formats", "*.json"))
              + glob.glob(os.path.join(ROOT, "templates", "*.json"))
              + glob.glob(os.path.join(ROOT, "examples", "*.json")))
+    def no_dupes(pairs):
+        # json keeps the LAST of a repeated key, silently dropping the first --
+        # which is how a template's explanation of "blocks" went missing
+        keys = [k for k, _v in pairs]
+        dup = sorted(set(k for k in keys if keys.count(k) > 1))
+        if dup:
+            raise AssertionError("duplicate key %s" % ", ".join(dup))
+        return dict(pairs)
     for f in files:
-        json.load(io.open(f, encoding="utf-8"))
+        try:
+            json.load(io.open(f, encoding="utf-8"), object_pairs_hook=no_dupes)
+        except AssertionError as e:
+            raise AssertionError("%s: %s" % (os.path.relpath(f, ROOT), e))
     tpl = json.load(io.open(os.path.join(ROOT, "templates", "format.json"),
                             encoding="utf-8"))
     # A key with no underscore twin is a key nobody explained.
@@ -689,6 +702,163 @@ def t_links():
     if bad:
         raise AssertionError("; ".join(bad))
     return "every markdown link resolves"
+
+
+def _md_files():
+    out = []
+    for root, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+        out += [os.path.join(root, f) for f in files if f.endswith(".md")]
+    return sorted(out)
+
+
+# Names that docs mention on purpose and that are not files in this repo: a
+# user's own file, a sibling project's script, an output a tool writes.
+DOC_NAMES_OK = {
+    "your_symbols.py", "your_health.py", "your_health.lua", "health.py",
+    "rooms.py", "karateka.py", "game.a78",
+}
+_PATH_TOKEN = re.compile(
+    r"^(?:tools|probes|docs|formats|templates|examples)/[A-Za-z0-9_./-]*[A-Za-z0-9_]$")
+_BARE_TOKEN = re.compile(r"^[A-Za-z0-9_-]+\.(?:py|lua)$")
+
+
+def doc_references(text):
+    """Backticked repo paths and bare script names a markdown file mentions."""
+    for m in re.finditer(r"`([^`\n]+)`", text):
+        tok = m.group(1).strip()
+        if _PATH_TOKEN.match(tok) or _BARE_TOKEN.match(tok):
+            yield tok
+
+
+def t_docrefs():
+    """Every file a doc names in backticks exists (so docs cannot cite a probe
+    or tool that was never committed, or was renamed)."""
+    bad = []
+    for p in _md_files():
+        s = io.open(p, encoding="utf-8").read()
+        for tok in doc_references(s):
+            if tok in DOC_NAMES_OK or "NN" in tok:
+                continue
+            if "/" in tok:
+                ok = os.path.exists(os.path.join(ROOT, tok))
+            else:
+                ok = any(os.path.exists(os.path.join(ROOT, d, tok))
+                         for d in ("tools", "probes"))
+            if not ok:
+                bad.append("%s -> %s" % (os.path.relpath(p, ROOT), tok))
+    if bad:
+        raise AssertionError("; ".join(sorted(set(bad))[:12])
+                             + (" ..." if len(set(bad)) > 12 else ""))
+    # the check itself must be able to fail
+    probe = "see `tools/nope_x.py`, `probes/nope.lua` and `nope_y.py`"
+    assert list(doc_references(probe)) == ["tools/nope_x.py", "probes/nope.lua",
+                                           "nope_y.py"], "scanner is broken"
+    return "every file a doc names in backticks exists"
+
+
+def t_probe_index():
+    """docs/emulation.md lists every probe, and lists nothing that is not there."""
+    idx = io.open(os.path.join(ROOT, "docs", "emulation.md"),
+                  encoding="utf-8").read()
+    idx = idx[idx.index("## Probe index"):]
+    have = {f for f in os.listdir(os.path.join(ROOT, "probes"))
+            if f.endswith((".lua", ".py"))}
+    listed = set()
+    for row in re.findall(r"^\|([^|\n]*)\|", idx, re.M):     # first column only
+        listed |= set(re.findall(r"`([A-Za-z0-9_-]+\.(?:lua|py))`", row))
+    missing = sorted(have - listed)
+    stale = sorted(listed - have)
+    if missing or stale:
+        raise AssertionError("not in the index: %s; in the index but absent: %s"
+                             % (missing or "-", stale or "-"))
+    return "%d probes, index complete both ways" % len(have)
+
+
+def t_bat_quotes():
+    """No batch file ends a quoted path in a backslash (`"%~dp0"` eats the quote)."""
+    bad = []
+    for f in sorted(glob.glob(os.path.join(ROOT, "*.bat"))):
+        for i, ln in enumerate(io.open(f, encoding="utf-8", errors="replace"), 1):
+            code = ln.split("rem ", 1)[0] if ln.lstrip().lower().startswith("rem") \
+                else ln
+            if re.search(r'(?:%~dp0|%HERE%|%DIR%\\?)"', code) and "set " not in code.lower():
+                bad.append("%s:%d" % (os.path.basename(f), i))
+    if bad:
+        raise AssertionError("trailing-backslash quote in " + ", ".join(bad))
+    return "no .bat quotes a path that ends in a backslash"
+
+
+def t_lualint():
+    """The Lua lint passes every shipped probe, and fails the traps it names."""
+    import lualint
+    problems = []
+    for f in sorted(glob.glob(os.path.join(ROOT, "probes", "*.lua"))):
+        for n, rule, msg in lualint.lint_file(f):
+            problems.append("%s:%d %s" % (os.path.basename(f), n, rule))
+    if problems:
+        raise AssertionError("; ".join(problems[:10]))
+    leak = ("-- probe\nlocal TAPS = {}\nTAPS[#TAPS+1] = mem:install_read_tap("
+            "0, 1, \"x\", function(o, d) return d end)\n")
+    got = [r for _n, r, _m in lualint.lint_text(leak)]
+    assert got == ["tap-held-in-local"], got
+    dropped = "-- probe\nmem:install_write_tap(0, 1, \"x\", function() end)\n"
+    assert [r for _n, r, _m in lualint.lint_text(dropped)] == ["tap-held-in-local"]
+    held = ("-- probe\nTAPS = {\n  mem:install_write_tap(0, 1, \"x\", "
+            "function(o, d) return d end),\n}\n")
+    assert lualint.lint_text(held) == [], lualint.lint_text(held)
+    bare = "local x = 1\n"
+    assert [r for _n, r, _m in lualint.lint_text(bare)] == ["no-header"]
+    env = "-- probe, env A7800_ONE\nlocal a = os.getenv(\"A7800_ONE\")\nlocal b = os.getenv(\"A7800_TWO\")\n"
+    got = lualint.lint_text(env)
+    assert [r for _n, r, _m in got] == ["undocumented-env"] and "A7800_TWO" in got[0][2]
+    return "%d probes clean; leak, dropped tap, header and env rules each fire" \
+        % len(glob.glob(os.path.join(ROOT, "probes", "*.lua")))
+
+
+def t_verify_explains():
+    """A one-byte difference names the source line and shows got vs want."""
+    d = tempfile.mkdtemp(prefix="explain-")
+    out = run_tool("newgame.py", os.path.join(d, "g"), "--build")
+    rom = os.path.join(d, "g", "game.a78")
+    assert os.path.exists(rom), out
+    src = os.path.join(d, "src")
+    run_tool("disasm.py", rom, "-o", src)
+    assert "PASSED" in run_tool("verify.py", rom, "-d", src)
+    path = os.path.join(src, "rom.asm")
+    lines = io.open(path, encoding="utf-8").read().split("\n")
+    k = [i for i, l in enumerate(lines) if l.strip().startswith("LDA       #$")][2]
+    lines[k] = "    LDA       #$7E" + " " * 30 + ";" + lines[k].split(";", 1)[1]
+    io.open(path, "w", encoding="utf-8").write("\n".join(lines))
+    out = run_tool("verify.py", rom, "-d", src)
+    assert "FAILED" in out and "rom.asm:%d" % (k + 1) in out, out
+    assert "got  LDA #$7E" in out and "want LDA #$60" in out, out
+    assert "Traceback" not in run_tool("verify.py", os.path.join(d, "nope.a78"))
+    assert "Traceback" not in run_tool("verify.py", rom, "-d", os.path.join(d, "x"))
+    assert "Traceback" not in run_tool("build.py", os.path.join(d, "nope.a78"))
+    io.open(path, "w", encoding="utf-8").write("  bogus line\n")
+    out = run_tool("build.py", rom, "-d", src)
+    assert "rom.asm" in out and "Traceback" not in out, out
+    return "source line, got/want decode, and friendly errors"
+
+
+def t_flake8():
+    """pyflakes-class errors (unused names, undefined names, syntax) stay out."""
+    exe = shutil.which("flake8")
+    cmd = [exe] if exe else [sys.executable, "-m", "flake8"]
+    try:
+        p = subprocess.run(cmd + ["--select=F,E9", os.path.join(ROOT, "tools"),
+                                  os.path.join(ROOT, "probes")],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError:
+        return None
+    out = p.stdout.decode("utf-8", "replace")
+    if "No module named flake8" in out:
+        return None
+    if p.returncode:
+        raise AssertionError(out.strip().splitlines()[0] + " (%d total)"
+                             % len(out.strip().splitlines()))
+    return "no unused or undefined names"
 
 
 # ------------------------------------------------------------ with a cartridge
@@ -2530,6 +2700,36 @@ def t_dist_carries_no_rom():
     return "%d literal bytes across dist/, none of them the cartridge's" % literals
 
 
+def hermetic(keep_env=False):
+    """Make a run depend on nothing outside the repo, and leave nothing behind.
+
+    Every temporary file -- ours, the tools' we import, and the subprocesses
+    we start -- goes under one directory that is removed at exit. (Each run
+    used to leave dozens of selftest-* and regress-* directories in /tmp.)
+    A7800_* settings are dropped, so a developer who exports
+    A7800_PALETTE=mame or A7800_MAME gets the same result as everyone else;
+    --keep-env opts out.
+    """
+    if not keep_env:
+        for k in [k for k in os.environ if k.startswith("A7800_")]:
+            del os.environ[k]
+    root = tempfile.mkdtemp(prefix="selftest-")
+    tempfile.tempdir = root
+    for k in ("TMPDIR", "TEMP", "TMP"):
+        os.environ[k] = root
+    atexit.register(shutil.rmtree, root, True)
+    return root
+
+
+def synthetic_cart(root):
+    """A real 16K cartridge from newgame.py, for checks that need any ROM."""
+    out = os.path.join(root, "synthetic")
+    r = subprocess.run([sys.executable, os.path.join(HERE, "newgame.py"),
+                        out, "--build"], capture_output=True, text=True)
+    path = os.path.join(out, "game.a78")
+    return path if r.returncode == 0 and os.path.exists(path) else None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__.strip().split("\n")[0],
@@ -2541,7 +2741,14 @@ def main():
                     help="which song --log recorded (default 0)")
     ap.add_argument("--region", default="ntsc", choices=["ntsc", "pal"])
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--keep-env", action="store_true",
+                    help="do not drop A7800_* environment variables")
     args = ap.parse_args()
+
+    root = hermetic(args.keep_env)
+    user_rom = bool(args.rom)
+    if not args.rom:
+        args.rom = synthetic_cart(root)
 
     r = Results(args.verbose)
     print("without a cartridge")
@@ -2582,6 +2789,12 @@ def main():
     r.check("tool --help", t_helps)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
+    r.check("flake8", t_flake8)
+    r.check("verify explains", t_verify_explains)
+    r.check("lua lint", t_lualint)
+    r.check("batch quoting", t_bat_quotes)
+    r.check("probe index", t_probe_index)
+    r.check("doc references", t_docrefs)
 
     print("")
     print("with a cartridge")
@@ -2600,7 +2813,7 @@ def main():
     n_skip = sum(1 for x in r.rows if x[1] == SKIP)
     print("")
     print("%d passed, %d failed, %d skipped" % (n_ok, len(r.failed), n_skip))
-    if n_skip and not args.rom:
+    if n_skip and not user_rom:
         print("Pass --rom, --format and --log to run the rest.")
     return 1 if r.failed else 0
 

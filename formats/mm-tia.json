@@ -1,6 +1,6 @@
 {
   "name": "Midnight Mutants -- TIA music player",
-  "note": [
+  "_about": [
     "A worked example of a player description. The layout was established by",
     "reading the player at f6:$752C-$7733; audiotrace.py finds the tables, and",
     "this says what their bytes mean.",
