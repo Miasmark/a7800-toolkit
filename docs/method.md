@@ -56,8 +56,15 @@ disassembly to be right.
 ### 1. Survey before disassembling
 
 ```
+python tools/firstlook.py game.a78          # one report: what it is, what it holds, what it does
 python tools/survey.py game.a78 --strings
 ```
+
+`firstlook.py` runs the cartridge headless and collects music, screenshots, the
+live artwork and a trace of the code that ran, and writes a starter
+`annotations.json` with what the run observed (banks a computed switch chose,
+where an indirect jump went). Treat that file as observed, not proven: it is what
+one run did. Everything below still applies to it.
 
 You want four things before you write a single annotation: how the cart is
 banked, which banks are code and which are graphics, whether the text is

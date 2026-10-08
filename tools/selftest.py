@@ -942,6 +942,31 @@ def t_dynamic():
         % len(f["executed_banks"])
 
 
+def t_firstlook_static():
+    """firstlook's static half names what the cartridge is, with no MAME."""
+    import firstlook
+    synth = _synth()
+    data, f = synth.build()
+    d = tempfile.mkdtemp(prefix="firstlook-")
+    rom = os.path.join(d, "s.a78")
+    io.open(rom, "wb").write(data)
+    out = os.path.join(d, "out")
+    assert firstlook.main([rom, "-o", out, "--no-live"]) == 0
+    text = io.open(os.path.join(out, "report.md"), encoding="utf-8").read()
+    facts = json.load(io.open(os.path.join(out, "firstlook.json"), encoding="utf-8"))
+    for want in ("Synth128", "supergame, 8 banks of 16K", "POKEY at $4000",
+                 "## Music player", "## What static analysis finds"):
+        assert want in text, (want, text[:500])
+    assert facts["identity"]["pokeys"] == [0x4000], facts["identity"]
+    assert facts["player_signature"], "no player fingerprint for a cartridge that plays"
+    assert "ONE run" in text, "the report must say what its live sections are"
+    assert not os.path.exists(os.path.join(out, "music")), "no-live ran something"
+    assert firstlook.looks_like_text("PRESS FIRE TO START")
+    assert not firstlook.looks_like_text("OMKKKKKKKKKKKMOQ")
+    assert not firstlook.looks_like_text("!#%')+-/13579;=?ACEG")
+    return "identity, player fingerprint, honest about its limits; text filter works"
+
+
 MAME_MEASURED = 0.287        # what docs/emulation.md was measured on
 MAME_OLDEST = 0.250          # below this the Lua API the probes use is not there
 
@@ -1060,13 +1085,30 @@ def t_probes_mame(rom):
                                        encoding="utf-8") if l[0].isdigit()]
     heard = {int(r[1], 16) for r in rows if int(r[2], 16) == facts["tune_c"]}
     assert heard and heard <= set(facts["tune_f"]), heard
+    # the whole first look, live, on the banked cartridge
+    import firstlook
+    fl = os.path.join(work, "firstlook")
+    assert firstlook.main([srom, "-o", fl, "--seconds", "8", "--code-seconds", "4",
+                           "--graphics-at", "120"]) == 0
+    text = io.open(os.path.join(fl, "report.md"), encoding="utf-8").read()
+    ff = json.load(io.open(os.path.join(fl, "firstlook.json"), encoding="utf-8"))
+    assert ff["music"]["changes"] > 5, ff.get("music")
+    assert os.path.getsize(os.path.join(fl, "music", "song.wav")) > 1000
+    assert ff["graphics"]["objects"] == 1 and ff["graphics"]["plain_160a"], ff["graphics"]
+    assert ff["sprite_refs"] == 1, ff["sprite_refs"]
+    assert ff["screens"], "no screenshots"
+    ann = json.load(io.open(os.path.join(fl, "annotations.json"), encoding="utf-8"))
+    assert "f7:%04X" % facts["handler_a"] in ann["entries"], ann["entries"]
+    assert ann["banksw"]["f7:%04X" % facts["computed_switch"]] == facts["executed_banks"]
+    for want in ("What it sounds like", "The artwork on screen", "The code that ran"):
+        assert want in text, want
     shutil.rmtree(work, True)
     note = ""
     if ver is not None and abs(ver - MAME_MEASURED) > 1e-9:
         note = " (WARNING: MAME %s; these notes were measured on %s)" % (
             _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
     return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
-            "exectrace, a recording, and the banked cart's facts, under MAME"
+            "exectrace, a recording, the banked cart's facts, and a whole first look, under MAME"
             + note)
 
 
@@ -3009,6 +3051,7 @@ def main():
     r.check("doc references", t_docrefs)
     r.check("synthetic banked cart", t_synth_static)
     r.check("dynamic annotations", t_dynamic)
+    r.check("first look (static)", t_firstlook_static)
 
     print("")
     print("with a cartridge")

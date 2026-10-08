@@ -31,6 +31,11 @@
 --                        (default 5400).
 --   A7800_GFX_DELAY      frames to wait after the trigger, so the dump is not
 --                        the very first frame of the new state (default 60).
+--   A7800_GFX_BANKSEL    "lo-hi" hex: a bank-select window (SuperGame: 8000-BFFF).
+--                        Writes there are tracked, and the bank in force at the
+--                        dump is written to the regs file as "bank N", so a
+--                        graphics address in a switched window can be attributed.
+--   A7800_GFX_BANKS      number of banks (default 8; the bank is the value & N-1).
 --   A7800_GFX_RAM        output, $1800-$27FF, the 7800's whole RAM
 --                        (default dumpgfx_ram.bin)
 --   A7800_GFX_REGS       output, every MARIA register write seen and the frame
@@ -65,6 +70,17 @@ TAPS[1] = mem:install_write_tap(0x20, 0x3F, "maria", function(offset, data)
   return data
 end)
 
+local bank = nil
+local SEL_LO, SEL_HI = (os.getenv("A7800_GFX_BANKSEL") or ""):match("^(%x+)%-(%x+)$")
+if SEL_LO then
+  local mask = (tonumber(os.getenv("A7800_GFX_BANKS") or "") or 8) - 1
+  TAPS[2] = mem:install_write_tap(tonumber(SEL_LO, 16), tonumber(SEL_HI, 16),
+                                  "banksel", function(offset, data)
+    bank = data & mask
+    return data
+  end)
+end
+
 local frame, phase, reach_frame = 0, "boot", 0
 
 local function dump()
@@ -74,6 +90,7 @@ local function dump()
 
   local g = io.open(REG_OUT, "w")
   g:write(string.format("frame %d\n", frame))
+  if bank then g:write(string.format("bank %d\n", bank)) end
   if WHEN then g:write(string.format("trigger $%04X = %d\n", WHEN, mem:read_u8(WHEN))) end
   g:write(string.format("DPPH=$%02X DPPL=$%02X\n", regs[0x2C] or 0, regs[0x30] or 0))
   g:write(string.format("CHARBASE=$%02X OFFSET=$%02X CTRL=$%02X BACKGRND=$%02X\n",

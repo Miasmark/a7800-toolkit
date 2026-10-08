@@ -20,6 +20,7 @@ corrected a register bit this toolkit had recorded backwards — see
 ## Start here
 
 ```
+python tools/firstlook.py game.a78             # what is this, in one report
 python tools/workbench.py game.a78             # open everything at once
 ```
 
@@ -61,6 +62,7 @@ emulator section is worth reading before you write any probe.
 
 | | |
 |---|---|
+| `firstlook.py` | **One command, one report, on a cartridge nobody has told the toolkit anything about.** Reads the header and identifies the music player (against `formats/`, or by fingerprint), then runs five short headless MAME runs -- music (to `.log`, `.trk` and `.wav`), screenshots, the live display list with its artwork rendered, every graphics address drawn from, and which code ran in which bank (merged by `dyn.py` into a starter `annotations.json`) -- and writes `report.md`. Static analysis found 2 graphics blocks and 1 audio table in a 128K banked POKEY cartridge; the same cartridge's one-minute first look found 36 sheets of graphics, 30 seconds of music, and 332 executed instructions the tracer had missed. It says plainly what one run cannot show, refuses to render pixel formats it cannot decode, and works without MAME (static half only) or Pillow (no pictures). `--playback` runs every probe over a recording instead. |
 | `workbench.py` | One place to open a cartridge: what the header says, what a scan finds, and a button on each result that launches the right editor with the space, base and format already filled in. A launcher, not another tool. |
 | `cart.py` | The `.a78` header and the mappers. Header flags checked against the image library, not against published bit lists — they disagree, and the cartridges win. |
 | `library.py` | Search a ROM collection **inside its zip**, without extracting 22MB to find one file. Lays out matches, extracts them, or surveys one. |
