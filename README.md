@@ -221,6 +221,17 @@ Raster Music Tracker module without pretending it can play one. The three
 shared descriptions cover 23% of the cartridges that have a recognisable player
 or module (195 of 841; see `docs/audio.md`).
 
+## Tests, and the cartridge they use
+
+`python tools/selftest.py` needs no ROM: `tests/synth.py` builds a 128K
+SuperGame + POKEY cartridge from source, and `tests/carts/synth128.a78` is a
+committed copy (selftest fails if the two differ). It is made to be hard for
+a static tracer on purpose -- a bank switch whose number comes from a table, a
+`JMP` through a RAM vector, a tune played from a switched bank -- and
+`facts()` says what a correct tool must find. With MAME and a BIOS configured
+([`docs/emulation.md`](docs/emulation.md#running-mame-with-no-atari-bios)),
+selftest also runs the probes against it and checks what they observe.
+
 ## The one rule
 
 **The rebuild must stay byte-identical.** Assemble every listing straight back

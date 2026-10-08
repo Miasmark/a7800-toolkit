@@ -861,6 +861,45 @@ def t_flake8():
     return "no unused or undefined names"
 
 
+def _synth():
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import synth
+    return synth
+
+
+def t_synth_static():
+    """tests/synth.py builds a banked POKEY cartridge whose gaps are the known
+    ones: the static tracer must find the reset code, call the computed bank
+    switch unresolved, and stay blind to the handler behind the RAM vector."""
+    synth = _synth()
+    ntsc, facts = synth.build()
+    assert ntsc == synth.build()[0], "the build is not deterministic"
+    committed = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    if os.path.exists(committed):
+        assert io.open(committed, "rb").read() == ntsc, (
+            "tests/carts/synth128.a78 is stale: python tests/synth.py "
+            "tests/carts/synth128.a78")
+    d = tempfile.mkdtemp(prefix="synth-")
+    rom = os.path.join(d, "s.a78")
+    io.open(rom, "wb").write(ntsc)
+    pal = os.path.join(d, "p.a78")
+    io.open(pal, "wb").write(synth.build("pal")[0])
+    import cart as cart_module
+    c = cart_module.Cart(rom)
+    assert c.nbanks == 8 and c.pokeys() == [0x4000], (c.nbanks, c.pokeys())
+    assert (cart_module.Cart(pal).info or {}).get("region", "").lower() == "pal"
+    src = os.path.join(d, "src")
+    out = run_tool("disasm.py", rom, "-o", src)
+    assert "f7:%04X    -> UNRESOLVED" % facts["computed_switch"] in out, out[-600:]
+    assert "PASSED" in run_tool("verify.py", rom, "-d", src)
+    listing = io.open(os.path.join(src, "f7.asm"), encoding="utf-8").read()
+    # reached from the vectors: reset code. Not reached: the vector's target.
+    assert "; %04X:" % facts["reset"] in listing
+    assert "; %04X:" % facts["handler_a"] not in listing, \
+        "the handler behind the RAM vector was reached statically"
+    return "128K SuperGame+POKEY, deterministic, PAL variant, switch unresolved, round-trips"
+
+
 def t_probes_mame(rom):
     """Run the generic probes under real MAME on a cartridge we know the answers
     for. Skipped when there is no MAME or no BIOS to boot it."""
@@ -915,8 +954,37 @@ def t_probes_mame(rom):
                "-playback", "t.inp", "-exit_after_playback"])
     m = re.search(r"recording length: (\d+) frames\n", out)
     assert m and 175 <= int(m.group(1)) <= 185 and "CAP" not in out, out[-300:]
+    # the banked synthetic cartridge: every fact it was built with, observed
+    synth = _synth()
+    data, facts = synth.build()
+    srom = os.path.join(work, "synth.a78")
+    io.open(srom, "wb").write(data)
+    sbase = [srom if a == os.path.abspath(rom) else a for a in base]
+    sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "5",
+                                 "-autoboot_script",
+                                 os.path.join(ROOT, "probes", "peek.lua")],
+                        cwd=work, env=dict(env, A7800_PEEK_FRAMES="240",
+                                           A7800_PEEK_ADDRS="81,92,B1,B2,B3,B4,A0,A1"),
+                        timeout=180, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    line = [l for l in sp.stdout.decode("utf-8", "replace").splitlines()
+            if l.startswith("frame 240")]
+    assert line, sp.stdout[-300:]
+    v = {int(k, 16): int(x) for k, x in re.findall(r"\$00([0-9A-F]{2})=(\d+)", line[0])}
+    for bank, addr in facts["hit_counters"].items():
+        assert 50 <= v[addr] <= 70, ("bank %d ran %d times in 240 frames" % (bank, v[addr]), v)
+    assert v[0xB3] == 0 and v[0x92] > 200, v      # bank 3 plays; NMI runs per frame
+    assert v[0xA0] | (v[0xA1] << 8) == facts["handler_a"], v
+    sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
+                                 "-autoboot_script",
+                                 os.path.join(ROOT, "probes", "audio.lua")],
+                        cwd=work, env=dict(env, A7800_POKEY="0x4000"),
+                        timeout=180, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    rows = [l.split() for l in io.open(os.path.join(work, "a7800-audio.log"),
+                                       encoding="utf-8") if l[0].isdigit()]
+    heard = {int(r[1], 16) for r in rows if int(r[2], 16) == facts["tune_c"]}
+    assert heard and heard <= set(facts["tune_f"]), heard
     shutil.rmtree(work, True)
-    return "reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders and a recording, under MAME"
+    return "reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, a recording, and the banked cart's facts, under MAME"
 
 
 # ------------------------------------------------------------ with a cartridge
@@ -2856,6 +2924,7 @@ def main():
     r.check("batch quoting", t_bat_quotes)
     r.check("probe index", t_probe_index)
     r.check("doc references", t_docrefs)
+    r.check("synthetic banked cart", t_synth_static)
 
     print("")
     print("with a cartridge")

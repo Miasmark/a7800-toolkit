@@ -19,3 +19,7 @@ __pycache__/
 *.xex
 
 .DS_Store
+
+# ...except the test cartridge this repo builds from source (tests/synth.py):
+# it is ours, deterministic, and the tests compare a fresh build against it.
+!tests/carts/*.a78
