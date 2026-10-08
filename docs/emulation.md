@@ -301,6 +301,7 @@ proved goes here once its addresses have become parameters.
 | `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
 | `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |
+| `cyclebudget.lua` | Where a frame's CPU cycles go and how many MARIA took: executed cycles (with branch and page-crossing extras), the part inside the NMI, the TIA/RIOT slow-access penalty, `dma` as what is left of the frame, and executed cycles per named PC range. Compare `dma` with `dmabudget.py`'s model of the same display list. Measured first in the Karateka XE port; see its header for what it does not count. |
 | `rates.lua` | How often chosen instructions run, and the gap in frames between reads of a controller port. A game answers no faster than it asks. |
 | `pcprof.lua` | A sampling profiler with no timer: the program counter each time MARIA reads a display-list-list entry. `pcmap.py` names the routines. Visible frame only. |
 | `forcedl.lua` | Force a display-list entry, graphics and palettes into a running machine and screenshot it: the way to ask MARIA what a mode does. Used by selftest to check `mariapix.py`; needs a cartridge that already builds a display list, such as `tests/carts/synth128.a78`. |

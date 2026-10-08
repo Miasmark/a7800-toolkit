@@ -667,6 +667,28 @@ def t_helps():
     return "every tool has working --help"
 
 
+def t_tia_periods():
+    """The TIA model's period for every AUDC is the one measured on MAME with
+    mktone.py --tia (docs/audio.md): pure tones 2, 6, 31, 93 divider ticks;
+    polys 15, 465, 31, 93, 511; the old model had $C, $D, $6, $A, $E and $F an
+    octave low."""
+    import tracker
+    measured = {0x4: 2, 0x5: 2, 0xC: 6, 0xD: 6, 0x6: 31, 0xA: 31, 0xE: 93,
+                0x1: 15, 0x2: 465, 0x3: 465, 0x7: 31, 0x9: 31, 0xF: 93,
+                0x8: 511}
+    for audc, period in sorted(measured.items()):
+        for audf in (0, 3, 9):
+            want = tracker.CLOCK["ntsc"] / ((audf + 1) * period)
+            got = tracker.frequency(audc, audf)
+            assert abs(got - want) < 1e-6, \
+                "AUDC $%X AUDF %d: %.3f Hz, measured period %d gives %.3f" % (
+                    audc, audf, got, period, want)
+    assert tracker.frequency(0x0, 3) is None and tracker.frequency(0xB, 3) is None
+    # the 18-high, 13-low pattern, not a square
+    assert tracker.DIV31.count(1) == 18 and len(tracker.DIV31) == 31
+    return "14 AUDCs match the measured periods at 3 dividers each"
+
+
 def t_readme():
     """The README lists the tools that exist, and no others."""
     s = io.open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
@@ -1325,6 +1347,17 @@ def t_probes_mame(rom):
     assert m and 199 <= int(m.group(1)) <= 203, rt
     assert re.search(r"port 0280: .*mean 2\.00 min 2 max 2", rt), rt
     assert re.search(r"port 000C: .*mean 1\.00 min 1 max 1", rt), rt
+    subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "5", "-autoboot_script",
+                            os.path.join(ROOT, "probes", "cyclebudget.lua")],
+                   cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_CB_FROM="100", A7800_CB_END="160",
+                            A7800_CB_BLOCK="20", A7800_CB_RANGES="all=C000-FFFF"))
+    cb = io.open(os.path.join(work, "cyclebudget.log"), encoding="utf-8").read().splitlines()
+    assert len(cb) == 3, cb
+    m = re.match(r"f\d+ executed (\d+) nmi (\d+) slow (\d+) dma (\d+) all (\d+)", cb[1])
+    ex, nm, sl, dm, al = [int(x) for x in m.groups()]
+    assert ex + sl + dm == 29868 and 0 < dm < 0.2 * 29868, cb[1]    # what is left is MARIA's
+    assert 10 < nm < 200 and abs(al - ex) < 50, cb[1]   # one short NMI a frame; all code is up here
     sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
                                  "-autoboot_script",
                                  os.path.join(ROOT, "probes", "audio.lua")],
@@ -1371,7 +1404,7 @@ def t_probes_mame(rom):
         note = " (WARNING: MAME %s; these notes were measured on %s)" % (
             _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
     return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
-            "exectrace, pcprof, hangsnap, rates, a recording, the banked cart's facts, and a whole first look, under MAME"
+            "exectrace, pcprof, hangsnap, rates, cyclebudget, a recording, the banked cart's facts, and a whole first look, under MAME"
             + note)
 
 
@@ -3390,6 +3423,7 @@ def main():
     r.check("recipes carry no payload", t_portkit_refuses_payload)
     r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)
+    r.check("TIA periods", t_tia_periods)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
     r.check("flake8", t_flake8)
