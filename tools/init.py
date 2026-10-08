@@ -133,6 +133,9 @@ def main():
     ap.add_argument("--mapper", choices=["linear", "supergame", "absolute"])
     ap.add_argument("--force", action="store_true",
                     help="overwrite an existing annotations file")
+    ap.add_argument("--dynamic", metavar="LOG",
+                    help="a log from probes/exectrace.lua: add the jump targets "
+                         "and bank switches it observed (tools/dyn.py)")
     args = ap.parse_args()
 
     try:
@@ -149,6 +152,19 @@ def main():
         return 3
 
     doc = build(cart, args.rom)
+    vector_entries = list(doc["entries"])
+    dynamic = []
+    if args.dynamic:
+        import dyn
+        if not os.path.isfile(args.dynamic):
+            sys.stderr.write("no such log: %s\n" % args.dynamic)
+            return 2
+        log = dyn.parse_log(io.open(args.dynamic, encoding="utf-8").read())
+        merged, dynamic = dyn.apply(args.rom, doc, log,
+                                    os.path.basename(args.dynamic),
+                                    args.low, args.mapper)
+        if merged is not None:
+            doc = merged
     with io.open(args.out, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2)
         f.write("\n")
@@ -157,9 +173,13 @@ def main():
     print()
     print("wrote %s" % args.out)
     print("  %d entry point%s from the vectors: %s"
-          % (len(doc["entries"]), "" if len(doc["entries"]) == 1 else "s",
-             ", ".join(doc["entries"])))
+          % (len(vector_entries), "" if len(vector_entries) == 1 else "s",
+             ", ".join(vector_entries)))
 
+    if dynamic:
+        print("  from the run (observed, not proven):")
+        for line in dynamic:
+            print("   %s" % line)
     out = coverage_of(args.rom, args.out, args.low, args.mapper)
     if out is None:
         print("  the disassembler did not run cleanly on this image yet -- try")

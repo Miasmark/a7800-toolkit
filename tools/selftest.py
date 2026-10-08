@@ -900,6 +900,48 @@ def t_synth_static():
     return "128K SuperGame+POKEY, deterministic, PAL variant, switch unresolved, round-trips"
 
 
+def t_dynamic():
+    """dyn.py turns an exectrace log into annotations that reach code the
+    vectors alone cannot: the handler behind a RAM vector, and every bank a
+    computed switch selects -- without disturbing what was already written."""
+    synth = _synth()
+    data, f = synth.build()
+    d = tempfile.mkdtemp(prefix="dyn-")
+    rom = os.path.join(d, "s.a78")
+    io.open(rom, "wb").write(data)
+    ann = os.path.join(d, "a.json")
+    run_tool("init.py", rom, "-o", ann)
+    doc = json.load(io.open(ann, encoding="utf-8"))
+    doc["labels"]["f7:C000"] = "MY_OWN_NAME"            # hand work to be preserved
+    doc["banksw"] = {"f7:FFF0": [1]}
+    io.open(ann, "w", encoding="utf-8").write(json.dumps(doc))
+    # a log of the kind probes/exectrace.lua writes
+    sw = "f7:%04X" % f["computed_switch"]
+    log = os.path.join(d, "exectrace.log")
+    io.open(log, "w", encoding="utf-8").write("\n".join(
+        ["X f7:%04X" % f["reset"], "J f7:C0E2 f7:%04X" % f["handler_a"]]
+        + ["S %s %d x10" % (sw, b) for b in f["executed_banks"]]
+        + ["X b%d:8000" % b for b in f["executed_banks"]]) + "\n")
+    out = run_tool("dyn.py", rom, log, "-c", ann)
+    assert "Traceback" not in out, out
+    new = json.load(io.open(ann, encoding="utf-8"))
+    assert "f7:%04X" % f["handler_a"] in new["entries"], new["entries"]
+    assert new["banksw"][sw] == f["executed_banks"], new["banksw"]
+    assert new["banksw"]["f7:FFF0"] == [1], "a pin that was already there changed"
+    assert new["labels"]["f7:C000"] == "MY_OWN_NAME", "a hand-written label changed"
+    assert new["_dynamic"]["exectrace.log"]["observed_not_proven"] is True
+    src = os.path.join(d, "src")
+    run_tool("disasm.py", rom, "-c", ann, "-o", src)
+    assert "PASSED" in run_tool("verify.py", rom, "-d", src)
+    for b in f["executed_banks"]:
+        listing = io.open(os.path.join(src, "b%d.asm" % b), encoding="utf-8").read()
+        assert "; 8000:" in listing, "bank %d was not traced" % b
+    again = run_tool("dyn.py", rom, log, "-c", ann, "--dry-run")
+    assert "entry point" not in again and "bank switch" not in again, again
+    return "RAM-vector handler and %d banks reached; hand work kept; idempotent" \
+        % len(f["executed_banks"])
+
+
 def t_probes_mame(rom):
     """Run the generic probes under real MAME on a cartridge we know the answers
     for. Skipped when there is no MAME or no BIOS to boot it."""
@@ -974,6 +1016,18 @@ def t_probes_mame(rom):
         assert 50 <= v[addr] <= 70, ("bank %d ran %d times in 240 frames" % (bank, v[addr]), v)
     assert v[0xB3] == 0 and v[0x92] > 200, v      # bank 3 plays; NMI runs per frame
     assert v[0xA0] | (v[0xA1] << 8) == facts["handler_a"], v
+    sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "4",
+                                 "-autoboot_script",
+                                 os.path.join(ROOT, "probes", "exectrace.lua")],
+                        cwd=work, env=env, timeout=300,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    xt = io.open(os.path.join(work, "exectrace.log"), encoding="utf-8").read()
+    sw = "f7:%04X" % facts["computed_switch"]
+    assert "J f7:C0E2 f7:%04X" % facts["handler_a"] in xt, xt[:400]
+    for b in facts["executed_banks"]:
+        assert re.search(r"^S %s %d x\d+$" % (sw, b), xt, re.M), (b, xt[:400])
+        assert "X b%d:8000" % b in xt, b
+    assert not any("X b%d:" % b in xt for b in facts["never_executed_banks"]), xt
     sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
                                  "-autoboot_script",
                                  os.path.join(ROOT, "probes", "audio.lua")],
@@ -2925,6 +2979,7 @@ def main():
     r.check("probe index", t_probe_index)
     r.check("doc references", t_docrefs)
     r.check("synthetic banked cart", t_synth_static)
+    r.check("dynamic annotations", t_dynamic)
 
     print("")
     print("with a cartridge")

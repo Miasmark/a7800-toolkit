@@ -300,6 +300,7 @@ proved goes here once its addresses have become parameters.
 | `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
 | `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
+| `exectrace.lua` | Which code a run executes, with its bank, where each `JMP (ptr)` went and what each bank-switch store selected; `dyn.py` turns the log into annotations. Slow (a Lua tap on every ROM read: about 4 s per emulated second here) and checked on MAME 0.264 only. |
 | `romcoverage.lua` | Which cartridge bytes a run reads (feeds `modmap.py`). |
 | `handover.lua` | State at the moment a cartridge's reset code first runs (see `bios.md`). |
 | `threadprof.lua` | Profile a threaded-code (Forth) game while a person plays; read with `forth.py --profile`. Used by `replay.py`. |
