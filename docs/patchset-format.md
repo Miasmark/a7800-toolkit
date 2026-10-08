@@ -421,6 +421,23 @@ that build manifests themselves.
 fixed date and system, so a rebuilt bundle is byte-identical and its hash
 can be published.
 
+## Linting a bundle
+
+`patchset.py lint bundle.abp` reads the manifest rather than a cartridge, and
+checks every *pair* of options, not only the ones somebody asks for -- the clash
+that matters is the one nobody has asked for yet. Errors: a `requires` that names
+nothing, a patch file the bundle does not hold, an undefined section, and two
+different sections over the same bytes where the options that patch them can be
+asked for together (the second patch's pre-image check would run over bytes the
+first has already changed). Warnings: a knob nobody described, a section no option
+patches, an option that does nothing, and two options that rewrite *exactly the
+same* sections and share no knob (probably alternatives nobody said were). Notes:
+which options cannot be combined with which -- most are intended, a composite and
+its parts, so they are listed per option rather than as problems. Run over the six
+published bundles it found one real overlap hazard (`mm-pal.abp`) and two
+probable missing knobs (`karateka-pal.abp`: `walk-brisk`/`walk-fast`,
+`knockback`/`knockback-hard`).
+
 ## Applying
 
 ```

@@ -3,6 +3,7 @@
 A bundle of patches you can pick from, checked a section at a time.
 
     python tools/patchset.py list   karateka.abp
+    python tools/patchset.py lint   karateka.abp
     python tools/patchset.py check  karateka.abp --rom karateka.a78
     python tools/patchset.py apply  karateka.abp --rom karateka.a78 \\
         --with dose-4,generous-reach,remap --out fixed.a78
@@ -1155,6 +1156,160 @@ def cmd_list(ps):
     return 0
 
 
+def lint(ps):
+    """Static checks of a whole bundle: [(severity, message)].
+
+    `resolve` refuses a clash among the options somebody asks for. The clash that
+    matters is the one nobody has asked for yet, so this looks at every pair, and
+    at the manifest's own consistency:
+
+      references   a `requires` or patch names something that is not there; a
+                   patch file the bundle does not hold; a knob nobody described
+      sections     two *different* sections whose bytes overlap -- two options
+                   touching the same bytes through different names apply
+                   cleanly and silently produce a ROM that is neither
+      clashes      options that both rewrite one section and are neither
+                   alternatives (one knob) nor a chain (one built on the other)
+                   can never be applied together; resolve refuses them. Listed as
+                   notes, per option -- most are intended (a composite and its
+                   parts). It is a warning only when two options rewrite exactly
+                   the same sections and share no knob, which looks like
+                   alternatives nobody said were alternatives
+      cycles       options that require each other round in a circle
+      leftovers    a section no option patches; an option that does nothing
+    """
+    out = []
+    err = lambda m: out.append(("error", m))        # noqa: E731
+    warn = lambda m: out.append(("warning", m))     # noqa: E731
+    m = ps.m
+    knobs = m.get("knobs", {})
+    used_sections = set()
+    entries = {}
+    for oid, o in sorted(ps.options.items()):
+        for r in o.get("requires", []):
+            if r not in ps.options:
+                err("option %r requires %r, which is not in the bundle" % (oid, r))
+        k = o.get("knob")
+        if k and k not in knobs:
+            warn("option %r turns knob %r, which the manifest never describes"
+                 % (oid, k))
+        try:
+            entries[oid] = ps.entries(oid)
+        except (PatchSetError, KeyError, TypeError) as e:
+            err("option %r: its patches cannot be read: %s" % (oid, e))
+            continue
+        for sids, member, _v, _b in entries[oid]:
+            for sid in sids:
+                if sid not in ps.sections:
+                    err("option %r patches section %r, which is not defined" % (oid, sid))
+                used_sections.add(sid)
+            try:
+                ps.read(member)
+            except (KeyError, IOError, OSError):
+                err("option %r: the bundle holds no file %r" % (oid, member))
+        if not (entries[oid] or o.get("floats") or o.get("grow")):
+            warn("option %r has no patches, floats or growth: it does nothing" % oid)
+
+    note = lambda m: out.append(("note", m))        # noqa: E731
+    spans = []
+    for sid, sec in ps.sections.items():
+        try:
+            at, n = h(sec["addr"]), int(sec["length"])
+        except (KeyError, ValueError, TypeError):
+            err("section %r needs an `addr` and a `length`" % sid)
+            continue
+        if n < 1:
+            err("section %r has length %d" % (sid, n))
+            continue
+        if "crc32" not in sec:
+            err("section %r has no crc32, so nothing can check what it covers" % sid)
+        spans.append((at, at + n, sid))
+    spans.sort()
+    for sid in sorted(set(ps.sections) - used_sections):
+        warn("section %r is not patched by any option" % sid)
+
+    try:
+        needs = {o: ps.needs(o) for o in ps.options}
+    except Exception as e:                                   # noqa: BLE001
+        warn("dependencies could not be derived from the patches (%s); the "
+             "checks below use declared `requires` only" % e)
+        needs = {o: set(ps.options[o].get("requires", [])) for o in ps.options}
+
+    def ancestors(o, seen=None):
+        seen = set() if seen is None else seen
+        for r in needs.get(o, ()):
+            if r not in seen:
+                seen.add(r)
+                ancestors(r, seen)
+        return seen
+
+    def together(a, b):
+        """Could options a and b both be asked for? Not if they are alternatives
+        of one knob; a chain (one built on the other) is asked for together."""
+        ka, kb = ps.options[a].get("knob"), ps.options[b].get("knob")
+        return not (ka and ka == kb)
+
+    for o in sorted(ps.options):
+        if o in ancestors(o):
+            err("option %r requires itself through a circle" % o)
+
+    owners = {}
+    for oid, ents in entries.items():
+        for sids, _b, _v, _c in ents:
+            for sid in sids:
+                owners.setdefault(sid, set()).add(oid)
+
+    # Two different sections over the same bytes. An option patching both, or two
+    # options that can be asked for together, would have the second one's
+    # pre-image check run over bytes the first has already changed.
+    for (a1, e1, s1), (a2, e2, s2) in zip(spans, spans[1:]):
+        if a2 >= e1:
+            continue
+        hazard = [(x, y) for x in sorted(owners.get(s1, ())) for y in sorted(owners.get(s2, ()))
+                  if x == y or (together(x, y) and not (x in ancestors(y) or y in ancestors(x)))]
+        what = ("sections %r ($%04X-$%04X) and %r ($%04X-$%04X) overlap"
+                % (s1, a1, e1 - 1, s2, a2, e2 - 1))
+        if hazard:
+            x, y = hazard[0]
+            err("%s, and %s: the second patch's pre-image check would run over "
+                "bytes the first has already changed"
+                % (what, "option %r patches both" % x if x == y else
+                   "options %r and %r can be asked for together" % (x, y)))
+        else:
+            note("%s, but only options that can never be applied together touch "
+                 "them" % what)
+
+    ids = sorted(entries)
+    secs = {o: {sid for sids, _b, _v, _c in entries[o] for sid in sids} for o in ids}
+    cannot = {}
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            both = secs[a] & secs[b]
+            if not both or not together(a, b) or a in ancestors(b) or b in ancestors(a):
+                continue
+            cannot.setdefault(a, []).append(b)
+            cannot.setdefault(b, []).append(a)
+            if secs[a] == secs[b]:
+                warn("%r and %r rewrite exactly the same sections and share no "
+                     "knob: if they are alternatives, give them one" % (a, b))
+    for a in sorted(cannot):
+        rest = sorted(cannot[a])
+        note("%r cannot be combined with %s%s" % (
+            a, ", ".join(repr(x) for x in rest[:6]),
+            " and %d more" % (len(rest) - 6) if len(rest) > 6 else ""))
+    return out
+
+
+def cmd_lint(ps):
+    items = lint(ps)
+    for kind, msg in items:
+        print("%s: %s" % (kind, msg))
+    errs = sum(1 for k, _m in items if k == "error")
+    if not items:
+        print("ok: %d options, %d sections" % (len(ps.options), len(ps.sections)))
+    return 1 if errs else 0
+
+
 def cmd_info(ps):
     print("sections")
     for sid, s in sorted(ps.sections.items(),
@@ -1333,7 +1488,7 @@ def main():
         description=__doc__.strip().split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command",
-                    choices=["list", "info", "deps", "check", "apply"])
+                    choices=["list", "info", "deps", "lint", "check", "apply"])
     ap.add_argument("bundle")
     ap.add_argument("--rom", help="the cartridge to check or patch")
     ap.add_argument("--with", dest="wanted", default="",
@@ -1348,6 +1503,8 @@ def main():
             return cmd_info(ps)
         if args.command == "deps":
             return cmd_deps(ps)
+        if args.command == "lint":
+            return cmd_lint(ps)
         if not args.rom:
             sys.stderr.write("%s needs --rom\n" % args.command)
             return 2

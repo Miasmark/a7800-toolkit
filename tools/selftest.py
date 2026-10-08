@@ -2814,6 +2814,91 @@ def t_patchset():
             "can span several sections, and two options differing only "
             "inside a float stay apart")
 
+def t_patchset_lint():
+    """patchset.py lint says what a bundle's manifest gets wrong: references to
+    nothing, sections over the same bytes, options that cannot be combined."""
+    import bps
+    import patchset
+    body = bytes(range(256)) * 2
+
+    def build(sections, options, extra_files=()):
+        d = tempfile.mkdtemp(prefix="lint-")
+        os.makedirs(os.path.join(d, "p"))
+        made = {}
+        for o in options:
+            for sid in (o.get("_sections") or []):
+                at, n = sections[sid]
+                before = body[at:at + n]
+                after = bytearray(before)
+                after[0] ^= 0xFF
+                made[(o["id"], sid)] = bps.create(before, bytes(after))
+        man = {"format": patchset.FORMAT, "name": "t",
+               "target": {"body_size": len(body), "base": "0x0000", "headers": [0],
+                          "body_sha256": hashlib.sha256(body).hexdigest(),
+                          "anchors": []},
+               "knobs": {"k": "a knob"},
+               "sections": {sid: {"addr": "0x%04X" % at, "length": n,
+                                  "crc32": "0x%08X" % patchset.crc32(body[at:at + n])}
+                            for sid, (at, n) in sections.items()},
+               "options": []}
+        for o in options:
+            o = dict(o)
+            sids = o.pop("_sections", [])
+            if sids:
+                o["patches"] = {sid: "p/%s.%s.bps" % (o["id"], sid) for sid in sids}
+                for sid in sids:
+                    io.open(os.path.join(d, "p", "%s.%s.bps" % (o["id"], sid)),
+                            "wb").write(made[(o["id"], sid)])
+            man["options"].append(o)
+        io.open(os.path.join(d, "patchset.json"), "w", encoding="utf-8").write(json.dumps(man))
+        return patchset.PatchSet(d)
+
+    def kinds(ps):
+        out = patchset.lint(ps)
+        return ([m for k, m in out if k == "error"], [m for k, m in out if k == "warning"],
+                [m for k, m in out if k == "note"])
+
+    sec = {"s_a": (0x10, 8), "s_b": (0x40, 8)}
+    errs, warns, notes = kinds(build(sec, [
+        {"id": "a", "title": "a", "_sections": ["s_a"]},
+        {"id": "b", "title": "b", "_sections": ["s_b"]}]))
+    assert not (errs or warns or notes), (errs, warns, notes)
+    # two sections over the same bytes, options that can be asked for together
+    over = {"s_a": (0x10, 8), "s_b": (0x14, 8)}
+    errs, _w, _n = kinds(build(over, [
+        {"id": "a", "title": "a", "_sections": ["s_a"]},
+        {"id": "b", "title": "b", "_sections": ["s_b"]}]))
+    assert errs and "overlap" in errs[0] and "'a' and 'b'" in errs[0], errs
+    # ... but only a note when they are alternatives and can never meet
+    errs, _w, notes = kinds(build(over, [
+        {"id": "a", "title": "a", "knob": "k", "_sections": ["s_a"]},
+        {"id": "b", "title": "b", "knob": "k", "_sections": ["s_b"]}]))
+    assert not errs and any("overlap" in n for n in notes), (errs, notes)
+    # exactly the same sections, no knob: probably forgotten alternatives
+    _e, warns, notes = kinds(build(sec, [
+        {"id": "a", "title": "a", "_sections": ["s_a"]},
+        {"id": "b", "title": "b", "_sections": ["s_a"]},
+        {"id": "c", "title": "c", "_sections": ["s_b"]}]))
+    assert any("exactly the same sections" in w for w in warns), warns
+    assert any("'a' cannot be combined with 'b'" in n for n in notes), notes
+    _e, warns, _n = kinds(build(sec, [
+        {"id": "a", "title": "a", "knob": "k", "_sections": ["s_a"]},
+        {"id": "b", "title": "b", "knob": "k", "_sections": ["s_a"]}]))
+    assert not any("exactly" in w for w in warns), warns
+    # references to things that are not there
+    errs, warns, _n = kinds(build(sec, [
+        {"id": "a", "title": "a", "requires": ["ghost"], "_sections": ["s_a"]},
+        {"id": "b", "title": "b", "knob": "undescribed", "_sections": ["s_a"]}]))
+    assert any("ghost" in e for e in errs), errs
+    assert any("undescribed" in w for w in warns), warns
+    assert any("not patched by any option" in w and "s_b" in w for w in warns), warns
+    ps = build(sec, [{"id": "a", "title": "a", "_sections": ["s_a"]}])
+    os.remove(os.path.join(ps.path, "p", "a.s_a.bps"))
+    errs, _w, _n = kinds(ps)
+    assert any("holds no file" in e for e in errs), errs
+    return "overlap hazards, alternatives, exclusions, missing references and leftovers"
+
+
 def t_patchset_grow():
     """A bundle that grows the cartridge (patchset/3), against an invented one.
 
@@ -3190,6 +3275,7 @@ def main():
     r.check("assembler names", t_asm_names)
     r.check("patch sets", t_patchset)
     r.check("patch sets that grow", t_patchset_grow)
+    r.check("patch set lint", t_patchset_lint)
     r.check("bundles are reproducible", t_bundle_reproducible)
     r.check("bundles built from images", t_bundle_from_images)
     r.check("mod maps", t_modmap)
