@@ -900,6 +900,65 @@ def t_synth_static():
     return "128K SuperGame+POKEY, deterministic, PAL variant, switch unresolved, round-trips"
 
 
+def t_annotations_lint():
+    """annotations.py reads a file as disasm.py does and reports what it would
+    have ignored: a typo'd key, a repeated key, a name given to two places."""
+    import annotations as ann
+
+    def kinds(doc):
+        r, _d = ann.lint(doc if isinstance(doc, str) else json.dumps(doc))
+        return ([m for m in r.errors], [m for m in r.warnings])
+
+    for shipped in ("templates/annotations.json", "examples/exo-annotations.json"):
+        r, _d = ann.lint(io.open(os.path.join(ROOT, shipped), encoding="utf-8").read())
+        assert not r.errors and not r.warnings, (shipped, r.items)
+    errs, _w = kinds({"label": {"f7:C000": "RESET"}})
+    assert errs and "did you mean 'labels'" in errs[0], errs
+    errs, _w = kinds('{"labels": {}, "labels": {"f7:C000": "X"}}')
+    assert errs and "repeated key" in errs[0], errs
+    errs, _w = kinds({"labels": {"f7:C000": "A", "f7:C010": "A"}})
+    assert errs and "both" in errs[0], errs
+    errs, _w = kinds({"labels": {"f7:C000": "BACKGRND"}})
+    assert errs and "hardware register" in errs[0], errs
+    errs, _w = kinds({"labels": {"nowhere": "A"}, "entries": ["f7:ZZZZ"]})
+    assert len(errs) == 2, errs
+    errs, _w = kinds({"blocks": [{"loc": "f7:D000", "len": 0}]})
+    assert errs and "positive" in errs[0], errs
+    errs, _w = kinds({"banksw": {"f7:C000": "three"}})
+    assert errs and "bank number" in errs[0], errs
+    errs, w = kinds({"blocks": [{"loc": "f7:D000", "end": "f7:D010"},
+                                {"loc": "f7:D008", "end": "f7:D018", "name": "B"}]})
+    assert not errs and w and "inside block" in w[0], (errs, w)
+    # against a cartridge
+    synth = _synth()
+    data, f = synth.build()
+    d = tempfile.mkdtemp(prefix="annlint-")
+    rom = os.path.join(d, "s.a78")
+    io.open(rom, "wb").write(data)
+    reset = "f7:%04X" % f["reset"]
+    doc = {"entries": [reset], "blocks": [{"loc": reset, "len": 8}],
+           "labels": {"f7:%04X" % (f["reset"] + 3): "MID"}, "comments": {"b9:8000": "x"}}
+    r, parsed = ann.lint(json.dumps(doc))
+    ann.check_rom(r, parsed, rom)
+    text = " ".join(m for _k, m in r.items)
+    assert "inside the data block" in text, text
+    assert "no space 'b9'" in text, text
+    ok = {"entries": [reset], "labels": {"f7:%04X" % (f["reset"] + 3): "MID"}}   # inside LDX #$FF
+    r, parsed = ann.lint(json.dumps(ok))
+    ann.check_rom(r, parsed, rom)
+    assert any("middle of the instruction" in m for m in r.warnings), r.items
+    # the real thing, when the sibling repositories are to hand
+    sib = os.environ.get("A7800_SIBLINGS")
+    n = 0
+    if sib:
+        for f_ in glob.glob(os.path.join(sib, "*", "annotations*.json")):
+            r, _p = ann.lint(io.open(f_, encoding="utf-8").read())
+            assert not r.errors, (f_, r.errors)
+            n += 1
+    return "typos, repeats, clashes, bad shapes and bad locations flagged; ROM checks%s" % (
+        "; %d real files clean" % n if n else "")
+
+
 def t_dynamic():
     """dyn.py turns an exectrace log into annotations that reach code the
     vectors alone cannot: the handler behind a RAM vector, and every bank a
@@ -3149,6 +3208,7 @@ def main():
     r.check("probe index", t_probe_index)
     r.check("doc references", t_docrefs)
     r.check("synthetic banked cart", t_synth_static)
+    r.check("annotations lint", t_annotations_lint)
     r.check("dynamic annotations", t_dynamic)
     r.check("first look (static)", t_firstlook_static)
 

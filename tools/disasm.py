@@ -746,6 +746,21 @@ def main():
         sys.stderr.write("%s\n" % e)
         return 2
     cfg = Config(args.config)
+    if args.config and os.path.exists(args.config):
+        # a key this reads with .get() and does not know is dropped silently, so
+        # a typo looks like an empty file; say so instead of staying quiet
+        try:
+            import annotations
+            report, _doc = annotations.lint(
+                open(args.config, encoding="utf-8").read(), args.config)
+            if report.errors:
+                sys.stderr.write(
+                    "warning: %s has %d problem%s (%s). Run: python tools/annotations.py "
+                    "\"%s\"\n" % (args.config, len(report.errors),
+                                   "" if len(report.errors) == 1 else "s",
+                                   report.errors[0][:90], args.config))
+        except Exception:                                    # noqa: BLE001
+            pass                    # never let the check get in the way of the work
     an = Analyzer(cart, cfg)
 
     gfx, gfx_wide = set(), set()
