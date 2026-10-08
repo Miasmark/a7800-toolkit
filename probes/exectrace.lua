@@ -31,6 +31,12 @@
 -- which is the BIOS handing the machine over, so the BIOS's own code is not
 -- mistaken for the game's (the same trigger as romcoverage.lua).
 -- LIMITS, so nobody trusts it further than it goes:
+--   * Logging starts at the game's first write that sets INPTCTRL bit 0, so the
+--     instructions before that -- often the first handful of reset code, and
+--     anything the game does before locking the machine -- are not in the log.
+--     (Compared with the debugger's own trace of a 128K cartridge, the only
+--     fetches missing were those.) The BIOS's code is indistinguishable from the
+--     game's until then, which is why it is not simply logged from the start.
 --   * Checked on MAME 0.264 only. It relies on a read tap seeing instruction
 --     fetches from ROM, which docs/pitfalls.md records as true there and false
 --     elsewhere. It counts a fetch only where the tap's address equals the

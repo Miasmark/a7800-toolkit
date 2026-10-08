@@ -300,6 +300,8 @@ proved goes here once its addresses have become parameters.
 | `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
 | `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
+| `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |
+| `rates.lua` | How often chosen instructions run, and the gap in frames between reads of a controller port. A game answers no faster than it asks. |
 | `pcprof.lua` | A sampling profiler with no timer: the program counter each time MARIA reads a display-list-list entry. `pcmap.py` names the routines. Visible frame only. |
 | `forcedl.lua` | Force a display-list entry, graphics and palettes into a running machine and screenshot it: the way to ask MARIA what a mode does. Used by selftest to check `mariapix.py`; needs a cartridge that already builds a display list, such as `tests/carts/synth128.a78`. |
 | `exectrace.lua` | Which code a run executes, with its bank, where each `JMP (ptr)` went and what each bank-switch store selected; `dyn.py` turns the log into annotations. Slow (a Lua tap on every ROM read: about 4 s per emulated second here) and checked on MAME 0.264 only. |

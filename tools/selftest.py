@@ -1296,6 +1296,33 @@ def t_probes_mame(rom):
                          {("f7", facts["sym"][k]): k for k in ("reset", "wait_low", "wait_high", "synth_tick")})
     # the synthetic cartridge spends the visible frame waiting for vertical blank
     assert prof[0][0] in ("wait_high", "wait_low") and prof[0][3] > 0.9 * sum(r[3] for r in prof), prof[:3]
+    # hangsnap and rates, against what the cartridge is known to do: it waits for
+    # vertical blank, adds one to $81 once a frame, reads the stick every other frame
+    # and the button every frame, and takes one display-list interrupt a frame
+    wh = facts["sym"]["wait_high"]
+    subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "5", "-autoboot_script",
+                            os.path.join(ROOT, "probes", "hangsnap.lua")],
+                   cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_HANG_AT="100 200", A7800_HANG_PEEK="81,92"))
+    hs = io.open(os.path.join(work, "hangsnap.log"), encoding="utf-8").read().splitlines()
+    snap = [l for l in hs if l.startswith("f")]
+    assert len(snap) == 2 and snap[0].startswith("f100 pc="), hs
+    for l in snap:
+        pc = int(re.search(r"pc=([0-9A-F]{4})", l).group(1), 16)
+        assert wh - 4 <= pc <= wh + 3, (l, hex(wh))          # in the wait loop
+        assert "sp=FF" in l and "sp=1FF" not in l, l
+    assert 95 <= int(re.search(r"nmis=(\d+)", snap[1]).group(1)) <= 105, snap[1]
+    inc = wh + 8                                    # INC FRAME, one a frame
+    subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "5", "-autoboot_script",
+                            os.path.join(ROOT, "probes", "rates.lua")],
+                   cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_RATE_SITES="%04X" % inc, A7800_RATE_PORTS="0280,000C",
+                            A7800_RATE_FROM="60", A7800_RATE_TO="260"))
+    rt = io.open(os.path.join(work, "rates.log"), encoding="utf-8").read()
+    m = re.search(r"site %04X: (\d+) runs" % inc, rt)
+    assert m and 199 <= int(m.group(1)) <= 203, rt
+    assert re.search(r"port 0280: .*mean 2\.00 min 2 max 2", rt), rt
+    assert re.search(r"port 000C: .*mean 1\.00 min 1 max 1", rt), rt
     sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
                                  "-autoboot_script",
                                  os.path.join(ROOT, "probes", "audio.lua")],
@@ -1342,7 +1369,7 @@ def t_probes_mame(rom):
         note = " (WARNING: MAME %s; these notes were measured on %s)" % (
             _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
     return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
-            "exectrace, pcprof, a recording, the banked cart's facts, and a whole first look, under MAME"
+            "exectrace, pcprof, hangsnap, rates, a recording, the banked cart's facts, and a whole first look, under MAME"
             + note)
 
 
