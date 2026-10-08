@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build a 7800 cartridge that holds one POKEY setting forever.
+"""Build a 7800 cartridge that holds one POKEY or TIA setting forever.
 
     python tools/mktone.py out.a78 <audctl> <audf16>
+    python tools/mktone.py out.a78 --tia <audc> <audf>
 
 A controlled oracle for the sound model. Validating the 16-bit divider against
 a real game does not work -- every attempt fights the game: other channels
@@ -18,6 +19,10 @@ recording is the thing under test:
 Measure the fundamental in `t.wav` and compare it with
 `tracker.pokey_rate(...) / 2`. That is how the 16-bit pairs were confirmed to
 0.00 cents and the high-pass filters peak for peak; see docs/audio.md.
+
+`--tia` does the same for one TIA channel (AUDC, AUDF, volume 8 on channel 0,
+channel 1 silent). That is how every AUDC's period in clock ticks was measured
+(docs/audio.md, "The TIA's waveforms, measured").
 """
 import struct
 import sys
@@ -25,14 +30,14 @@ import sys
 POKEY = 0x4000          # cart type $0001 -- POKEY at $4000
 
 
-def header(size, title="POKEY tone test"):
+def header(size, title="POKEY tone test", cart_type=0x0001):
     h = bytearray(128)
     h[0] = 1
     h[1:10] = b"ATARI7800"
     t = title.encode("latin1")[:32]
     h[17:17 + len(t)] = t
     h[49:53] = struct.pack(">I", size)
-    h[53:55] = struct.pack(">H", 0x0001)          # POKEY @ $4000
+    h[53:55] = struct.pack(">H", cart_type)       # $0001: POKEY @ $4000
     h[55] = 1                                     # joystick
     h[56] = 1
     h[57] = 0                                     # NTSC
@@ -73,6 +78,38 @@ def rom(audctl, audf_lo, audc_lo, audf_hi, audc_hi, lo_ch=0, hi_ch=1):
     return bytes(body)
 
 
+def rom_tia(audc, audf, audv=8):
+    """16K at $C000-$FFFF: one TIA setting on channel 0, then loop forever."""
+    code = bytearray()
+
+    def w(val, addr):
+        code.extend([0xA9, val & 0xFF])                       # LDA #val
+        code.extend([0x8D, addr & 0xFF, (addr >> 8) & 0xFF])  # STA addr
+
+    code.extend([0x78, 0xD8, 0xA2, 0xFF, 0x9A])   # SEI / CLD / LDX #$FF / TXS
+    w(0x00, 0x0021)                               # MARIA off: nothing to draw
+    w(0x00, 0x0019)                               # AUDV0
+    w(0x00, 0x001A)                               # AUDV1: channel 1 silent
+    w(audc, 0x0015)                               # AUDC0
+    w(audf, 0x0017)                               # AUDF0
+    w(audv, 0x0019)                               # AUDV0
+    here = 0xC000 + len(code)
+    code.extend([0x4C, here & 0xFF, (here >> 8) & 0xFF])      # JMP *
+    body = bytearray(b"\xEA" * 0x4000)
+    body[0:len(code)] = code
+    for v in (0x3FFA, 0x3FFC, 0x3FFE):                        # NMI, RESET, IRQ
+        body[v:v + 2] = struct.pack("<H", 0xC000)
+    return bytes(body)
+
+
+def build_tia(path, audc, audf, audv=8):
+    body = rom_tia(audc, audf, audv)
+    with open(path, "wb") as f:
+        f.write(header(len(body), "TIA tone test", cart_type=0x0000))
+        f.write(body)
+    return path
+
+
 def build(path, audctl, audf16, audc=0xA8, lo_ch=0, hi_ch=1):
     """A 16-bit pair: low byte in the low channel, high byte in the high one."""
     body = rom(audctl, audf16 & 0xFF, 0x00, (audf16 >> 8) & 0xFF, audc,
@@ -101,7 +138,7 @@ def main():
     ap.add_argument("out", help="the .a78 to write")
     ap.add_argument("audctl", type=lambda v: int(v, 0),
                     help="AUDCTL value, e.g. 0x50 for a 16-bit pair 1+2 on "
-                         "the 1.79 MHz clock")
+                         "the 1.79 MHz clock (with --tia: AUDC)")
     ap.add_argument("audf", type=lambda v: int(v, 0),
                     help="the divider: 16 bits when audctl joins a pair, "
                          "8 otherwise")
@@ -112,8 +149,15 @@ def main():
                     help="which channel pair to use (default 12)")
     ap.add_argument("--eight", action="store_true",
                     help="one plain 8-bit channel instead of a 16-bit pair")
+    ap.add_argument("--tia", action="store_true",
+                    help="a TIA channel instead: the two numbers are AUDC and "
+                         "AUDF (channel 0, volume 8)")
     args = ap.parse_args()
 
+    if args.tia:
+        build_tia(args.out, args.audctl, args.audf)
+        print("%s  TIA AUDC $%X  AUDF %d" % (args.out, args.audctl, args.audf))
+        return 0
     lo, hi = (0, 1) if args.pair == "12" else (2, 3)
     if args.eight:
         build8(args.out, args.audctl, args.audf, args.audc, ch=lo)

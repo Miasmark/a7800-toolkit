@@ -102,22 +102,33 @@ POLY4 = _poly(4, (0, 1), 15)
 POLY5 = _poly(5, (0, 2), 31)
 POLY9 = _poly(9, (0, 4), 511)
 SQUARE = [1, 0]
+# The div-31 waveform: 31 clock ticks, 18 high and 13 low (measured, below).
+DIV31 = [1] * 18 + [0] * 13
 
 # For each AUDC: the bit pattern the output stage walks, and how many divided
-# clocks one step of that pattern lasts. A pure tone is the pattern [1,0], so
-# its period is two steps; "div 6" means each step lasts six, giving the
-# familiar period of twelve.
+# clocks one step of that pattern lasts. The "div N" in the usual names is the
+# whole period, not a step: a pure tone is the pattern [1,0], period 2; "div 6"
+# is that pattern at a step of three, period 6; "div 31" is the 18-high,
+# 13-low pattern at a step of one, period 31; "div 93" the same at three.
+# (Until 2026-09-25 this read "div 6 ... giving the familiar period of twelve",
+# with div 31 as a square at a step of 31 -- an octave low for C, D, 6, A, E
+# and F; see docs/audio.md.)
 AUDC_MODE = {
+    # (waveform, prescale): the channel's divider ticks at clock / (AUDF + 1),
+    # the prescale divides that again, and the waveform steps once per tick
+    # that gets through. Periods in divider ticks, measured on MAME with
+    # `mktone.py --tia` (docs/audio.md, "The TIA's waveforms, measured"):
+    # 4/5: 2, C/D: 6, 6/A/7/9: 31, E/F: 93, 1: 15, 2/3: 465, 8: 511.
     0x00: (None, 1),    0x0B: (None, 1),        # silence
     0x04: (SQUARE, 1),  0x05: (SQUARE, 1),      # pure tone
-    0x0C: (SQUARE, 6),  0x0D: (SQUARE, 6),      # pure tone, div 6
-    0x06: (SQUARE, 31), 0x0A: (SQUARE, 31),     # pure tone, div 31
-    0x0E: (SQUARE, 93),                         # pure tone, div 93
+    0x0C: (SQUARE, 3),  0x0D: (SQUARE, 3),      # pure tone, div 6
+    0x06: (DIV31, 1),   0x0A: (DIV31, 1),       # pure tone, div 31
+    0x0E: (DIV31, 3),                           # pure tone, div 93
     0x01: (POLY4, 1),                           # 4-bit poly, a pitched buzz
     0x02: (POLY4, 31),                          # 4-bit poly, div 31
     0x03: (POLY4, 31),                          # 5-bit poly gating 4-bit
     0x07: (POLY5, 1),   0x09: (POLY5, 1),       # 5-bit poly
-    0x0F: (POLY5, 6),                           # 5-bit poly, div 6
+    0x0F: (POLY5, 3),                           # 5-bit poly, div 6
     0x08: (POLY9, 1),                           # 9-bit poly -- white noise
 }
 AUDC_NAME = {
@@ -132,7 +143,7 @@ TONE_MODES = [0x04, 0x0C, 0x06, 0x0E]      # the ones you can write a tune with
 
 
 def is_tone(audc):
-    return AUDC_MODE.get(audc, (None, 1))[0] is SQUARE
+    return AUDC_MODE.get(audc, (None, 1))[0] in (SQUARE, DIV31)
 
 
 def frequency(audc, audf, region="ntsc"):
