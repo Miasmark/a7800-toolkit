@@ -1036,6 +1036,17 @@ def t_workbench_jobs():
             d = _wb_wait(url, j["id"])
             assert d["status"] == "done", d["lines"][-6:]
             assert any(o["path"] == "addresses/addrorigin.log" for o in d["outputs"]), d["outputs"]
+            # the census, with no emulator: dark areas named, maps drawn, and a second run adds
+            code, j = _wb_call(url, "/api/job", {"kind": "census", "params": {"seconds": 5}})
+            d = _wb_wait(url, j["id"])
+            assert d["status"] == "done", d["lines"][-6:]
+            paths = [o["path"] for o in d["outputs"]]
+            assert "census/census.md" in paths and "census/census.json" in paths, paths
+            code, md = _wb_call(url, "/api/file?path=census/census.md")
+            assert b"Dark areas" in md and b"SYNTH CART BANK FIVE" in md, md[:400]
+            code, j = _wb_call(url, "/api/job", {"kind": "census", "params": {"seconds": 5}})
+            d2 = _wb_wait(url, j["id"])
+            assert d2["status"] == "done" and "--merge" in d2["commands"][0], d2["commands"]
         finally:
             WB.environment = real
             stop()
@@ -1220,6 +1231,71 @@ def t_simorigins():
     finally:
         shutil.rmtree(out, True)
     return "JMP (vec) and hand-pushed RTS traced to their immediates, as the MAME probe does"
+
+
+def t_census():
+    """census.py finds what the synthetic cartridge was built with: the dark areas are
+    exactly the text bank and the two banks nothing touches, an executed bank is not
+    dark, the hand-built tables count as read, bank 7 is reported once, and RAM roles
+    are right (the frame and interrupt counters are counters)."""
+    import census
+    import cart as cart_module
+    synth = _synth()
+    _d, facts = synth.build()
+    rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    out = tempfile.mkdtemp(prefix="selftest-census-")
+    try:
+        r = census.build(rom, 200, False)
+        cart = r["cart"]
+        assert "b7" not in census.canon_spaces(cart) and "f7" in census.canon_spaces(cart)
+        dark = census.dark_areas(cart, r["cls"])
+        got = {(a["space"], a["guess"]) for a in dark}
+        want = {("b%d" % facts["text_bank"], "text")} | \
+               {("b%d" % b, "graphics-like") for b in facts["never_executed_banks"]
+                if b != facts["text_bank"]}
+        assert got == want, (got, want)
+        assert not any(a["space"] in ("b%d" % b for b in facts["executed_banks"])
+                       for a in dark), "an executed bank was called dark"
+        per, tot = census.summary(cart, r["cls"])
+        assert per["f7"][census.GFX] >= facts["sprite_width"], per["f7"]   # MARIA read the sprite
+        assert per["f7"][census.UNRUN] > 0                                 # code the run did not exercise
+        # RAM roles
+        rows, uninit, free = census.ram_report(r["col"])
+        role = {x["addr"]: x["role"] for x in rows}
+        for name in ("frame_counter", "nmi_counter"):
+            assert role[0x2000 + facts[name]] == "counter", (name, role.get(0x2000 + facts[name]))
+        assert any(lo <= 0x2200 <= hi for lo, hi in free), free      # nothing used $2200
+        assert r["col"].minsp > 0xE0
+        # the command and its files, and merging only adds
+        o2 = os.path.join(out, "run")
+        assert census.main([rom, "-o", o2, "--frames", "120"]) == 0
+        j = json.load(io.open(os.path.join(o2, "census.json"), encoding="utf-8"))
+        assert j["totals"]["DARK"] > 0 and os.path.exists(os.path.join(o2, "census.md"))
+        m = census.build(rom, 60, False, merge=[os.path.join(o2, "census.json")])
+        _p, tot2 = census.summary(cart_module.Cart(rom), m["cls"])
+        assert tot2[census.EXEC] >= j["totals"]["executed"], "merging lost coverage"
+    finally:
+        shutil.rmtree(out, True)
+    return "dark = the text bank and the two untouched banks; RAM counters found; merge only grows"
+
+
+def t_census_guess():
+    """The dark-area guesses on bytes whose nature is known."""
+    import census
+    code = bytes([0xA9, 0x01, 0x8D, 0x00, 0x20, 0xA2, 0x00, 0xBD, 0x00, 0x30, 0x9D, 0x00, 0x31,
+                  0xE8, 0xD0, 0xF7, 0x60])
+    assert census.guess(code)[0] == "code-like"
+    assert census.guess(b"PRESS FIRE TO START")[0] == "text"
+    assert census.guess(bytes([0xFF] * 40))[0] == "fill"
+    table = b"".join(bytes([lo, 0xC0 + i]) for i, lo in enumerate(range(0x10, 0x30, 4)))
+    assert census.guess(table)[0].startswith("address table"), census.guess(table)
+    gfx = bytes([0, 0, 0x18, 0x3C, 0x7E, 0xFF, 0x7E, 0x3C, 0x18, 0, 0, 0, 0x18, 0x3C, 0xFF, 0])
+    assert census.guess(gfx)[0] == "graphics-like", census.guess(gfx)
+    sug = census.suggestions([{"space": "f7", "lo": 0xC000, "size": 17, "guess": "code-like",
+                               "evidence": ""}, {"space": "b5", "lo": 0x8000, "size": 21,
+                                                 "guess": "text", "evidence": ""}])
+    assert [x["kind"] for x in sug] == ["entry", "block"] and sug[1]["type"] == "text"
+    return "code, text, fill, address table and graphics told apart; suggestions shaped for annotations"
 
 
 def t_corpus():
@@ -4072,6 +4148,8 @@ def main():
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
     r.check("simulated address origins", t_simorigins)
+    r.check("census", t_census)
+    r.check("census guesses", t_census_guess)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)
     r.check("sim bus", t_sim_bus)

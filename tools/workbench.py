@@ -542,6 +542,21 @@ def build_profile(p):
                "named better once the listing or annotations exist")
 
 
+def build_census(p):
+    frames = _frames(p, 30)
+    out = os.path.join(PROJECT, "census")
+    cmd = _py("census.py", ROM, "-o", out, "--frames", frames)
+    if _bool(p, "explore", True):
+        cmd.append("--explore")
+    if os.path.isfile(config_path()):
+        cmd += ["-c", config_path()]
+    prev = os.path.join(out, "census.json")
+    if _bool(p, "accumulate", True) and os.path.isfile(prev):
+        cmd += ["--merge", prev]          # read before it is rewritten: coverage only grows
+    return Job("census", "census (ROM and RAM)", [{"cmd": cmd}], out,
+               "census.md is the report; the coverage maps colour every byte by what happened to it")
+
+
 def build_budget(p):
     secs = _int(p, "seconds", 15, 5, 120)
     start = _int(p, "from_frame", 300, 0, 100000)
@@ -662,6 +677,15 @@ def _kinds():
                        choices=["loudest", "arp"]),
                      p("arp", "arpeggio frames", "int", 2, min=1, max=8),
                      p("fit", "fit the pitch to the TIA", "bool", True)]),
+        dict(kind="census", label="Census: what is never reached", group="Annotate", mame=False,
+             about="Run it in the simulator and sort every ROM byte by what happened to it "
+                   "(executed, read, drawn by MARIA, never touched, copies) and every RAM "
+                   "byte by how it was used. Dark areas are what nothing reached. Each run "
+                   "adds to the last, so coverage only grows.",
+             build=build_census,
+             params=[p("seconds", "seconds of play", "int", 30, min=5, max=600),
+                     p("explore", "sweep the joystick too", "bool", True),
+                     p("accumulate", "add to the previous census", "bool", True)]),
         dict(kind="profile", label="Where the time goes", group="Measure", mame=False,
              about="Where the 6502 spends its cycles, grouped under the routine "
                    "names you have given it. In the simulator the count is exact; "

@@ -44,6 +44,13 @@ then a scan whose every result has a button that opens it in the right editor
 with the space, base and format already filled in. That last part is what is
 tedious by hand and silent when you get it wrong.
 
+**Census** (Run, or `tools/census.py`) answers "what in this ROM and RAM does nothing, as far as anyone can tell?":
+it sorts every ROM byte by what the simulated run did with it and lists the dark areas -- the bytes nothing
+ran, read or drew and the tracer does not reach -- with a guess at what each is. Against what the simulator
+observed in four cartridges, the code-like guess labelled all of the executed runs of 12 bytes or more as
+code and 3% of what MARIA drew; it is a pointer, not a verdict. Runs add to each other, so the dark shrinks
+as you play.
+
 It is also where the later steps live. **Run** starts the toolkit's other tools on
 the cartridge -- the first-look report, the disassembly, *observe code* and *find
 address tables* (which run the game and write what they saw into `annotations.json`),

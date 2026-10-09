@@ -386,7 +386,12 @@ class Bus(object):
                 return 0x80
             return 0x00 if (self.frame % 70) < 10 else 0x80
         if a == 0x0280:
-            # SWCHA: joystick directions, also active low. All ones is centred.
+            # SWCHA: joystick directions, also active low. All ones is centred --
+            # unless exploring: then the stick sweeps right, left, down, up and rests,
+            # twenty frames each, so a game that needs a push to do anything does it.
+            if self.drive == "explore":
+                step = (self.frame // 20) % 5
+                return (0xFF, 0x7F, 0xBF, 0xDF, 0xEF)[step] if step else 0xFF
             return 0xFF
         if a == 0x0282:
             # SWCHB: the console switches, and they are **active low** -- a set
@@ -437,6 +442,8 @@ class Bus(object):
             self.audio[a] = v
             self.writes.append((self.frame, a, v))
             return
+        if self.obs is not None:
+            self.obs.data_write(a, v)
         self.ram[fold(a)] = v
 
 
@@ -605,10 +612,14 @@ class CPU(object):
         if mode == "izx":
             self.pc += 1
             z = (b.read(pc) + self.x) & 0xFF
+            if self.obs is not None:
+                self.obs.pointer(z)
             return b.read(z) | (b.read((z + 1) & 0xFF) << 8), 0
         if mode == "izy":
             self.pc += 1
             z = b.read(pc)
+            if self.obs is not None:
+                self.obs.pointer(z)
             base = b.read(z) | (b.read((z + 1) & 0xFF) << 8)
             a = (base + self.y) & 0xFFFF
             return a, 1 if (a ^ base) & 0xFF00 else 0
@@ -881,6 +892,12 @@ class Observer(object):
 
     def maria_write(self, reg, value):
         """A write to MARIA register `reg` ($20-$3F)."""
+
+    def data_write(self, addr, value):
+        """A store to RAM (including the stack) at `addr`."""
+
+    def pointer(self, zp):
+        """A `(zp),Y` or `(zp,X)` operand is about to read its pointer from `zp`."""
 
 
 def load_handover(path):
