@@ -162,7 +162,7 @@ def convert(song, offset=0, fit=False, mash="loudest", arp=1, groups=None,
         if len(cands) > 2:
             stats["over"] += 1
             used = sum(1 for s in slots if s)
-            if mash == "arp" and not groups:
+            if mash == "arp":
                 stats["mashed"] += 1
             stats["dropped"] += max(0, len(cands) - used) if mash != "arp" else 0
         stats["swaps"] += sum(1 for s, p in zip(slots, prev)
