@@ -723,6 +723,77 @@ def t_origins():
     return "words, split tables, immediates, computed; constants left out; merge idempotent"
 
 
+def t_pokey2tia():
+    """pokey2tia.py: the loudest two voices play and keep their channels, groups
+    keep to their channel, arp shares a channel in turn, noise becomes AUDC 8, a
+    note above the TIA is silent, and the whole command writes its files."""
+    import tracker as T
+    import pokey2tia as P
+
+    def song(rows):
+        s = T.Song(chip="pokey")
+        for r in rows:
+            s.add(list(r), audctl=0)
+        return s
+
+    tone = lambda f, v: (5, f, v)           # noqa: E731
+    quiet = (0, 0, 0)
+    # four voices: 20 and 30 loud, 40 and 50 quiet, then a noise voice
+    four = [[tone(0x20, 9), tone(0x30, 8), tone(0x40, 3), tone(0x50, 2)]] * 4
+    tia, st = P.convert(song(four))
+    row = list(tia.states())[0]
+    assert {row[0][2], row[1][2]} == {9, 8}, row        # the two loudest
+    assert st["over"] == 4 and st["dropped"] == 8, st
+    # a voice that stays chosen stays on its channel when the other changes
+    rows = [[tone(0x20, 9), tone(0x30, 8), quiet, quiet],
+            [tone(0x20, 9), quiet, tone(0x40, 8), quiet]]
+    out = list(P.convert(song(rows))[0].states())
+    assert out[0][0][1] == out[1][0][1] and out[0][0][2] == 9, out
+    # groups: channel 1 only ever plays voices 1 and 2
+    g, _ = P.convert(song([[quiet, quiet, tone(0x20, 9), tone(0x30, 9)]]),
+                     mash="loudest", groups=[{1, 2}, {3, 4}])
+    first = list(g.states())[0]
+    assert first[0][2] == 0 and first[1][2] == 9, first
+    # arp: three voices on a shared channel take turns, one a frame
+    arp = song([[tone(0x20, 9), tone(0x30, 8), tone(0x40, 7), quiet]] * 4)
+    got = [r[1][1] for r in P.convert(arp, mash="arp")[0].states()]
+    assert len(set(got)) == 2 and got[0] != got[1], got
+    held = [r[1][1] for r in P.convert(arp, mash="arp", arp=2)[0].states()]
+    assert held[0] == held[1] and held[1] != held[2], held
+    # noise -> the 9-bit poly; a tone far above 15.7 kHz is silent
+    n, _ = P.convert(song([[(0, 0x20, 8), tone(0x00, 8), quiet, quiet]]))
+    cells = list(n.states())[0]
+    assert any(c[0] == P.NOISE_MODE and c[2] == 8 for c in cells), cells
+    # a tune already on the TIA's pitches is not moved by --fit
+    hz = T.frequency(0x4, 10)
+    audf = int(round(T.pokey_rate(0, [0, 0, 0, 0], 0) / 2.0 / hz)) - 1
+    on = song([[tone(audf, 8), quiet, quiet, quiet]] * 3)
+    _t, stf = P.convert(on, fit=True)
+    _t, st0 = P.convert(on)
+    assert abs(stf["offset"]) <= 60 and \
+        abs(stf["errors"][0][0]) <= abs(st0["errors"][0][0]), (stf["offset"], stf["errors"])
+    # the command, end to end
+    work = tempfile.mkdtemp(prefix="p2t-")
+    log = os.path.join(work, "pokey.log")
+    with io.open(log, "w", encoding="utf-8") as f:
+        f.write("# chip pokey\n")
+        for fr in range(30):
+            f.write("%d 20 A8 30 A5 40 A3 50 8A 00\n" % fr)
+    out_dir = os.path.join(work, "out")
+    p = subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o",
+                        out_dir, "--mash", "arp", "--fit"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT)
+    assert p.returncode == 0, p.stdout.decode()
+    for name in ("tia.trk", "tia.asm", "tia.wav", "orig.wav", "report.txt"):
+        assert os.path.getsize(os.path.join(out_dir, name)) > 0, name
+    bad = subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o",
+                          out_dir, "--map", "groups"], stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT)
+    assert bad.returncode != 0 and b"needs --groups" in bad.stdout and \
+        b"Traceback" not in bad.stdout
+    return "loudest-two with sticky channels, groups, arp, noise, fit, and the command"
+
+
 def t_readme():
     """The README lists the tools that exist, and no others."""
     s = io.open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
@@ -3477,6 +3548,7 @@ def main():
     r.check("tool --help", t_helps)
     r.check("TIA periods", t_tia_periods)
     r.check("address origins", t_origins)
+    r.check("POKEY to TIA", t_pokey2tia)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
     r.check("flake8", t_flake8)

@@ -867,6 +867,34 @@ The corollary is worth saying out loud: editing a shared pattern changes every
 song that names it. The pull tells you which, and the push repeats it in the
 write log.
 
+## Porting POKEY music to a TIA-only machine
+
+A POKEY game has four voices (eight with two chips) and the TIA has two, so
+`tools/pokey2tia.py` translates, with losses, and says what it lost:
+
+    A7800_POKEY=0x4000 mame a7800 -cart game.a78 -autoboot_script probes/audio.lua ...
+    python tools/pokey2tia.py a7800-audio.log -o port-sound --fit
+
+By default the two loudest voices of each frame play and a voice that stays
+chosen stays on its channel. `--map groups --groups 1+2,3+4` pins POKEY voices
+to TIA channels instead (use it when the music has a bass line and a lead that
+should never swap). When more voices want a channel than it has, the loudest wins,
+or with `--mash arp` they take turns, one per `--arp N` frames: nothing is
+dropped, but an arpeggio at 60/N a second is buzzy, so it is an option and not
+the default. Only changes once a frame can be expressed.
+
+The TIA's pitches are few and fixed, so each tone lands on the nearest one (up to
+about a quarter tone away, more in the bass); `--offset CENTS` or `--fit` moves
+the whole tune to sit better. Anything not a pure tone becomes AUDC $8 noise at
+the nearest rate. The output is a tracker song (`tia.trk`), a 6502 player and
+data (`tia.asm`), and `tia.wav` beside `orig.wav` to compare by ear.
+
+Measured on Triple Punch's title music (thirty seconds, three voices at most):
+the loudest-two default dropped a voice in a third of the frames and was within a
+quarter tone for 64% of the tone frames (mean error 17 cents, `--fit` chose -5);
+`--mash arp` kept every voice and changed channel 554 times. Whether either
+*sounds* right is a listening judgement this has not made.
+
 ## Hearing what you pulled
 
 A pull carries the tables the notes lean on -- durations, waveforms and
