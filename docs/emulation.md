@@ -221,6 +221,31 @@ machinery, which post-dates its fork point) plus the Lua binding for it. That is
 a core memory-system backport, not a small patch -- which is exactly why the
 watchpoint route is worth having.
 
+### Does MAME run the image at all? (`mamecheck.py`)
+
+Every comparison here assumes MAME can run the cartridge. Measured on a stratified 278-image
+sample of the 1,309-image library (MAME 0.264, each image run for 360 frames after the BIOS hands
+over; "live" is MARIA kept drawing from a display list; the question is also asked of the
+simulator, and MAME is checked against the cartridge's own vectors so a BIOS built-in game is
+not counted as the cartridge):
+
+| | images |
+|---|---|
+| both run it | 256 (92.8%) |
+| simulator only | 15 (5.4%) |
+| MAME only | 2 (0.7%) |
+| neither | 3 (1.1%) |
+| not compared (could not be laid out: SOUPER, the 512K flat SN Cart Demo) | 2 |
+
+*Simulator only* is MAME's gap, not the simulator's: the 14 bankset images ("Unsupported mapper"
+-- the OpenBIOS game runs instead), five Activision images in the usual (AM) block order (MAME
+runs the (OM) order and leaves the BIOS running on these), and one image whose header MAME
+rejects (SuperCart bit missing). On those MAME cannot be the reference; the `a7800` fork runs
+the bankset ones. *MAME only* is the simulator's gap: Bad Apple Demo (not drawn at all) and Turret
+Turmoil (a KIL at `$D4A7` stops the program at frame 55; undiagnosed). Display-interrupt
+timing disagrees on 15 images, mostly where one side has no live list. Rerun it on a new MAME
+before trusting any of this: `python tools/mamecheck.py /path/to/roms --sample 60 --cache c`.
+
 ### Neither emulates the second POKEY
 
 Both instantiate one chip for a dual-POKEY cartridge:
