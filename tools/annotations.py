@@ -74,6 +74,21 @@ class Report(object):
         return [m for k, m in self.items if k == "warning"]
 
 
+def read_json_keep(path):
+    """(document, newline) -- the file's own line ending, so that rewriting it does not
+    turn a CRLF file into an LF one (or the reverse)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    return json.loads(raw.decode("utf-8")), ("\r\n" if b"\r\n" in raw else "\n")
+
+
+def write_json_keep(path, doc, newline="\n", indent=2):
+    """Write `doc` as JSON in `newline` style, keeping non-ASCII text as it is."""
+    text = json.dumps(doc, indent=indent, ensure_ascii=False)
+    with io.open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text.replace("\n", newline) + newline)
+
+
 def parse_loc(s):
     """('f7', 0xC000) for 'f7:C000', 'f7:$C000' or 'f7:0xC000'; raises ValueError."""
     if not isinstance(s, str) or s.count(":") != 1:

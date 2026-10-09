@@ -906,7 +906,7 @@ def main(argv=None):
         "What the live sections show is what ONE run did -- %s. Nothing here is "
         "a complete inventory." % (
             "a replay of %s" % os.path.basename(args.playback) if args.playback
-            else "the first %d seconds, with fire/Select pressed for it"
+            else "the first %d seconds, with fire pressed now and then"
             % args.seconds if not args.no_drive
             else "the first %d seconds with no input" % args.seconds))
     rep.facts["steps"] = steps

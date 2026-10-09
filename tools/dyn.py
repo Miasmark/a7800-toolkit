@@ -24,15 +24,30 @@ pruned. The log is only as good as the play behind it: a title screen is not a
 game. Record a session and run exectrace.lua over its playback to reach more.
 """
 import argparse
+import atexit
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import annotations  # noqa: E402
+
+_TMP = []        # scratch folders, removed when the process ends
+
+
+def _mktemp(prefix):
+    d = tempfile.mkdtemp(prefix=prefix)
+    _TMP.append(d)
+    return d
+
+
+atexit.register(lambda: [shutil.rmtree(d, True) for d in _TMP])
 
 
 def parse_log(text):
@@ -76,12 +91,29 @@ def data_blocks(rom, doc, log, reads, low=None, mapper=None, min_len=4, gap=2):
     `min_len` long), never extended on a guess, and only where the listing currently has
     instructions. Returns [{"loc", "len", "type", "note"}], none overlapping a block
     already in `doc`.
+
+    Three things veto a cluster, because each means the "table" is really code the game
+    also reads (a copy loop or checksum walking over a page, say):
+      * a byte next to it was both read and executed: the read stream runs through code;
+      * something in the retained listing JSRs, JMPs or branches to a byte inside it;
+      * (always) any of its bytes was executed.
+    Everything is compared by position in the FILE, not by (space, address), so a bank
+    reached at two addresses (a SuperGame's last bank, fixed and in the window) is one
+    set of bytes.
     """
     import disasm
     import m6502
+    import cart as cart_module
     cart = disasm.Cart(rom, mapper=mapper, low=low) if (mapper or low) else disasm.Cart(rom)
     cfg = disasm.Config(data=doc)
     an, _g, _w, _v = disasm.analyse(cart, cfg)
+
+    def off(sp, a):
+        try:
+            return cart._offset(sp, a)
+        except Exception:                                    # noqa: BLE001
+            return None
+
     ran = set()                                  # every byte of every executed instruction
     for sp, addrs in log["x"].items():
         for a in addrs:
@@ -89,42 +121,87 @@ def data_blocks(rom, doc, log, reads, low=None, mapper=None, min_len=4, gap=2):
                 n = m6502.LENGTH[cart.byte(sp, a)]
             except Exception:                    # noqa: BLE001
                 n = 1
-            ran.update((sp, a + k) for k in range(n))
+            for k in range(n):
+                o = off(sp, a + k)
+                if o is not None:
+                    ran.add(o)
     code_bytes = set()
+    targets = {}                                 # file offset -> offsets of code that goes there
     for (sp, a) in an.code:
-        n = an.insn[(sp, a)][3]
-        code_bytes.update((sp, a + k) for k in range(n))
+        mn, mode, operand, n = an.insn[(sp, a)]
+        here = off(sp, a)
+        for k in range(n):
+            o = off(sp, a + k)
+            if o is not None:
+                code_bytes.add(o)
+        if here is None:
+            continue
+        tgt = None
+        if mn in ("JSR", "JMP") and mode == "abs" and operand is not None:
+            tgt = an.target_space(sp, operand, None), operand
+        elif mn in m6502.BRANCHES and operand is not None:
+            tgt = sp, (a + 2 + ((operand ^ 0x80) - 0x80)) & 0xFFFF
+        if tgt and tgt[0]:
+            o = off(*tgt)
+            if o is not None:
+                targets.setdefault(o, set()).add(here)
+    # a bank-switched target can be in any space the xrefs record for it
+    for (tsp, ta), srcs in an.xrefs.items():
+        o = off(tsp, ta)
+        if o is None:
+            continue
+        for src in srcs:
+            ins = an.insn.get(src)
+            here = off(*src)
+            if ins and ins[0] in ("JSR", "JMP") and ins[1] == "abs" and here is not None:
+                targets.setdefault(o, set()).add(here)
     existing = set()
     for b in doc.get("blocks", []):
         sp, a = disasm.parse_loc(b["loc"])
         end = disasm.parse_loc(b["end"])[1] if "end" in b else a + b.get("len", 1)
-        existing.update((sp, x) for x in range(a, end))
-    out = []
-    # ROM bytes the game copied to RAM and ran there: from the ROM's side they are data
-    for ramaddr, n, src in log.get("r", []):
-        sp, _, a = src.partition(":")
-        span = [(sp, int(a, 16) + k) for k in range(n)]
-        if not any(l in ran or l in existing for l in span):
-            out.append({"loc": src, "len": n, "type": "bytes",
-                        "note": "copied to RAM $%04X and run there" % ramaddr})
-            existing.update(span)
-    for sp, addrs in sorted(reads.items()):
-        cluster = []
-        # a byte that was both read and executed is code; it ends a cluster of data
-        for a in sorted(x for x in addrs if (sp, x) not in ran) + [None]:
-            if cluster and (a is None or a - cluster[-1] > gap):
-                lo, hi = cluster[0], cluster[-1]
-                span = [(sp, x) for x in range(lo, hi + 1)]
-                if (hi - lo + 1 >= min_len
-                        and not any(l in ran for l in span)
-                        and not any(l in existing for l in span)
-                        and sum(1 for l in span if l in code_bytes) * 2 >= len(span)):
-                    out.append({"loc": "%s:%04X" % (sp, lo), "len": hi - lo + 1,
-                                "type": "bytes",
-                                "note": "read as data by the simulator; listed as code"})
-                cluster = []
-            if a is not None:
-                cluster.append(a)
+        for x in range(a, end):
+            o = off(sp, x)
+            if o is not None:
+                existing.add(o)
+
+    reads_off = set()
+    for sp, addrs in reads.items():
+        for a in addrs:
+            o = off(sp, a)
+            if o is not None:
+                reads_off.add(o)
+    through_code = reads_off & ran               # read AND executed
+    data_off = sorted(reads_off - ran)
+
+    canon = []                                   # (file start, size, name, base address)
+    for sp in cart_module.canonical_spaces(cart):
+        canon.append((cart._file_base(sp), cart.size_of(sp), sp, cart.base_of(sp)))
+
+    def where(o):
+        for start, size, sp, base in canon:
+            if start <= o < start + size:
+                return sp, base + o - start
+        return None
+
+    out, cluster = [], []
+    for o in data_off + [None]:
+        if cluster and (o is None or o - cluster[-1] > gap):
+            lo, hi = cluster[0], cluster[-1]
+            span = range(lo, hi + 1)
+            pos = where(lo)
+            veto = (hi - lo + 1 < min_len or pos is None
+                    or any(x in ran or x in existing for x in span)
+                    or sum(1 for x in span if x in code_bytes) * 2 < len(span)
+                    # the read stream runs through code on either side
+                    or any(x in through_code for x in range(lo - gap - 1, hi + gap + 2))
+                    # retained code goes into it
+                    or any(any(not (lo <= s <= hi) for s in targets.get(x, ())) for x in span))
+            if not veto:
+                out.append({"loc": "%s:%04X" % pos, "len": hi - lo + 1, "type": "bytes",
+                            "note": "read as data by the simulator; listed as code"})
+            cluster = []
+        if o is not None:
+            cluster.append(o)
     return out
 
 
@@ -145,7 +222,7 @@ def reached(srcdir):
 
 def disassemble(rom, config, low=None, mapper=None):
     """Run the disassembler; return the listing directory, or None."""
-    out = tempfile.mkdtemp(prefix="dyn-")
+    out = _mktemp("dyn-")
     cmd = [sys.executable, os.path.join(HERE, "disasm.py"), rom, "-c", config,
            "-o", out]
     if low:
@@ -187,6 +264,15 @@ def merge(doc, log, missed=None):
                 doc["entries"].append(loc)
                 have.add(loc)
                 added["entries"].append(loc)
+    # ROM the game copied to RAM and ran there is CODE, entered at its ROM address: an
+    # entry, not a data block (it is the bytes of an interrupt handler or a routine)
+    added["ram_code"] = []
+    for ramaddr, _n, src in log.get("r", []):
+        if src not in have:
+            doc["entries"].append(src)
+            have.add(src)
+            added["entries"].append(src)
+            added["ram_code"].append("%s runs at RAM $%04X" % (src, ramaddr))
     sw = doc.setdefault("banksw", {})
     pinned = doc.get("bankat", {})
     for loc, banks in sorted(log["s"].items()):
@@ -202,7 +288,7 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
 
     Returns (doc, summary lines). `doc` is modified in place.
     """
-    work = tempfile.mkdtemp(prefix="dyn-cfg-")
+    work = _mktemp("dyn-cfg-")
     cfg = os.path.join(work, "a.json")
     total = {"entries": [], "banksw": {}}
     lines = []
@@ -288,7 +374,7 @@ def apply_blocks(rom, doc, log, reads, low=None, mapper=None):
     blocks = data_blocks(rom, doc, log, reads, low, mapper)
     if not blocks:
         return [], ["no bytes the run read as data are listed as code"]
-    work = tempfile.mkdtemp(prefix="dyn-blk-")
+    work = _mktemp("dyn-blk-")
 
     def left(d):
         cfg = os.path.join(work, "a.json")
@@ -336,8 +422,7 @@ def main(argv=None):
     for p in (args.rom, args.log, args.config):
         if not os.path.isfile(p):
             sys.exit("dyn: no such file: %s" % p)
-    with io.open(args.config, encoding="utf-8") as f:
-        doc = json.load(f)
+    doc, nl = annotations.read_json_keep(args.config)
     log = parse_log(io.open(args.log, encoding="utf-8").read())
     doc, lines = apply(args.rom, doc, log, os.path.basename(args.log),
                        args.low, args.mapper)
@@ -352,9 +437,7 @@ def main(argv=None):
     if doc is None:
         return 1
     if not args.dry_run:
-        with io.open(args.config, "w", encoding="utf-8") as f:
-            json.dump(doc, f, indent=2)
-            f.write("\n")
+        annotations.write_json_keep(args.config, doc, nl)
         print("wrote %s" % args.config)
     return 0
 

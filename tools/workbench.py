@@ -33,6 +33,8 @@ import argparse
 import io
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
 import threading
@@ -154,10 +156,10 @@ def scan(config=None, ram=None, dll=None):
 
 def manifest_file():
     """The scan on disk, so a launched editor can read the palettes from it."""
-    import tempfile
     if not MANIFEST:
         return None
-    path = os.path.join(tempfile.gettempdir(), "a7800-workbench-assets.json")
+    os.makedirs(PROJECT, exist_ok=True)
+    path = os.path.join(PROJECT, "assets.json")
     with io.open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(MANIFEST))
     return path
@@ -193,9 +195,31 @@ def launch(tool, args, what):
         # it takes a song, not a cartridge; the caller passes the path
         cmd = [sys.executable, os.path.join(HERE, tool)] + list(args) + \
               ["--no-browser", "--port", str(port)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+    proc = _spawn(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     CHILDREN[port] = (proc, what)
+    # hand the address back only once something answers there: a tab opened at once
+    # gets "connection refused", and a child that died says why instead of leaving a
+    # dead link
+    import socket
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            tail = b""
+            try:
+                tail = proc.stdout.read()[-600:]
+            except (OSError, ValueError):
+                pass
+            raise ValueError("%s stopped at once: %s"
+                             % (what, tail.decode("utf-8", "replace").strip() or "no output"))
+        s = socket.socket()
+        s.settimeout(0.3)
+        try:
+            s.connect(("127.0.0.1", port))
+            break
+        except OSError:
+            time.sleep(0.15)
+        finally:
+            s.close()
     return {"port": port, "url": "http://127.0.0.1:%d/" % port, "what": what}
 
 
@@ -210,11 +234,7 @@ def running():
 
 def stop_all():
     for _port, (proc, _what) in CHILDREN.items():
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+        _kill_tree(proc)
 
 
 # ---------------------------------------------------------------- the project
@@ -230,7 +250,7 @@ def stop_all():
 PROJECT = None          # the folder jobs write into
 JOBS = {}               # id -> Job
 JOB_SEQ = [0]
-LOCK = threading.Lock()
+LOCK = threading.RLock()
 LOG_LIMIT = 4000        # lines kept per job
 TEXT_LIMIT = 2 * 1024 * 1024
 TYPES = {".png": "image/png", ".wav": "audio/wav", ".jpg": "image/jpeg",
@@ -300,6 +320,40 @@ def _banks():
     return str(max(CART.nbanks, 1))
 
 
+def _spawn(cmd, **kw):
+    """Popen in its own process group, so cancelling takes the whole tree with it (MAME
+    is a grandchild of the job's command)."""
+    if os.name == "nt":
+        kw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kw["start_new_session"] = True
+    return subprocess.Popen(cmd, **kw)
+
+
+def _kill_tree(proc):
+    """Stop `proc` and everything it started; harder after a few seconds."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (OSError, ValueError):
+        return
+
+    def harder():
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+    t = threading.Timer(3.0, harder)
+    t.daemon = True
+    t.start()
+
+
 class Job(object):
     """A list of command lines, run in order on a thread, with their output kept."""
 
@@ -308,6 +362,7 @@ class Job(object):
             JOB_SEQ[0] += 1
             self.id = JOB_SEQ[0]
         self.kind, self.label, self.steps, self.note = kind, label, steps, note
+        self.nsteps = len(steps)
         self.outdir = outdir
         self.status = "queued"
         self.log = []
@@ -331,41 +386,59 @@ class Job(object):
     def _run(self):
         self.started = time.time()
         self.status = "running"
-        os.makedirs(self.outdir, exist_ok=True)
+        try:
+            os.makedirs(self.outdir, exist_ok=True)
+            self._steps()
+        except Exception as e:                                # noqa: BLE001
+            # never leave a job "running" because of a bug or a bad parameter
+            self._say("-- stopped: %s: %s" % (type(e).__name__, e))
+            self.status = "failed"
+        finally:
+            self.finished = time.time()
+            save_history()
+
+    def _steps(self):
         for i, st in enumerate(self.steps):
-            self.step = i
-            self._say("$ " + " ".join(_quote(c) for c in st["cmd"]))
-            try:
-                self.proc = subprocess.Popen(
-                    st["cmd"], cwd=st.get("cwd") or PROJECT,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                for raw in iter(self.proc.stdout.readline, b""):
-                    self._say(raw.decode("utf-8", "replace").rstrip("\r\n"))
-                code = self.proc.wait()
-            except OSError as e:
-                self._say("could not run: %s" % e)
-                code = 127
             if self.cancelled:
                 self.status = "cancelled"
-                break
+                return
+            self.step = i
+            if "call" in st:
+                # a step done in this process (adopting a file, say), not a command line
+                self._say("# " + st["label"])
+                try:
+                    self._say(str(st["call"]() or "done"))
+                    code = 0
+                except Exception as e:                        # noqa: BLE001
+                    self._say("%s: %s" % (type(e).__name__, e))
+                    code = 1
+            else:
+                self._say("$ " + " ".join(_quote(c) for c in st["cmd"]))
+                try:
+                    self.proc = _spawn(
+                        st["cmd"], cwd=st.get("cwd") or PROJECT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    for raw in iter(self.proc.stdout.readline, b""):
+                        self._say(raw.decode("utf-8", "replace").rstrip("\r\n"))
+                    code = self.proc.wait()
+                except (OSError, ValueError) as e:
+                    self._say("could not run: %s" % e)
+                    code = 127
+            if self.cancelled:
+                self.status = "cancelled"
+                return
             if code != 0:
                 if st.get("soft"):
                     self._say("(that step reported a problem; carrying on)")
                     continue
                 self._say("-- stopped: that step exited with status %d" % code)
                 self.status = "failed"
-                break
-        else:
-            self.status = "done"
-        self.finished = time.time()
+                return
+        self.status = "done"
 
     def cancel(self):
         self.cancelled = True
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.terminate()
-            except OSError:
-                pass
+        _kill_tree(self.proc)
 
     def outputs(self):
         """Files under the job's folder, as paths relative to the project."""
@@ -381,12 +454,33 @@ class Job(object):
                             "size": os.path.getsize(full)})
         return out
 
+    def saved(self):
+        """What is kept of a finished job between runs of the workbench."""
+        d = self.detail()
+        return {"id": self.id, "kind": self.kind, "label": self.label,
+                "status": self.status, "note": self.note, "outdir": self.outdir,
+                "seconds": d["seconds"], "steps": self.nsteps,
+                "commands": d["commands"], "lines": d["lines"][-300:]}
+
+    @classmethod
+    def restore(cls, r):
+        j = cls.__new__(cls)
+        j.id, j.kind, j.label, j.note = int(r["id"]), r["kind"], r["label"], r.get("note", "")
+        j.status, j.outdir, j.steps = r["status"], r["outdir"], []
+        j.nsteps, j.saved_commands = int(r.get("steps", 1)), list(r.get("commands", []))
+        j.log, j.dropped, j.step = list(r.get("lines", [])), 0, max(int(r.get("steps", 1)) - 1, 0)
+        j.started, j.finished = None, None
+        j.proc, j.cancelled, j.restored = None, False, True
+        j.seconds_saved = r.get("seconds", 0)
+        return j
+
     def summary(self):
         end = self.finished or time.time()
         return {"id": self.id, "kind": self.kind, "label": self.label,
                 "status": self.status, "step": self.step + 1,
-                "steps": len(self.steps), "note": self.note,
-                "seconds": round(end - self.started, 1) if self.started else 0}
+                "steps": self.nsteps, "note": self.note,
+                "seconds": (round(end - self.started, 1) if self.started
+                            else getattr(self, "seconds_saved", 0))}
 
     def detail(self, since=0):
         d = self.summary()
@@ -395,7 +489,8 @@ class Job(object):
             lines = self.log[max(0, since - first):]
             d["next"] = first + len(self.log)
         d["lines"] = lines
-        d["commands"] = [" ".join(_quote(c) for c in st["cmd"]) for st in self.steps]
+        d["commands"] = [st["label"] if "call" in st else " ".join(_quote(c) for c in st["cmd"])
+                         for st in self.steps] if self.steps else getattr(self, "saved_commands", [])
         d["outputs"] = self.outputs()
         return d
 
@@ -459,9 +554,12 @@ def build_firstlook(p):
     cmd = _py("firstlook.py", ROM, "-o", out, "--seconds", secs, "--engine", engine)
     if not live:
         cmd.append("--no-live")
-    return Job("firstlook", "first look" + ("" if live else " (static)"),
-               [{"cmd": cmd}], out,
-               "report.md in the output folder is the summary")
+    steps = [{"cmd": cmd},
+             {"call": adopt_firstlook, "label": "adopt first look's annotations",
+              "soft": True}]
+    return Job("firstlook", "first look" + ("" if live else " (static)"), steps, out,
+               "report.md in the output folder is the summary; its starter annotations "
+               "become the project's annotations.json")
 
 
 def build_disasm(p):
@@ -474,6 +572,25 @@ def build_disasm(p):
                       "soft": True})
     return Job("disasm", "disassemble", steps, out,
                "the listings open in the Listing tab")
+
+
+def build_verify(p):
+    if not os.path.isdir(src_dir()):
+        raise ValueError("there is no src/ yet: run Disassemble first")
+    out = os.path.join(PROJECT, "verify")
+    return Job("verify", "verify the round trip",
+               [{"cmd": _py("verify.py", ROM, "-d", src_dir())}], out,
+               "passes when the listings reassemble to the original image")
+
+
+def build_rebuild(p):
+    if not os.path.isdir(src_dir()):
+        raise ValueError("there is no src/ yet: run Disassemble first")
+    out = os.path.join(PROJECT, "build")
+    return Job("rebuild", "rebuild the cartridge",
+               [{"cmd": _py("build.py", ROM, "-d", src_dir(), "-o",
+                            os.path.join(out, "rebuilt.a78"))}], out,
+               "build/rebuilt.a78, and whether it is identical to the original")
 
 
 def build_lint(p):
@@ -529,7 +646,7 @@ def build_addresses(p):
                              "-c", config_path())})
     _refresh_listing(steps)
     return Job("addresses", "find address tables", steps, out,
-               "slow: every instruction is decoded in Lua")
+               "slow: every instruction is decoded and traced (in Python in the simulator, in Lua in MAME)")
 
 
 def build_profile(p):
@@ -630,6 +747,18 @@ def build_probe(p):
     secs = _int(p, "seconds", 30, 5, 900)
     lines = [ln.strip() for ln in str(p.get("env") or "").splitlines() if ln.strip()]
     runprobe.parse_env(lines, ROM)            # ValueError on a malformed line
+    for ln in lines:
+        k, _, v = ln.partition("=")
+        # a probe reads A7800_* settings; anything else (LD_PRELOAD, PATH...) is not
+        # a probe setting, and an output file must stay in the job's own folder
+        if not k.startswith("A7800_"):
+            raise ValueError("%s: only A7800_* settings can be given to a probe" % k)
+        if "\0" in ln or "\n" in ln or "\r" in ln:
+            raise ValueError("%s: control characters in a setting" % k)
+        if re.search(r"(LOG|OUT|FILE|REGS|RAM|PREFIX|DIR|PATH)$", k) and \
+                re.search(r"[\\/]|^\.\.", v):
+            raise ValueError("%s: write to a file name, not a path; it goes in the job's "
+                             "folder" % k)
     out = os.path.join(PROJECT, "probes", name)
     cmd = _py("runprobe.py", ROM, name, "-o", out, "--seconds", secs)
     for ln in lines:
@@ -677,6 +806,15 @@ def _kinds():
              build=build_addresses,
              params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
                      p("seconds", "seconds", "int", 10, min=5, max=600)]),
+        dict(kind="verify", label="Verify the round trip", group="Annotate", mame=False,
+             about="Assemble the listings in src/ and check they rebuild this cartridge "
+                   "byte for byte. Run it after every change to the annotations: a listing "
+                   "that does not rebuild is wrong somewhere.",
+             build=build_verify, params=[]),
+        dict(kind="rebuild", label="Rebuild the cartridge", group="Annotate", mame=False,
+             about="Assemble src/ into build/rebuilt.a78 and say whether it is identical "
+                   "to the original.",
+             build=build_rebuild, params=[]),
         dict(kind="lint", label="Check annotations", group="Annotate", mame=False,
              about="Catch the typos the disassembler would silently ignore.",
              build=build_lint, params=[]),
@@ -747,10 +885,69 @@ def start_job(kind, params):
         if not env["ready"]:
             raise ValueError(env["problem"])
     os.makedirs(PROJECT, exist_ok=True)
+    busy = [j for j in JOBS.values()
+            if j.kind == kind and j.status in ("queued", "running")]
+    if busy:
+        raise ValueError("a %s job is already running (job %d); stop it or wait for it"
+                         % (kind, busy[0].id))
     job = spec["build"](params or {})
     JOBS[job.id] = job
     job.start()
     return job
+
+
+def history_path():
+    return os.path.join(PROJECT, "jobs.json")
+
+
+def save_history():
+    """Remember finished jobs in the project folder, so a restart does not make the
+    Results tab forget what is on disk beside it."""
+    try:
+        with LOCK:
+            keep = [j.saved() for j in sorted(JOBS.values(), key=lambda j: j.id)
+                    if j.status in ("done", "failed", "cancelled")][-60:]
+        os.makedirs(PROJECT, exist_ok=True)
+        with io.open(history_path(), "w", encoding="utf-8") as f:
+            json.dump(keep, f)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def load_history():
+    try:
+        rows = json.load(io.open(history_path(), encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for r in rows:
+        try:
+            job = Job.restore(r)
+        except (KeyError, TypeError, ValueError):
+            continue
+        JOBS[job.id] = job
+        JOB_SEQ[0] = max(JOB_SEQ[0], job.id)
+
+
+def adopt_firstlook():
+    """The starter annotations first look wrote become the project's, if it has none;
+    if it has some, only the entry points it does not already list are added."""
+    src = os.path.join(PROJECT, "firstlook", "annotations.json")
+    if not os.path.isfile(src):
+        return "first look wrote no annotations to adopt"
+    import annotations
+    new, _nl = annotations.read_json_keep(src)
+    if not os.path.isfile(config_path()):
+        annotations.write_json_keep(config_path(), new)
+        return "annotations.json started from first look's (%d entry points)" % len(
+            new.get("entries", []))
+    cur, nl = annotations.read_json_keep(config_path())
+    have = set(cur.get("entries", []))
+    add = [e for e in new.get("entries", []) if e not in have]
+    if add:
+        cur.setdefault("entries", []).extend(add)
+        annotations.write_json_keep(config_path(), cur, nl)
+    return "%d entry point%s from first look added to annotations.json" % (
+        len(add), "" if len(add) == 1 else "s")
 
 
 def project_file(rel):
@@ -788,8 +985,14 @@ def write_annotations(text):
     """Save the file if it is JSON at all; return the lint findings either way."""
     json.loads(text)                  # ValueError if it is not JSON: nothing written
     os.makedirs(PROJECT, exist_ok=True)
-    with io.open(config_path(), "w", encoding="utf-8", newline="\n") as f:
-        f.write(text if text.endswith("\n") else text + "\n")
+    # keep the file's own line ending: the page hands over LF text whatever the file has
+    nl = "\n"
+    if os.path.isfile(config_path()):
+        with open(config_path(), "rb") as f:
+            nl = "\r\n" if b"\r\n" in f.read() else "\n"
+    body = text.replace("\r\n", "\n")
+    with io.open(config_path(), "w", encoding="utf-8", newline="") as f:
+        f.write((body if body.endswith("\n") else body + "\n").replace("\n", nl))
     return lint_annotations(text)
 
 
@@ -815,18 +1018,27 @@ def census_suggestions():
         loc = x["loc"].upper()
         y["applied"] = loc in (have_e if x["kind"] == "entry" else have_b)
         out.append(y)
-    return {"exists": True, "suggestions": out}
+    return {"exists": True, "stamp": os.path.getmtime(path), "suggestions": out}
 
 
-def apply_census(ids):
-    """Add the chosen census suggestions to annotations.json (creating it), once each."""
-    cur = {s["i"]: s for s in census_suggestions()["suggestions"]}
-    cfg = {}
+def apply_census(items):
+    """Add the chosen census suggestions to annotations.json, once each.
+
+    `items` are {"kind", "loc"} pairs -- what the page showed, not positions in a list
+    that a newer census would have reordered. A missing annotations file is started the
+    way every other job starts one (init.py), so it gets its scaffold."""
+    cur = {(s["kind"], s["loc"].upper()): s for s in census_suggestions()["suggestions"]}
+    if not os.path.isfile(config_path()):
+        os.makedirs(PROJECT, exist_ok=True)
+        subprocess.run(_py("init.py", ROM, "-o", config_path()), cwd=PROJECT,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+    cfg, nl = {}, "\n"
     if os.path.isfile(config_path()):
-        cfg = json.load(io.open(config_path(), encoding="utf-8"))
+        import annotations
+        cfg, nl = annotations.read_json_keep(config_path())
     added = 0
-    for i in ids:
-        x = cur.get(int(i))
+    for it in items:
+        x = cur.get((str(it.get("kind")), str(it.get("loc", "")).upper()))
         if x is None or x["applied"]:
             continue
         if x["kind"] == "entry":
@@ -835,7 +1047,10 @@ def apply_census(ids):
             cfg.setdefault("blocks", []).append(
                 {"loc": x["loc"], "len": int(x["len"]), "type": x.get("type", "bytes")})
         added += 1
-    findings = write_annotations(json.dumps(cfg, indent=2)) if added else []
+    findings = []
+    if added:
+        text = json.dumps(cfg, indent=2, ensure_ascii=False).replace("\n", nl)
+        findings = write_annotations(text)
     return {"added": added, "findings": findings}
 
 
@@ -843,7 +1058,9 @@ def listing_files():
     out = []
     if os.path.isdir(src_dir()):
         # the fixed bank first: it holds the reset code, which is where reading starts
-        for f in sorted(os.listdir(src_dir()), key=lambda n: (not n.startswith("f"), n)):
+        # (MARIA's half of a bankset cartridge, m<space>.asm, is data: it goes last)
+        for f in sorted(os.listdir(src_dir()),
+                        key=lambda n: (n.startswith("m"), not n.startswith("f"), n)):
             if f.endswith(".asm"):
                 out.append({"path": "src/" + f,
                             "size": os.path.getsize(os.path.join(src_dir(), f))})
@@ -900,7 +1117,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(206, data[start:end + 1], TYPES[ext], extra)
         return self._send(200, data, TYPES[ext], extra)
 
+    MAX_BODY = 8 * 1024 * 1024
+
+    def _guard(self, post):
+        """Refuse what a web page could send. This server has no password, so it must not
+        answer a page on another site: a request whose Host is not this machine's own
+        address is a DNS-rebinding attempt, a foreign Origin is a cross-site request, and a
+        POST that is not JSON is the kind a form or a no-cors fetch can make."""
+        port = self.server.server_address[1]
+        hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port}
+        if self.headers.get("Host", "") not in hosts:
+            self._send(403, {"error": "this server answers only on its own address"})
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin not in {"http://" + h for h in hosts}:
+            self._send(403, {"error": "cross-site request refused"})
+            return False
+        if post and not self.headers.get("Content-Type", "").lower().startswith(
+                "application/json"):
+            self._send(415, {"error": "POST bodies are application/json"})
+            return False
+        return True
+
     def do_GET(self):
+        if not self._guard(False):
+            return
         from urllib.parse import urlparse, parse_qs
         u = urlparse(self.path)
         p, q = u.path, parse_qs(u.query)
@@ -944,14 +1185,27 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "no such thing"})
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
+        if not self._guard(True):
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return self._send(400, {"error": "bad Content-Length"})
+        if n < 0 or n > self.MAX_BODY:
+            return self._send(413, {"error": "request too large"})
         try:
             body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             return self._send(400, {"error": "bad JSON"})
+        if not isinstance(body, dict):
+            return self._send(400, {"error": "the request body is a JSON object"})
+        if not isinstance(body.get("params", {}), dict):
+            return self._send(400, {"error": "params is a JSON object"})
         try:
             if self.path == "/api/scan":
-                return self._send(200, scan(body.get("config") or None,
+                cfg = body.get("config") or (config_path() if os.path.isfile(config_path())
+                                             else None)
+                return self._send(200, scan(cfg,
                                             body.get("ram") or None,
                                             body.get("dll")))
             if self.path == "/api/job":
@@ -965,10 +1219,13 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/annotations":
                 return self._send(200, {"findings": write_annotations(body.get("text", ""))})
             if self.path == "/api/census/apply":
-                return self._send(200, apply_census(body.get("ids") or []))
+                return self._send(200, apply_census(body.get("items") or []))
             if self.path == "/api/open":
                 kind = body.get("kind")
                 if kind == "sprite":
+                    if str(body.get("space")) not in CART.spaces():
+                        raise ValueError("this cartridge has no space %r (it has %s)"
+                                         % (body.get("space"), ", ".join(CART.spaces())))
                     args = ["--space", body["space"], "--base",
                             str(int(body["base"])), "--height",
                             str(int(body.get("height", 8))), "--width",
@@ -1120,7 +1377,7 @@ function el(tag,props,...kids){
 }
 function msg(s,bad){const m=$('msg');m.textContent=s;m.className=bad?'err':'muted';}
 async function api(path,body){
-  const r=await fetch(path,body===undefined?{}:{method:'POST',body:JSON.stringify(body)});
+  const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const j=await r.json();
   if(j.error) throw new Error(j.error);
   return j;
@@ -1309,13 +1566,16 @@ async function drawResults(){
 async function drawJob(first){
   const right=$('jobdetail'); if(!right||CUR==null) return;
   const d=await api('/api/job?id='+CUR+'&since=0');
+  const oldlog=$('joblog');
+  const stick=!oldlog||(oldlog.scrollHeight-oldlog.scrollTop-oldlog.clientHeight<40);
+  const keepTop=oldlog?oldlog.scrollTop:0;
   right.replaceChildren();
   right.append(el('h3',{},d.label+' ',el('span',{class:d.status==='done'?'ok':(d.status==='failed'?'err':'muted'),text:d.status})));
   if(d.note) right.append(el('div',{class:'muted',text:d.note}));
   right.append(el('div',{class:'muted',text:'commands:'}),el('pre',{text:d.commands.join('\n')}));
   const log=el('pre',{id:'joblog',text:d.lines.join('\n')});
   right.append(el('div',{class:'muted',text:'output:'}),log);
-  log.scrollTop=log.scrollHeight;
+  log.scrollTop=stick?log.scrollHeight:keepTop;
   if(d.status==='running') right.append(el('button',{text:'stop',onclick:async()=>{await api('/api/job/cancel',{id:CUR});drawJob();}}));
   const outs=d.outputs;
   if(outs.length){
@@ -1324,7 +1584,11 @@ async function drawJob(first){
     for(const f of outs) g.append(fileCard(f));
     right.append(g);
   }
-  if(d.kind==='census' && d.status==='done') await drawCensusSuggestions(right);
+  if(d.kind==='census' && d.status==='done'){
+    const js=(await api('/api/jobs')).jobs.filter(j=>j.kind==='census').map(j=>j.id);
+    if(js.length&&Math.max(...js)===d.id){ const holder=el('div',{id:'censussug'}); right.append(holder); await drawCensusSuggestions(holder); }
+    else right.append(el('div',{class:'muted',text:'(suggestions are shown under the latest census run)'}));
+  }
   clearTimeout(POLL);
   const live=d.status==='running'||d.status==='queued';
   if(SEEN[CUR]==='live' && !live && !$('t-results').hidden){ SEEN[CUR]='final'; drawResults(); return; }
@@ -1333,22 +1597,26 @@ async function drawJob(first){
 }
 async function drawCensusSuggestions(right){
   const c=await api('/api/census');
+  right.replaceChildren();
   if(!c.exists||!c.suggestions.length) return;
   right.append(el('h2',{text:'suggested for annotations ('+c.suggestions.length+')'}),
     el('div',{class:'muted',text:'Guesses from what the run did not reach. Tick the ones that look right in the listing; nothing is added until you press the button.'}));
   const box=el('div',{});
   const checks=[];
   for(const s of c.suggestions){
-    const cb=el('input',{type:'checkbox'}); cb.disabled=s.applied; checks.push([cb,s.i]);
+    const cb=el('input',{type:'checkbox'}); cb.disabled=s.applied; checks.push([cb,{kind:s.kind,loc:s.loc}]);
     const what=s.kind==='entry'?('entry '+s.loc+' ('+s.size+' bytes)'):(s.type+' block '+s.loc+' ('+s.len+' bytes)');
     box.append(el('div',{},cb,' ',el('span',{text:what}),' ',el('span',{class:'muted',text:(s.applied?'already in annotations -- ':'')+s.why})));
   }
   right.append(box);
   const status=el('span',{class:'muted'});
   right.append(el('button',{text:'add ticked to annotations',onclick:async()=>{
-    const ids=checks.filter(x=>x[0].checked).map(x=>x[1]);
-    try{ const r=await api('/api/census/apply',{ids:ids});
-      status.textContent=r.added+' added'+(r.findings&&r.findings.length?'; '+r.findings.length+' lint finding(s) -- see Annotations':'');
+    const items=checks.filter(x=>x[0].checked).map(x=>x[1]);
+    if(!items.length){ status.textContent='nothing ticked'; return; }
+    try{ const r=await api('/api/census/apply',{items:items});
+      await drawCensusSuggestions(right);
+      const note=el('div',{class:'ok',text:r.added+' added to annotations.json'+(r.findings&&r.findings.length?'; '+r.findings.length+' lint finding(s) -- see Annotations':'')+'. Now: '}, el('button',{text:'disassemble with it',onclick:async()=>{try{const j=await api('/api/job',{kind:'disasm',params:{}});CUR=j.id;show('results');}catch(e){msg(e.message,true);}}}));
+      right.prepend(note);
     }catch(e){ status.textContent=e.message; }
   }}),' ',status);
 }
@@ -1417,28 +1685,34 @@ async function drawListing(){
 }
 
 // --------------------------------------------------------------- annotations
-async function drawAnnotations(){
+let ANNOT_DRAFT=null;
+window.addEventListener('beforeunload',e=>{ if(ANNOT_DRAFT!==null){ e.preventDefault(); e.returnValue=''; } });
+async function drawAnnotations(fresh){
   const box=$('t-annotations'); box.replaceChildren();
+  if(fresh) ANNOT_DRAFT=null;
   const a=await api('/api/annotations');
   if(!a.exists){
     box.append(el('div',{class:'muted',text:'There is no annotations.json in the project yet. It is the file the disassembler reads: names, entry points, data blocks, bank pins.'}),
       el('div',{class:'bar'},el('button',{text:'start one',onclick:async()=>{try{await api('/api/job',{kind:'newannot',params:{}});setTimeout(drawAnnotations,1500);}catch(e){msg(e.message,true);}}})));
     return;
   }
-  const ta=el('textarea',{spellcheck:'false'}); ta.value=a.text;
+  const ta=el('textarea',{spellcheck:'false'});
+  ta.value=(ANNOT_DRAFT!==null&&ANNOT_DRAFT!==a.text)?ANNOT_DRAFT:a.text;
   const list=el('div');
   const status=el('span',{class:'muted'});
+  if(ta.value!==a.text) status.textContent='unsaved edits kept';
+  ta.addEventListener('input',()=>{ ANNOT_DRAFT=ta.value; status.textContent='unsaved edits'; });
   function findings(fs){
     list.replaceChildren();
     if(!fs.length) list.append(el('div',{class:'ok',text:'no problems found'}));
     for(const f of fs) list.append(el('div',{class:'find '+f.level,text:f.level+': '+f.message}));
   }
   const save=el('button',{text:'save and check',onclick:async()=>{
-    try{ const r=await api('/api/annotations',{text:ta.value}); findings(r.findings); status.textContent='saved'; }
+    try{ const r=await api('/api/annotations',{text:ta.value}); findings(r.findings); status.textContent='saved'; ANNOT_DRAFT=null; }
     catch(e){ status.textContent=''; msg(e.message,true); }
   }});
-  const lintbtn=el('button',{text:'reload',onclick:drawAnnotations});
-  const dis=el('button',{text:'disassemble with it',onclick:async()=>{try{const r=await api('/api/job',{kind:'disasm',params:{}});CUR=r.id;show('results');}catch(e){msg(e.message,true);}}});
+  const lintbtn=el('button',{text:'reload',onclick:()=>{ if(ANNOT_DRAFT!==null&&!confirm('Discard your unsaved edits and reload the file?')) return; drawAnnotations(true); }});
+  const dis=el('button',{text:'save and disassemble',onclick:async()=>{try{ const s=await api('/api/annotations',{text:ta.value}); ANNOT_DRAFT=null; findings(s.findings); const r=await api('/api/job',{kind:'disasm',params:{}});CUR=r.id;show('results');}catch(e){msg(e.message,true);}}});
   box.append(el('div',{class:'bar'},save,lintbtn,dis,status),ta,el('h2',{text:'checks'}),list);
   findings(a.findings);
 }
@@ -1475,7 +1749,17 @@ def main():
     PROJECT = os.path.abspath(args.project or
                               os.path.splitext(ROM)[0] + "-workbench")
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    load_history()
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    except OSError:
+        # the default port may be held by another workbench; take the next free one
+        # (an explicit --port that is busy is the user's to sort out)
+        if args.port != 8120:
+            sys.stderr.write("port %d is already in use\n" % args.port)
+            return 2
+        srv = ThreadingHTTPServer(("127.0.0.1", free_port(8121)), Handler)
+    args.port = srv.server_address[1]
     url = "http://127.0.0.1:%d/" % args.port
     print("%s -- %s, %dK, %s"
           % (os.path.basename(ROM), CART.map.name, len(CART.rom) // 1024,
@@ -1486,6 +1770,15 @@ def main():
     print("open %s" % url)
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    # closing the terminal or `kill` must stop the editors and jobs too, not only Ctrl-C
+    def _terminate(_sig, _frm):
+        raise KeyboardInterrupt
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), _terminate)
+            except (ValueError, OSError):
+                pass
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -342,24 +342,35 @@ def runs_of(cls, kind, base):
 
 
 # ------------------------------------------------------- what an area looks like
-def decodable(data):
-    """Fraction of `data` covered by a straight run of documented instructions that
-    contains control flow, from offset 0; (fraction, has_flow)."""
-    i, flow = 0, False
+def decodable(data, starts=8):
+    """The best straight run of documented instructions containing control flow, begun
+    within the first `starts` bytes: (fraction of `data` it covers, has_flow, offset).
+    Starting only at byte 0 loses code that follows a few bytes of table, and code that is
+    followed by data stops at the first illegal byte rather than failing the whole area."""
     n = len(data)
-    while i < n:
-        mn, mode, illegal = m6502.OPCODES[data[i]]
-        ln = 1 + m6502.MODES[mode]
-        if illegal or i + ln > n:
-            break
-        if mn in ("RTS", "RTI", "JMP", "JSR", "BNE", "BEQ", "BCC", "BCS", "BPL", "BMI"):
-            flow = True
-        i += ln
-    return i / float(n), flow
+    best = (0.0, False, 0)
+    for s in range(min(starts, n)):
+        i, flow = s, False
+        while i < n:
+            mn, mode, illegal = m6502.OPCODES[data[i]]
+            ln = 1 + m6502.MODES[mode]
+            if illegal or i + ln > n:
+                break
+            if mn in ("RTS", "RTI", "JMP", "JSR", "BNE", "BEQ", "BCC", "BCS", "BPL", "BMI"):
+                flow = True
+            i += ln
+        if flow and (i - s) / float(n) > best[0]:
+            best = ((i - s) / float(n), True, s)
+    return best
 
 
-def guess(data):
-    """(label, evidence) for a block of dark bytes. A heuristic, said as such."""
+def guess(data, known=None):
+    """(label, evidence) for a block of dark bytes. A heuristic, said as such.
+
+    `known(address)` says whether an address is somewhere the census has seen used. Given
+    it, a block is only an address table if most of its words point at such places; random
+    and pixel bytes pass the old test (a high byte of $40 or more) a third of the time and
+    more."""
     n = len(data)
     if n == 0:
         return "empty", ""
@@ -372,17 +383,24 @@ def guess(data):
     pr = sum(1 for b in data if 0x20 <= b < 0x7F)
     if n >= 8 and pr >= 0.85 * n:
         return "text", "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in data[:24])
-    frac, flow = decodable(data)
-    if n >= 12 and frac >= 0.9 and flow:
-        return "code-like", "%d%% decodes as documented instructions with branches or returns" % (100 * frac)
+    frac, flow, at = decodable(data)
+    if n >= 12 and flow and frac >= 0.6 and frac * n >= 16:
+        return "code-like", "%d%% decodes as documented instructions with branches or returns%s" % (
+            100 * frac, "" if not at else ", from offset %d" % at)
     if n >= 8:
         words = [data[i] | (data[i + 1] << 8) for i in range(0, n - 1, 2)]
         near = sum(1 for w in words if w >= 0x4000)
-        if near >= 0.8 * len(words) and len(set(words)) >= 0.5 * len(words):
+        if known is not None:
+            hit = sum(1 for w in words if w >= 0x4000 and known(w))
+            if hit >= 0.7 * len(words) and len(set(words)) >= 0.5 * len(words):
+                return "address table?", "%d of %d words point at bytes the census saw used" % (
+                    hit, len(words))
+        elif near >= 0.8 * len(words) and len(set(words)) >= 0.5 * len(words):
             return "address table?", "%d of %d words fall in $4000-$FFFF" % (near, len(words))
-        pairs = sum(1 for i in range(0, n - 1, 2) if data[i + 1] >= 0x40)
-        if pairs >= 0.8 * (n // 2) and len(set(data[1::2])) <= 6:
-            return "address table? (high bytes cluster)", "high bytes %s" % sorted(set(data[1::2]))[:6]
+        if known is None:
+            pairs = sum(1 for i in range(0, n - 1, 2) if data[i + 1] >= 0x40)
+            if pairs >= 0.8 * (n // 2) and len(set(data[1::2])) <= 6:
+                return "address table? (high bytes cluster)", "high bytes %s" % sorted(set(data[1::2]))[:6]
     zeros = counts.get(0, 0)
     if len(counts) <= 32 or zeros >= 0.25 * n:
         return "graphics-like", "%d distinct values, %d%% zero, in %d bytes" % (
@@ -524,15 +542,32 @@ def summary(cart, cls):
     return per, tot
 
 
+def _known_fn(cart, cls):
+    """known(addr): is `addr` in a byte the census classed as used (anything but DARK)?"""
+    spans = []
+    for sp, c in cls.items():
+        if sp.startswith("m"):
+            continue                   # MARIA's half is not where the CPU's words point
+        spans.append((cart.base_of(sp), len(c), c))
+
+    def known(w):
+        for base, size, c in spans:
+            if base <= w < base + size and c[w - base] not in (DARK, FILL):
+                return True
+        return False
+    return known
+
+
 def dark_areas(cart, cls, min_size=4):
     out = []
+    known = _known_fn(cart, cls)
     for sp, c in cls.items():
         base = cart.base_of(sp)
         for lo, hi in runs_of(c, DARK, base):
             if hi - lo + 1 < min_size:
                 continue
             data = cart.slice(sp, lo, hi - lo + 1)
-            label, why = guess(data)
+            label, why = guess(data, known)
             out.append({"space": sp, "lo": lo, "hi": hi, "size": hi - lo + 1,
                         "guess": label, "evidence": why})
     out.sort(key=lambda r: -r["size"])

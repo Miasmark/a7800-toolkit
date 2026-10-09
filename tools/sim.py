@@ -218,7 +218,11 @@ Each of these was a confident diagnosis at some point, and each was wrong.
 * **VBLANK phase.** The first divergence in the trace is a VBLANK wait, but it
   re-synchronises 1,160 instructions later, and sweeping the flag's phase
   across a whole frame changes the score by nothing.
-* **The RIOT timer.** Neither game ever reads `INTIM`.
+* **The RIOT timer.** Neither of those two games ever read `INTIM`. The simulator now
+  models the interval timer ($0284-$0287 reads, $0294-$0297 writes), WSYNC (the CPU waits
+  for the next scanline), RAM on the cartridge, the 52K image's low ROM and NMOS decimal-mode
+  flags -- each checked against a synthetic cartridge (`selftest.py: t_sim_machine`),
+  not against MAME.
 * ~~**POKEY reads.**~~ Recorded here as ruled out, on the grounds that
   "Ballblazer never reads it". That was wrong: it was measured over 300
   frames, and the music engine that reads `$400A` does not start until frame
@@ -350,10 +354,33 @@ class Bus(object):
         self.obs = None                 # an observer, or None
         self.maria = {}                 # MARIA register -> last value written
         self.cpu_cycles = lambda: 0     # set by CPU.__init__
+        # where cartridge ROM starts (a 52K image reaches down to $3000) and which ranges are
+        # RAM on the cartridge: reads and writes there are memory, not ROM
+        regions = getattr(cart, "_region", [])
+        starts = [r[0] for r in regions if r[2] != "ram"]
+        self.rom_low = min([0x4000] + starts)
+        self.cart_ram = [(r[0], r[1]) for r in regions if r[2] == "ram"]
+        self.wsync = False              # a write to WSYNC is waiting to stall the CPU
+        self.timer = None               # the RIOT interval timer: (set at cycle, value, interval)
         self.pokeys = set()
         for base in cart.pokeys():
             for r in range(16):
                 self.pokeys.add(base + r)
+
+    def riot(self, a):
+        """INTIM ($0284/$0286) and TIMINT ($0285/$0287) from the timer last started."""
+        if self.timer is None:
+            return 0x00 if a in (0x0284, 0x0286) else 0x00
+        t0, val, interval = self.timer
+        elapsed = int(self.cpu_cycles() - t0)
+        ticks = elapsed // interval
+        if ticks <= val:
+            value, expired = val - ticks, False
+        else:
+            # past zero: it flags and then counts down every cycle
+            value = (0xFF - (elapsed - (val + 1) * interval)) & 0xFF
+            expired = True
+        return value if a in (0x0284, 0x0286) else (0x80 if expired else 0x00)
 
     def random(self, cycles):
         """POKEY's RANDOM register: the top bits of a 17-bit LFSR.
@@ -385,7 +412,7 @@ class Bus(object):
             if reg == 0x0A:                       # RANDOM
                 return self.random(self.cpu_cycles())
             return 0xFF
-        if a >= 0x4000:
+        if a >= self.rom_low:
             sp = self.cart.space_of(a, self.bank)
             if sp is not None:
                 try:
@@ -426,6 +453,11 @@ class Bus(object):
                 step = (self.frame // 20) % 5
                 return (0xFF, 0x7F, 0xBF, 0xDF, 0xEF)[step] if step else 0xFF
             return 0xFF
+        if a in (0x0284, 0x0286, 0x0285, 0x0287):
+            # RIOT INTIM and TIMINT. The timer counts down once per interval from the value
+            # written; when it passes zero it flags (TIMINT bit 7) and counts down every
+            # cycle. A game that waits on it with BIT $0285 / BPL used to wait for ever.
+            return self.riot(a)
         if a == 0x0282:
             # SWCHB: the console switches, and they are **active low** -- a set
             # bit means "not pressed". Returning zeros here reads as reset and
@@ -448,13 +480,23 @@ class Bus(object):
                 if self.obs is not None:
                     self.obs.bank_switch(a, v, b)
                 return
-        if a >= 0x4000:
+        if a >= self.rom_low:
             if a in self.pokeys:
                 self.audio[a] = v
                 self.writes.append((self.frame, a, v))
                 return
+            for lo, hi in self.cart_ram:
+                if lo <= a < hi:
+                    self.ram[a] = v      # RAM on the cartridge
+                    return
             return                       # ROM: writes go nowhere
+        if 0x0294 <= a <= 0x0297:
+            # the RIOT's interval timer: TIM1T / TIM8T / TIM64T / T1024T
+            self.timer = (self.cpu_cycles(), v, (1, 8, 64, 1024)[a - 0x0294])
+            return
         low = a & 0xFF
+        if low == 0x24 and a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
+            self.wsync = True            # the CPU waits for the end of the scanline
         if a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
             # MARIA's display-list pointer. Write-only on hardware, so nothing
             # can read it back -- the sim has to catch it on the way past or
@@ -680,6 +722,7 @@ class CPU(object):
         if self.p & D:
             # BCD. Rare in players but not unheard of, and silently wrong
             # arithmetic is exactly the kind of bug that hides.
+            c_in = self.p & C
             lo = (self.a & 0x0F) + (v & 0x0F) + (self.p & C)
             hi = (self.a >> 4) + (v >> 4) + (1 if lo > 9 else 0)
             if lo > 9:
@@ -690,6 +733,10 @@ class CPU(object):
                 r = ((hi << 4) | (lo & 0x0F)) & 0xFF
             self.p = (self.p & ~C) | (1 if hi > 15 else 0)
             self.setzn(r)
+            # NMOS: Z comes from the BINARY sum, not the decimal result (0x99+0x01 gives
+            # $00 in decimal but Z is clear)
+            binary = (self.a + v + c_in) & 0xFF
+            self.p = (self.p & ~Z) | (Z if binary == 0 else 0)
             self.a = r
             return
         t = self.a + v + (self.p & C)
@@ -700,6 +747,7 @@ class CPU(object):
 
     def sbc(self, v):
         if self.p & D:
+            a0 = self.a
             lo = (self.a & 0x0F) - (v & 0x0F) - (1 - (self.p & C))
             hi = (self.a >> 4) - (v >> 4)
             if lo & 0x10:
@@ -710,6 +758,10 @@ class CPU(object):
             t = self.a - v - (1 - (self.p & C))
             self.p = (self.p & ~C) | (0 if t & 0x100 else 1)
             self.a = self.setzn(((hi & 0x0F) << 4) | (lo & 0x0F))
+            # NMOS: N, V and Z of a decimal subtract are the binary subtract's
+            self.p = (self.p & ~(N | V | Z)) | (N if t & 0x80 else 0) \
+                | (Z if (t & 0xFF) == 0 else 0) \
+                | (V if ((a0 ^ v) & (a0 ^ t) & 0x80) else 0)
             return
         self.adc(v ^ 0xFF)
 
@@ -1071,6 +1123,11 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
                     cpu.nmi()
                 i += 1
             cpu.step()
+            if bus.wsync:
+                # WSYNC: the CPU is halted until the start of the next scanline
+                bus.wsync = False
+                n = int((cpu.cycles - base) // CYCLES_PER_LINE) + 1
+                cpu.cycles = max(cpu.cycles, base + n * CYCLES_PER_LINE)
     return bus
 
 
@@ -1231,7 +1288,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--frames", type=int)
     ap.add_argument("--drive", action="store_true",
-                    help="hold fire, for a game that waits at a title screen")
+                    help="tap fire now and then, for a game that waits at a title screen")
     ap.add_argument("--compare", metavar="REF.log",
                     help="compare against a known-good capture from "
                          "capture.py or probes/audio.lua. Compare LIKE FOR "

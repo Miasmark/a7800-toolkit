@@ -56,7 +56,9 @@ if "%~1"=="" (
   echo   that opens it in the right editor.
   echo.
   echo   On a bankset cartridge the artwork is in the half the CPU never
-  echo   reads. Drop it here and pass --side maria, or use the tools directly.
+  echo   reads: the disassembly lists it as data (m*.asm), and the sprite editor
+  echo   opens it from the workbench's Overview. To work on a half from the
+  echo   command line use --side maria with the tools that take it.
   goto :finish
 )
 
@@ -79,7 +81,7 @@ if errorlevel 2 (
   echo.
   echo The workbench could not lay this cartridge out. The reason is above.
   echo.
-  echo Four images in a 2,664-image library cannot be laid out: two SOUPER
+  echo Four images in the 1,309-image library cannot be laid out: two SOUPER
   echo and two 512K flat. If yours is not one of those, the header may
   echo understate the mapping. To see what it claims:
   echo.

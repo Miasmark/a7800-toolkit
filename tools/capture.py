@@ -65,6 +65,35 @@ def bios_args():
     return ["-bios", name] if name else []
 
 
+_OVERLAYS = {}
+
+
+def pal_overlay(rompath):
+    """A rompath that lets MAME's PAL machine (a7800p) boot with the open BIOS.
+
+    `-bios a7800pr` exists only on the NTSC machine, so asking for it on a7800p is "invalid
+    BIOS" and then "c300558-001b.u7 NOT FOUND". The workaround is to hand a7800p the same
+    open BIOS under the file name it looks for. This builds a small folder holding the
+    NTSC machine's files plus that copy, and returns it; the real rompath is not touched.
+    Returns `rompath` unchanged if there is no BIOS file to copy."""
+    import glob
+    import shutil
+    import tempfile
+    if rompath in _OVERLAYS:
+        return _OVERLAYS[rompath]
+    src = sorted(glob.glob(os.path.join(rompath, "a7800", "*.u7")))
+    if not src:
+        return rompath
+    d = tempfile.mkdtemp(prefix="a7800-pal-")
+    os.makedirs(os.path.join(d, "a7800"))
+    os.makedirs(os.path.join(d, "a7800p"))
+    for f in src:
+        shutil.copy(f, os.path.join(d, "a7800", os.path.basename(f)))
+    shutil.copy(src[0], os.path.join(d, "a7800p", "c300558-001b.u7"))
+    _OVERLAYS[rompath] = d
+    return d
+
+
 def find_rompath(rom, explicit=None):
     """Where the 7800 BIOS images live.
 

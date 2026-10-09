@@ -24,7 +24,6 @@ file is replaced, and every block added is listed under `_dynamic`.
 """
 import argparse
 import io
-import json
 import os
 import re
 import sys
@@ -251,14 +250,12 @@ def main(argv=None):
     found = analyse(uses, imms, cart)
     print("\n".join(report(found)))
     if args.config:
-        with io.open(args.config, encoding="utf-8") as f:
-            doc = json.load(f)
+        import annotations
+        doc, nl = annotations.read_json_keep(args.config)
         added = merge(doc, found, os.path.basename(args.log))
         print("%d table%s added to the annotations" % (len(added), "" if len(added) == 1 else "s"))
         if added and not args.dry_run:
-            with io.open(args.config, "w", encoding="utf-8") as f:
-                json.dump(doc, f, indent=2)
-                f.write("\n")
+            annotations.write_json_keep(args.config, doc, nl)
             print("wrote %s" % args.config)
     return 0
 

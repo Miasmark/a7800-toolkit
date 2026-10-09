@@ -68,6 +68,10 @@ class Collector(sim.Observer):
         self.frames_with_list = 0
         self.arrival = {}            # location -> how it was first reached
         self.pred = {}               # location -> the location fetched just before it, first time
+        self.frame = 0
+        self.nmi_frames = set()      # frames in which at least one display interrupt was taken
+        self.jfirst = {}             # (from, to) of a jump -> the frame it was first taken
+        self.sfirst = {}             # (from, bank) of a bank switch -> the frame it was first taken
         self.ramx = set()            # RAM addresses (folded) an instruction was fetched from
         self.ramsrc = []             # (RAM address, length, ROM location it was copied from)
 
@@ -106,11 +110,15 @@ class Collector(sim.Observer):
         self._finish()
 
     def frame_start(self, frame):
+        self.frame = frame
         self._finish()
         if frame in self.snap_frames:
             self._cur = (frame, dict(self.bus.maria), [], self.bus.bank)
             self.nmis = 0
-        if self.bus.dpph is not None and (self.bus.ctrl & 0x60) == 0x40:
+        if self.bus.dpph is not None and (self.bus.ctrl & 0x60) == 0x40 and \
+                (0x18 <= self.bus.dpph <= 0x27 or self.bus.dpph >= 0x40):
+            # DMA is on and the list pointer is RAM or ROM -- not page zero, which is
+            # what a program that has only half-written the pointer leaves there
             self.frames_with_list += 1
 
     def fetch(self, pc, opcode):
@@ -165,6 +173,7 @@ class Collector(sim.Observer):
         a, b = self.loc(pc) or ("ram", pc & 0xFFFF), self.loc(target)
         if a and b:
             self.j[(a, b)] = self.j.get((a, b), 0) + 1
+            self.jfirst.setdefault((a, b), self.frame)
 
     def call(self, pc, target, ret, sp):
         self.shadow[sp] = ret
@@ -178,14 +187,17 @@ class Collector(sim.Observer):
         a, b = self.loc(pc) or ("ram", pc & 0xFFFF), self.loc(target)
         if a and b:
             self.j[(a, b)] = self.j.get((a, b), 0) + 1
+            self.jfirst.setdefault((a, b), self.frame)
 
     def bank_switch(self, addr, value, bank):
         if self.last is not None:
             k = (self.last, bank)
             self.s[k] = self.s.get(k, 0) + 1
+            self.sfirst.setdefault(k, self.frame)
 
     def nmi(self):
         self.nmis += 1
+        self.nmi_frames.add(self.frame)
         self._irq = True
 
     def maria_write(self, reg, value):

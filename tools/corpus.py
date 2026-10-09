@@ -49,7 +49,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-VERSION = 4          # bump when the measure changes, so old cache entries are not reused
+VERSION = 5          # bump when the measure changes, so old cache entries are not reused
 
 
 def find_roms(root):
@@ -74,9 +74,13 @@ def _bytes_of(an, cart, spaces):
     return out
 
 
+FILL_OPCODES = (0x00, 0xFF, 0xEA)       # BRK, an erased ROM, NOP: what fill is made of
+
+
 def _sled(cart, executed, minrun=16):
-    """Executed locations that lie in a run of `minrun` or more identical instructions
-    following one another."""
+    """Executed locations that lie in a run of `minrun` or more of the same FILL
+    instruction following one another (BRK over zeros, $FF, NOP). Not any repeated opcode:
+    an unrolled run of `STA abs` is code someone wrote."""
     import m6502
     by = {}
     for sp, a in executed:
@@ -91,6 +95,11 @@ def _sled(cart, executed, minrun=16):
                 op = cart.byte(sp, a)
                 n = 2 if op == 0 else m6502.LENGTH[op]     # BRK skips a signature byte
             except Exception:                                  # noqa: BLE001
+                continue
+            if op not in FILL_OPCODES:
+                if len(run) >= minrun:
+                    out.update((sp, x) for x in run)
+                run, prev = [], None
                 continue
             if prev is not None and prev[0] + prev[2] == a and prev[1] == op:
                 run.append(a)
@@ -162,23 +171,32 @@ def measure(path, frames=300, drive=True):
     why, ex = {}, {}
     for loc in missed:
         how = col.arrival.get(loc, "?")
-        if how == "fall" and (loc[0], loc[1] - 1) in missed_set:
+        if col.pred.get(loc) in missed_set:
             continue                  # still inside a run that started elsewhere
         why[how] = why.get(how, 0) + 1
         ex.setdefault(how, []).append("%s:%04X" % loc)
     rec["missed_how"] = why
     rec["missed_how_examples"] = {k: v[:3] for k, v in ex.items()}
-    # assisted: add what the run observed, as dyn.py does
-    log = {"x": {}, "j": [("%s:%04X" % a, "%s:%04X" % b) for (a, b) in col.j],
-           "s": {}}
-    for (loc, bank) in col.s:
-        log["s"].setdefault("%s:%04X" % loc, set()).add(bank)
-    doc = {}
-    dyn.merge(doc, log)
-    try:
+    # assisted: add what the run observed, as dyn.py does. Two scores. "In sample" uses
+    # everything the run saw to explain everything the run executed, which is circular --
+    # a ceiling. "Held out" takes the jumps and bank switches seen in the FIRST HALF of the
+    # run and asks how much of the WHOLE run's code they explain, so the code the evidence
+    # could not have come from is in the score.
+    def assist(limit):
+        log = {"x": {}, "j": [("%s:%04X" % a, "%s:%04X" % b) for (a, b) in col.j
+                              if limit is None or col.jfirst.get((a, b), 0) <= limit],
+               "s": {}}
+        for (loc, bank) in col.s:
+            if limit is None or col.sfirst.get((loc, bank), 0) <= limit:
+                log["s"].setdefault("%s:%04X" % loc, set()).add(bank)
+        doc = {}
+        dyn.merge(doc, log)
         an2, _g, _w, _v = disasm.analyse(cart, disasm.Config(data=doc))
         still = sum(1 for loc in col.x if loc not in an2.code and loc not in sled)
-        rec["recall"]["assisted_reached"] = rec["recall"]["executed"] - still
+        return rec["recall"]["executed"] - still
+    try:
+        rec["recall"]["assisted_reached"] = assist(None)
+        rec["recall"]["heldout_reached"] = assist(frames // 2)
     except Exception as e:                                    # noqa: BLE001
         rec["recall"]["assisted_error"] = str(e)[:80]
     # data reads against the static classification
@@ -258,8 +276,17 @@ def report(recs, worst=15):
     tot = sum(r["recall"]["executed"] for r in use)
     got = sum(r["recall"]["reached"] for r in use)
     ass = sum(r["recall"].get("assisted_reached", r["recall"]["reached"]) for r in use)
-    print("  all instructions pooled   static %s   with what the run observed %s   (%d executed)"
-          % (pct(got, tot), pct(ass, tot), tot))
+    held = sum(r["recall"].get("heldout_reached", r["recall"].get("assisted_reached",
+                                                                 r["recall"]["reached"]))
+               for r in use)
+    print("  all instructions pooled   static %s   with what the run observed %s "
+          "(in sample: a ceiling)   held out %s   (%d executed)"
+          % (pct(got, tot), pct(ass, tot), pct(held, tot), tot))
+    medians = sorted(100.0 * r["recall"]["reached"] / r["recall"]["executed"]
+                     for r in use if r["recall"]["executed"])
+    if medians:
+        print("  per cartridge, the median static recall is %.1f%% (pooled figures are "
+              "dominated by the largest runs)" % medians[len(medians) // 2])
     sl = [r.get("sled", 0) for r in use]
     if any(sl):
         print("  left out as sleds (the CPU walking fill, not code): %d instructions in %d cartridges"

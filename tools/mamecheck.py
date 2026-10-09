@@ -38,16 +38,18 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-VERSION = 1
+VERSION = 2
 HANDOVER = 330            # MAME frame after which the cartridge is running (OpenBIOS)
 WINDOW = 360              # frames judged, in each engine
 
 
 def live_frames(rows):
-    """(frames, live) from (dpph, dppl, ctrl) per frame: DMA on and a list pointer in RAM."""
+    """(frames, live) from (dpph, dppl, ctrl) per frame: DMA on and the list pointer in RAM
+    or ROM. The simulator's collector applies the same rule (simprobe.Collector.frame_start),
+    so the two sides answer one question."""
     live = 0
     for dpph, _dppl, ctrl in rows:
-        if (ctrl & 0x60) == 0x40 and 0x18 <= dpph <= 0x27:
+        if (ctrl & 0x60) == 0x40 and (0x18 <= dpph <= 0x27 or dpph >= 0x40):
             live += 1
     return len(rows), live
 
@@ -64,21 +66,67 @@ def parse_survey(path):
     return rows
 
 
+MAME_COMPLAINTS = ("Unsupported mapper", "invalid BIOS", "NOT FOUND", "Fatal error",
+                   "Required files are missing", "bankswitch detected")
+
+
+def mame_complaint(text):
+    """The line MAME printed that says why it cannot run an image, or ''."""
+    for ln in text.splitlines():
+        if any(k in ln for k in MAME_COMPLAINTS):
+            return ln.strip()[:140]
+    return ""
+
+
+def vectors_of(cart):
+    """The NMI/RESET/IRQ vectors of each half of a cartridge, as the six bytes at $FFFA."""
+    out = []
+    for c in ([cart, cart.for_maria()] if cart.bankset else [cart]):
+        try:
+            v = c.vectors()
+            out.append(bytes([v["NMI"] & 0xFF, v["NMI"] >> 8, v["RESET"] & 0xFF,
+                              v["RESET"] >> 8, v["IRQ"] & 0xFF, v["IRQ"] >> 8]))
+        except Exception:                                  # noqa: BLE001
+            continue
+    return out
+
+
 def run_mame(rom, work, seconds=40):
-    """MAME's side: {"ran", "frames", "live", "dli", "why"}."""
+    """MAME's side: {"ran", "frames", "live", "dli", "cart", "why"}.
+
+    "cart" says whether the CARTRIDGE's code is what was running at the end: the six bytes
+    at $FFFA must be the cartridge's own vectors. A cartridge the BIOS rejects leaves the BIOS
+    running its built-in game, which keeps a live display list, so liveness alone proves
+    nothing. "which" says which half of a bankset image supplied them ("cpu"/"maria")."""
+    import cart as cart_module
     import runprobe
     frames = HANDOVER + WINDOW + 10
     env = {"A7800_RS_OUT": os.path.join(work, "survey"), "A7800_RS_FRAMES": str(frames)}
     ok, text, written = runprobe.run(rom, "rendersurvey", work, seconds=seconds, env=env)
     if not ok:
-        return {"ran": False, "why": text[:120]}
+        return {"ran": False, "why": text[:140]}
+    why = mame_complaint(text)
     csv = os.path.join(work, "survey-frames.csv")
     if not os.path.isfile(csv):
-        return {"ran": False, "why": "MAME wrote no frame log"}
+        return {"ran": False, "why": why or "MAME wrote no frame log"}
     rows = [r for r in parse_survey(csv) if r[0] > HANDOVER][:WINDOW]
     n, live = live_frames([(r[2], r[3], r[4]) for r in rows])
-    return {"ran": True, "frames": n, "live": live, "dli": sum(1 for r in rows if r[1]),
-            "why": ""}
+    res = {"ran": True, "frames": n, "live": live, "dli": sum(1 for r in rows if r[1]),
+           "why": why, "cart": None}
+    vec = os.path.join(work, "survey-vectors.txt")
+    if os.path.isfile(vec):
+        got = b""
+        for ln in open(vec):
+            if ln.startswith("vectors"):
+                got = bytes(int(x, 16) for x in ln.split()[1:7])
+        want = vectors_of(cart_module.Cart(rom))
+        res["cart"] = got in want
+        if res["cart"] and len(want) > 1:
+            res["which"] = "cpu" if got == want[0] else "maria"
+        elif not res["cart"]:
+            res["why"] = res["why"] or "the BIOS is still running at the end: the vectors " \
+                                       "are not the cartridge's"
+    return res
 
 
 def run_sim(rom):
@@ -92,7 +140,7 @@ def run_sim(rom):
     t = time.time()
     sim.run(cart, WINDOW, region, drive=True, observer=col)
     return {"ran": True, "frames": WINDOW, "live": col.frames_with_list,
-            "dli": col.nmis, "seconds": round(time.time() - t, 1), "why": ""}
+            "dli": len(col.nmi_frames), "seconds": round(time.time() - t, 1), "why": ""}
 
 
 def measure(rom):
@@ -125,8 +173,10 @@ def measure(rom):
 
 
 def is_live(side):
+    """Running the cartridge: a live display list on half the frames, and (for MAME) the
+    cartridge's own vectors in place rather than the BIOS's."""
     return bool(side.get("ran")) and side.get("frames", 0) > 0 and \
-        side["live"] >= 0.5 * side["frames"]
+        side["live"] >= 0.5 * side["frames"] and side.get("cart") is not False
 
 
 def verdict(rec):
@@ -175,6 +225,9 @@ def report(recs, show=12):
     ok = [r for r in recs if r.get("ok")]
     print("%d cartridges: %d compared, %d not (could not be laid out)"
           % (len(recs), len(ok), len(recs) - len(ok)))
+    for r in recs:
+        if not r.get("ok"):
+            print("    skipped: %-50s %s" % (r.get("name", "?")[:50], r.get("error", "")[:70]))
     if not ok:
         return
     groups = {}
@@ -193,17 +246,24 @@ def report(recs, show=12):
         tot = sum(1 for r in ok if ("bankset" if r.get("bankset") else r.get("mapper", "?")) == k)
         print("    %-12s %3d of %3d" % (k, len(v), tot))
     for title, key in (("SIM ONLY -- MAME cannot be the reference for these", "sim only"),
-                       ("MAME ONLY -- the simulator is missing something", "mame only")):
+                       ("MAME ONLY -- the simulator is missing something", "mame only"),
+                       ("NEITHER -- needs input, does not draw, or the image is wrong",
+                        "neither")):
         rows = groups.get(key, [])
         if rows:
             print("\n%s (%d)" % (title, len(rows)))
             for r in rows[:show]:
-                print("    %-52s %s  mame %s  sim %s" % (
-                    r["name"][:52], r.get("mapper", "?"),
-                    "%d/%d" % (r["mame"].get("live", 0), r["mame"].get("frames", 0))
-                    if r["mame"].get("ran") else "did not run: " + r["mame"].get("why", ""),
-                    "%d/%d" % (r["sim"].get("live", 0), r["sim"].get("frames", 0))
-                    if r["sim"].get("ran") else "did not run: " + r["sim"].get("why", "")))
+                m, s = r["mame"], r["sim"]
+                print("    %-48s %-9s mame %s  sim %s" % (
+                    r["name"][:48], ("bankset" if r.get("bankset") else r.get("mapper", "?")),
+                    ("%d/%d%s" % (m.get("live", 0), m.get("frames", 0),
+                                  "" if m.get("cart") is not False else " (BIOS, not the cart)")
+                     if m.get("ran") else "did not run"),
+                    ("%d/%d" % (s.get("live", 0), s.get("frames", 0))
+                     if s.get("ran") else "did not run")))
+                for side, label in ((m, "mame"), (s, "sim")):
+                    if side.get("why"):
+                        print("        %s says: %s" % (label, side["why"]))
 
 
 def main(argv=None):

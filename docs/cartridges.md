@@ -214,14 +214,19 @@ the other half, at addresses the CPU never reads.
 * **`firstlook.py`** rebuilds the screen from MARIA's half (`Cart.for_maria()`).
 * `gfx.py`, `spriteedit.py` and the workbench's sprite editor take `--side`.
 
-**Not established:** which bank of MARIA's half is in view for a given bank register
-write. The tools use the same bank number on both sides, which is what "two parallel
-sets of banks at the same addresses" says, but only the CPU's side has been read back
-from a running machine. The check that was tried -- tapping reads of `$C000-$C7FF` in
-MAME while the title of `Bubble Bobble (v75a)` (it reads KILOPARSEC) was up -- returned bytes that match neither half at
-the fixed bank's offset, and that image also sets the "halt banked RAM" flag, so its
-display is not simply two ROM halves. A rebuilt screen of a bankset cartridge is a
-reconstruction under that assumption.
+**Not established, and MAME cannot establish it.** Which bank of MARIA's half is in view
+for a given bank register write is assumed to be the same number as the CPU's, which is
+what "two parallel sets of banks at the same addresses" says. Nothing here has read the
+MARIA side back from a running machine, and **MAME 0.264 cannot be asked**: it answers
+`Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images (the header
+values `$2000`, `$2812`, `$E002`, `$2012` all do), and the BIOS is left running its own
+built-in game. That game is KILOPARSEC -- the title screen seen "running" for
+`Bubble Bobble (v75a)` in an earlier check was OpenBIOS's, not the cartridge's, which is also why
+reads tapped from `$C000` matched no half of the file. `tools/mamecheck.py` now tells these apart
+(it compares the vectors MAME is executing with the cartridge's own) and prints MAME's
+message. Treat every MAME-based statement about a bankset image as void; the only evidence
+for the layout is the `a7800` fork's, for the CPU's half. A rebuilt screen of a bankset
+cartridge is a reconstruction under the same-bank-number assumption.
 
 ## 52K
 

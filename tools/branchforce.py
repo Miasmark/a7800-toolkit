@@ -154,13 +154,40 @@ def restore(cart, snap, drive, observer):
     return bus, cpu
 
 
+class Ctx(object):
+    """What the real run established, by position in the FILE (not by space and address),
+    so a bank reached at two addresses -- a SuperGame's last bank fixed at $C000 and in
+    the $8000 window -- is the same bytes whichever way a forced path arrives."""
+
+    def __init__(self, cart, real, data_veto=True):
+        self.cart = cart
+        self.data_veto = data_veto    # a byte the real run read as data is not code
+        self.x = {o for o in map(self.off, real.x) if o is not None}
+        self.d = {o for o in map(self.off, real.d) if o is not None}
+        self.inside = set()
+        for sp, a in real.x:
+            try:
+                n = m6502.LENGTH[cart.byte(sp, a)]
+            except Exception:                              # noqa: BLE001
+                continue
+            for k in range(1, n):
+                o = self.off((sp, a + k))
+                if o is not None:
+                    self.inside.add(o)
+
+    def off(self, loc):
+        try:
+            return self.cart._offset(loc[0], loc[1])
+        except Exception:                                  # noqa: BLE001
+            return None
+
+
 class Trace(simprobe.Collector):
     """What one forced path runs, and the checks that declare it dead."""
 
-    def __init__(self, real, allow_illegal, budget, inside=()):
+    def __init__(self, ctx, allow_illegal, budget):
         simprobe.Collector.__init__(self)
-        self.real = real
-        self.inside = inside          # operand bytes of instructions the real run executed
+        self.ctx = ctx
         self.allow_illegal = allow_illegal
         self.budget = budget
         self.n = 0
@@ -179,11 +206,12 @@ class Trace(simprobe.Collector):
             if not (RAM_CODE[0] <= f <= RAM_CODE[1]):
                 raise Dead("fetch from $%04X" % pc)
         else:
-            if loc in self.real.d and loc not in self.real.x:
+            o = self.ctx.off(loc)
+            if self.ctx.data_veto and o in self.ctx.d and o not in self.ctx.x:
                 raise Dead("%s:%04X is read as data" % loc)
-            if loc in self.inside:
+            if o in self.ctx.inside:
                 raise Dead("%s:%04X is inside an instruction that ran" % loc)
-            if self.n and loc in self.real.x:
+            if self.n and o in self.ctx.x:
                 self.verdict = "joined"
                 raise StopIteration
             if loc not in self.x:
@@ -198,34 +226,20 @@ class Trace(simprobe.Collector):
             raise StopIteration
 
 
-def operand_bytes(cart, real):
-    """Locations that are the 2nd/3rd byte of an instruction the real run executed. Code
-    that starts there is out of step with code that is known to be code."""
-    out = set()
-    for sp, a in real.x:
-        try:
-            n = m6502.LENGTH[cart.byte(sp, a)]
-        except Exception:                                  # noqa: BLE001
-            continue
-        for k in range(1, n):
-            out.add((sp, a + k))
-    return out
-
-
 def force(cart, real, watcher, budget=2000, drive=True, log=None):
     """Run every saved copy down its other side. Returns (kept, dead, trimmed) where
     `kept` maps location -> "joined" / "ran on", `dead` maps branch location -> why."""
     kept, dead = {}, {}
     nfork = 0
-    inside = operand_bytes(cart, real)
+    ctx = Ctx(cart, real)
     for (loc, taken), snaps in sorted(watcher.snaps.items()):
         alt_known = False
         for snap in snaps:
-            tr = Trace(real, watcher.illegal_seen, budget, inside)
+            tr = Trace(ctx, watcher.illegal_seen, budget)
             bus, cpu = restore(cart, snap, drive, tr)
             if not alt_known:
                 t0 = tr.loc(snap["pc"])
-                if t0 is not None and t0 in real.x:
+                if t0 is not None and ctx.off(t0) in ctx.x:
                     alt_known = True
             if alt_known:
                 break
@@ -253,14 +267,17 @@ def force(cart, real, watcher, budget=2000, drive=True, log=None):
 
 def null_rate(cart, real, watcher, n=300, budget=2000, drive=True, seed=1):
     """How often a path started at bytes the real run READ AS DATA is kept anyway. This is
-    the test's false-positive rate: the same snapshots, the same budget, but the start is
-    something known not to be code."""
+    the test's false-positive rate: the same snapshots and budget, started somewhere known
+    not to be code. The veto "this byte was read as data" is switched OFF for it -- with it
+    on, every such path dies at its first fetch and the control cannot fail, which says
+    nothing about the other checks (opcode, address, rejoining real code)."""
     import random
     import re
     rng = random.Random(seed)
-    starts = sorted(l for l in real.d if l not in real.x)
+    ctx = Ctx(cart, real, data_veto=False)
+    starts = sorted(l for l in real.d if ctx.off(l) is not None and ctx.off(l) not in ctx.x)
     snaps = [sn for v in watcher.snaps.values() for sn in v]
-    out = {"joined": 0, "ran on": 0, "dead": 0}
+    out = {"joined": 0, "ran on": 0, "dead": 0, "instructions": 0}
     if not starts or not snaps:
         return out
     for _ in range(n):
@@ -270,7 +287,7 @@ def null_rate(cart, real, watcher, n=300, budget=2000, drive=True, seed=1):
         m = re.match(r"b(\d+)$", loc[0])
         if m:
             snap["bank"] = int(m.group(1))
-        tr = Trace(real, watcher.illegal_seen, budget)
+        tr = Trace(ctx, watcher.illegal_seen, budget)
         bus, cpu = restore(cart, snap, drive, tr)
         try:
             for _i in range(budget + 2):
@@ -284,6 +301,7 @@ def null_rate(cart, real, watcher, n=300, budget=2000, drive=True, seed=1):
             out["dead"] += 1
             continue
         out[tr.verdict or "ran on"] += 1
+        out["instructions"] += len(tr.order)
     return out
 
 
@@ -362,11 +380,11 @@ def main(argv=None):
               len(beyond), sum(1 for v in beyond.values() if v == "joined"),
               sum(1 for v in beyond.values() if v == "ran on")))
     nl = null_rate(r["cart"], r["real"], r["watcher"], 300, args.budget, drive)
-    tot = max(sum(nl.values()), 1)
-    print("  control: paths started at bytes the run read as data -> %.0f%% joined, "
-          "%.0f%% ran on, %.0f%% dead" % (100.0 * nl["joined"] / tot,
-                                          100.0 * nl["ran on"] / tot,
-                                          100.0 * nl["dead"] / tot))
+    tot = max(nl["joined"] + nl["ran on"] + nl["dead"], 1)
+    print("  control: paths started at bytes the run read as data, with that veto off -> "
+          "%.1f%% joined, %.1f%% ran on, %.1f%% dead (%d instructions would be kept)"
+          % (100.0 * nl["joined"] / tot, 100.0 * nl["ran on"] / tot,
+             100.0 * nl["dead"] / tot, nl["instructions"]))
     if args.truth:
         truth = truth_run(r["cart"], args.truth, drive)
         t_beyond = {l for l in beyond if l in truth}

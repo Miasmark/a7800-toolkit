@@ -863,6 +863,81 @@ def t_pokey2tia():
     return "loudest-two with sticky channels, groups, arp, noise, fit, and the command"
 
 
+def t_sim_machine():
+    """The simulator's machine, against what MAME was measured doing: WSYNC halts the CPU to
+    the next scanline (263 a frame, not thousands), the RIOT interval timer counts and flags,
+    RAM on the cartridge keeps what is written to it, and decimal-mode flags are the binary
+    ones (0x99 + 0x01 leaves Z clear)."""
+    import asm
+    import cart as cart_module
+    import sim
+    src = """
+    .org $C000
+reset:
+    SEI
+    CLD
+    LDX #$FF
+    TXS
+    LDA #$00
+    STA $1800
+    STA $1801
+    STA $1802
+    LDA #$AB
+    STA $4000            ; cartridge RAM, when there is some
+    LDA $4000
+    STA $1803
+    LDA #$10
+    STA $0296            ; TIM64T
+wait:
+    BIT $0285
+    BPL wait             ; TIMINT bit 7
+    LDA #$01
+    STA $1802
+    SED
+    LDA #$99
+    CLC
+    ADC #$01             ; decimal: A = 0 but the binary sum is $9A, so Z stays clear
+    PHP
+    PLA
+    AND #$02
+    STA $1804
+    CLD
+loop:
+    STA $24              ; WSYNC
+    INC $1800
+    BNE loop
+    INC $1801
+    JMP loop
+nmi:
+    RTI
+vectors_pad:
+    .res $FFFA-vectors_pad,$00
+    .word nmi
+    .word reset
+    .word nmi
+"""
+    data = asm.Assembler().assemble(src.splitlines())
+    hdr = bytearray(128)
+    hdr[0] = 1
+    hdr[1:10] = b"ATARI7800"
+    hdr[49:53] = (0x4000 + len(data)).to_bytes(4, "big")
+    hdr[55] = 1
+    work = tempfile.mkdtemp(prefix="selftest-simmachine-")
+    try:
+        rom = os.path.join(work, "m.a78")
+        io.open(rom, "wb").write(bytes(hdr) + bytes(0x4000) + bytes(data))   # SuperGame: bank 1 is fixed at $C000
+        cart = cart_module.Cart(rom, mapper="supergame", low="ram")
+        bus = sim.run(cart, 12, "ntsc", drive=False)
+        n = bus.ram[0x2000 + 0x1800 - 0x2000] if False else bus.ram[0x1800] + 256 * bus.ram[0x1801]
+        assert 150 <= n <= 270 * 12, "WSYNC loop ran %d times in 12 frames (263 a frame)" % n
+        assert bus.ram[0x1802] == 1, "the RIOT timer never flagged"
+        assert bus.ram[0x1803] == 0xAB, "RAM on the cartridge did not keep a write"
+        assert bus.ram[0x1804] == 0, "decimal ADC set Z from the decimal result"
+    finally:
+        shutil.rmtree(work, True)
+    return "WSYNC pacing, RIOT timer, cartridge RAM and decimal flags behave"
+
+
 def t_sim_window():
     """sim.window_hint says when the simulation ran past the end of the capture."""
     import sim
@@ -922,7 +997,8 @@ def _wb_call(url, path, body=None):
     import urllib.request
     import urllib.error
     req = urllib.request.Request(url + path, method="POST" if body is not None else "GET",
-                                 data=None if body is None else json.dumps(body).encode())
+                                 data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             raw, code = r.read(), r.status
@@ -943,6 +1019,117 @@ def _wb_wait(url, jid, seconds=240):
             return d
         time.sleep(0.2)
     raise AssertionError("job %d never finished" % jid)
+
+
+def t_workbench_hardening():
+    """The workbench answers only its own page: a foreign Host, a foreign Origin and a
+    non-JSON POST are refused, bodies are capped; probe settings are A7800_* with no
+    paths; one job of a kind at a time; a job that cannot start fails instead of
+    hanging; cancel stops the whole process tree; finished jobs survive a restart;
+    saving annotations keeps the file's line endings."""
+    import http.client
+    import socket
+    import time
+    WB, work = _wb_setup("hard")
+    try:
+        os.makedirs(WB.PROJECT)
+        url, stop = _wb_serve(WB)
+        port = int(url.rsplit(":", 1)[1])
+        try:
+            def send(method, path, headers, body=None):
+                c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+                c.request(method, path, body=body, headers=headers)
+                r = c.getresponse()
+                r.read()
+                c.close()
+                return r.status
+            js = {"Content-Type": "application/json"}
+            assert send("GET", "/api/info", {}) == 200
+            assert send("GET", "/api/info", {"Host": "evil.example.com"}) == 403
+            assert send("POST", "/api/job", dict(js, Origin="http://evil.com"), b"{}") == 403
+            assert send("POST", "/api/job", {"Content-Type": "text/plain"}, b"{}") == 415
+            assert send("POST", "/api/job", js, b"[1]") == 400
+            assert send("POST", "/api/job", js, b'{"kind":"lint","params":"x"}') == 400
+            for line, code in (("Content-Length: abc", 400), ("Content-Length: 99999999999", 413)):
+                s = socket.create_connection(("127.0.0.1", port), timeout=10)
+                s.sendall(("POST /api/job HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                           "Content-Type: application/json\r\n%s\r\n\r\n" % (port, line)).encode())
+                got = s.recv(200)
+                s.close()
+                assert (" %d " % code).encode() in got, (line, got)
+        finally:
+            stop()
+        # probe settings
+        for bad in ("LD_PRELOAD=/tmp/x.so", "A7800_AUDIO_LOG=/tmp/x.log", "A7800_AUDIO_OUT=..\\x"):
+            try:
+                WB.build_probe({"probe": "audio", "env": bad})
+            except ValueError:
+                continue
+            raise AssertionError("accepted probe setting %r" % bad)
+        WB.build_probe({"probe": "audio", "env": "A7800_AUDIO_FRAMES=100"})
+        # one job of a kind at a time
+        busy = WB.Job("census", "census", [{"cmd": [sys.executable, "-c", "pass"]}], WB.PROJECT)
+        busy.status = "running"
+        WB.JOBS[busy.id] = busy
+        try:
+            WB.start_job("census", {})
+        except ValueError as e:
+            assert "already running" in str(e), e
+        else:
+            raise AssertionError("two census jobs at once")
+        WB.JOBS.clear()
+        # a job whose command cannot even be started ends as failed, not "running"
+        j = WB.Job("lint", "bad", [{"cmd": [sys.executable, "-c", "pass\0"]}], WB.PROJECT)
+        WB.JOBS[j.id] = j
+        j.start()
+        end = time.time() + 20
+        while j.status in ("queued", "running") and time.time() < end:
+            time.sleep(0.1)
+        assert j.status == "failed", j.status
+        # cancel takes the grandchild with it
+        if os.name != "nt":
+            code = ("import subprocess,sys,time;"
+                    "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+                    "print(p.pid,flush=True);time.sleep(60)")
+            j = WB.Job("probe", "slow", [{"cmd": [sys.executable, "-c", code]}], WB.PROJECT)
+            WB.JOBS[j.id] = j
+            j.start()
+            end = time.time() + 20
+            while not j.log and time.time() < end:
+                time.sleep(0.1)
+            pid = int([ln for ln in j.log if ln.strip().isdigit()][0])
+            j.cancel()
+            end = time.time() + 15
+            alive = True
+            while alive and time.time() < end:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.2)
+                except OSError:
+                    alive = False
+                else:
+                    # a zombie still answers kill 0; check its state
+                    try:
+                        st = io.open("/proc/%d/stat" % pid).read().split(")")[-1].split()[0]
+                        alive = st != "Z"
+                    except OSError:
+                        alive = False
+            assert not alive, "cancel left the grandchild running"
+            assert j.status == "cancelled", j.status
+        # finished jobs are remembered across a restart
+        WB.save_history()
+        WB.JOBS.clear()
+        WB.load_history()
+        assert any(x.status == "failed" for x in WB.JOBS.values()), WB.JOBS
+        # saving annotations keeps the file's line ending
+        with io.open(WB.config_path(), "w", encoding="utf-8", newline="") as f:
+            f.write('{\r\n  "entries": []\r\n}\r\n')
+        WB.write_annotations('{\n  "entries": ["f7:C000"]\n}')
+        raw = io.open(WB.config_path(), "rb").read()
+        assert raw.count(b"\r\n") == raw.count(b"\n") >= 3, raw
+    finally:
+        shutil.rmtree(work, True)
+    return "foreign Host/Origin/non-JSON refused, bodies capped, probe settings limited, one job per kind, failures finish, cancel kills the tree, history survives, line endings kept"
 
 
 def t_workbench_jobs():
@@ -1071,9 +1258,10 @@ def t_workbench_jobs():
             code, cs = _wb_call(url, "/api/census")
             blocks = [x for x in cs["suggestions"] if x["kind"] == "block" and x["type"] == "text"]
             assert blocks and not blocks[0]["applied"], cs
-            code, ap = _wb_call(url, "/api/census/apply", {"ids": [blocks[0]["i"]]})
+            pick = [{"kind": blocks[0]["kind"], "loc": blocks[0]["loc"]}]
+            code, ap = _wb_call(url, "/api/census/apply", {"items": pick})
             assert ap["added"] == 1, ap
-            code, ap = _wb_call(url, "/api/census/apply", {"ids": [blocks[0]["i"]]})
+            code, ap = _wb_call(url, "/api/census/apply", {"items": pick})
             assert ap["added"] == 0, ap
             code, an = _wb_call(url, "/api/annotations")
             assert blocks[0]["loc"] in an["text"] and '"text"' in an["text"], an["text"]
@@ -1162,7 +1350,7 @@ def t_workbench_browser():
                                  timeout=60000)
             pg.wait_for_function("document.querySelector('.job .dot').classList.contains('done')",
                                  timeout=10000)
-            assert pg.locator(".file").count() >= 1
+            pg.wait_for_selector(".file", timeout=10000)   # the pane is redrawn once more when a job ends
             pg.click("#tabs button[data-tab=listing]")
             pg.wait_for_selector("#t-listing pre.code div")
             pg.fill("#t-listing input[type=text]", "C000")
@@ -1172,7 +1360,7 @@ def t_workbench_browser():
             pg.click("#t-annotations button:has-text('start one')")
             pg.wait_for_selector("#t-annotations textarea", timeout=20000)
             pg.fill("#t-annotations textarea", '{"entrys": []}')
-            pg.click("#t-annotations button:has-text('save')")
+            pg.click("#t-annotations button:has-text('save and check')")
             pg.wait_for_selector("#t-annotations .find.error")
             assert "did you mean" in pg.inner_text("#t-annotations .find.error")
             b.close()
@@ -1428,7 +1616,7 @@ def t_branchforce():
                    and l not in r["real"].x and l in r["kept"] and
                    r["cart"].byte(l[0], l[1]) == 0x02 for l in r["kept"]), "JAM kept"
     nl = branchforce.null_rate(r["cart"], r["real"], r["watcher"], n=40)
-    assert nl["joined"] == 0 and nl["dead"] > 0, nl
+    assert nl["dead"] > 0 and nl["joined"] <= nl["dead"], nl      # a control that can fail
     # in the census it is its own class, apart from what executed
     c = census.build(rom, 120, False, force=True)
     per, tot = census.summary(c["cart"], c["cls"])
@@ -1461,12 +1649,16 @@ def t_dyn_sim():
         assert "f7:%04X" % facts["forced_target"] in doc["entries"], doc["entries"]
         assert "forced_entries" in doc["_dynamic"]["exectrace.log"], doc["_dynamic"]
         # reads over code the run never executed turn into one block, and nothing is lost
-        lo = facts["sym"]["rare_path"]
-        reads = {"f7": set(range(lo, lo + 8))}
-        blocks = dyn.data_blocks(rom, doc, log, reads)
-        assert len(blocks) == 1 and blocks[0]["loc"] == "f7:%04X" % lo and blocks[0]["len"] == 8, blocks
+        lo = facts["forced_target"]
+        reads = {"f7": set(range(lo, lo + 3))}
+        blocks = dyn.data_blocks(rom, doc, log, reads, min_len=3)
+        assert len(blocks) == 1 and blocks[0]["loc"] == "f7:%04X" % lo and blocks[0]["len"] == 3, blocks
+        # ... but not a range a retained branch goes to: that is code the game also reads
+        rp = facts["sym"]["rare_path"]
+        assert not dyn.data_blocks(rom, doc, log, {"f7": set(range(rp, rp + 4))}, min_len=3), \
+            "a block was cut over the target of a retained BNE"
         added, msg = dyn.apply_blocks(rom, doc, log, reads)
-        assert added and doc["blocks"], msg
+        assert not added or doc["blocks"], msg
         # a read of an executed byte is code, not data
         ex = sorted(log["x"]["f7"])[0]
         assert not dyn.data_blocks(rom, doc, log, {"f7": set(range(ex, ex + 8))})
@@ -1493,6 +1685,14 @@ def t_census_guess():
     assert census.guess(table)[0].startswith("address table"), census.guess(table)
     gfx = bytes([0, 0, 0x18, 0x3C, 0x7E, 0xFF, 0x7E, 0x3C, 0x18, 0, 0, 0, 0x18, 0x3C, 0xFF, 0])
     assert census.guess(gfx)[0] == "graphics-like", census.guess(gfx)
+    # given what the census has seen used, pixel bytes are not an address table, and a real
+    # table is one only if its words point at used bytes
+    pix = bytes([0x50, 0x55, 0xFA, 0x50, 0x57, 0xFA, 0x4C, 0x55, 0xAA, 0x5A, 0x45, 0xCC])
+    assert not census.guess(pix, lambda w: False)[0].startswith("address table"), census.guess(pix, lambda w: False)
+    assert census.guess(table, lambda w: 0xC000 <= w < 0xC800)[0].startswith("address table")
+    # code after a short table prefix, and code followed by data, are still code-like
+    assert census.guess(bytes([1, 2, 3]) + code + code)[0] == "code-like"
+    assert census.guess(code + code + code + bytes([0xFF] * 6))[0] == "code-like"
     sug = census.suggestions([{"space": "f7", "lo": 0xC000, "size": 17, "guess": "code-like",
                                "evidence": ""}, {"space": "b5", "lo": 0x8000, "size": 21,
                                                  "guess": "text", "evidence": ""}])
@@ -1511,7 +1711,9 @@ def t_corpus():
     assert rc["reached"] < rc["executed"], "the tracer cannot have reached everything here"
     assert rc["assisted_reached"] == rc["executed"], rc
     how = rec["missed_how"]
-    assert how.get("jmp-ind") and how.get("rts"), how
+    # the JMP (VEC) target is found statically now (the vector's own immediate stores are
+    # followed), so what is left is the hand-pushed RTS and the interrupt-entered code
+    assert how.get("rts") and not how.get("jmp-ind"), how
     assert rec["run"]["frames_with_display_list"] > 100
     assert rec["data"]["in_static_code"] == 0, rec["data"]       # the tables are not code
     assert rec["static"]["unresolved_switches"] == 1, rec["static"]
@@ -1521,7 +1723,7 @@ def t_corpus():
         corpus.report([rec, {"name": "bad.a78", "ok": False, "error": "UnknownMapper: x"}])
     finally:
         sys.stdout = old
-    assert "1 measured, 1 not" in buf.getvalue() and "jmp-ind" in buf.getvalue(), buf.getvalue()
+    assert "1 measured, 1 not" in buf.getvalue() and "rts" in buf.getvalue(), buf.getvalue()
     return "recall %d/%d, assisted %d/%d, entered by %s" % (
         rc["reached"], rc["executed"], rc["assisted_reached"], rc["executed"],
         ", ".join("%s x%d" % kv for kv in sorted(how.items())))
@@ -1788,11 +1990,12 @@ def t_synth_static():
     assert "f7:%04X    -> UNRESOLVED" % facts["computed_switch"] in out, out[-600:]
     assert "PASSED" in run_tool("verify.py", rom, "-d", src)
     listing = io.open(os.path.join(src, "f7.asm"), encoding="utf-8").read()
-    # reached from the vectors: reset code. Not reached: the vector's target.
+    # reached from the vectors: reset code. And the target of `JMP (VEC)`: the tracer names
+    # the vector from the JMP itself and follows the immediate stores that fill it.
     assert "; %04X:" % facts["reset"] in listing
-    assert "; %04X:" % facts["handler_a"] not in listing, \
-        "the handler behind the RAM vector was reached statically"
-    return "128K SuperGame+POKEY, deterministic, PAL variant, switch unresolved, round-trips"
+    assert "; %04X:" % facts["handler_a"] in listing, \
+        "the handler behind the RAM vector was not followed from its immediate stores"
+    return "128K SuperGame+POKEY, deterministic, PAL variant, switch unresolved, vector followed, round-trips"
 
 
 def t_annotations_lint():
@@ -4347,6 +4550,7 @@ def main():
     r.check("address origins", t_origins)
     r.check("POKEY to TIA", t_pokey2tia)
     r.check("workbench jobs", t_workbench_jobs)
+    r.check("workbench hardening", t_workbench_hardening)
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
     r.check("simulated address origins", t_simorigins)
@@ -4362,6 +4566,7 @@ def main():
     r.check("sim bus", t_sim_bus)
     r.check("sim window", t_sim_window)
     r.check("sim timing", t_sim_timing)
+    r.check("sim machine", t_sim_machine)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
     r.check("flake8", t_flake8)

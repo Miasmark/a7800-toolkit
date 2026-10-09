@@ -46,6 +46,10 @@ class Cart(cart.Cart):
 
 
 # ------------------------------------------------------------------ analysis
+CLOBBER_ON_JSR = True        # registers are unknown after a JSR (False: the old behaviour)
+AUTO_RAM_VECTORS = True      # every JMP (RAM) operand is a vector worth following
+
+
 class Analyzer:
     def __init__(self, cart, cfg):
         self.cart = cart
@@ -61,6 +65,7 @@ class Analyzer:
         self.unresolved = []                 # sites we could not resolve
         self.forced_data = set()             # (space, addr) covered by a data block
         self.illegal_stops = set()           # traces abandoned on an illegal opcode
+        self.block_stops = set()             # traces that ran into a declared data block
         self._pending = []
 
     # -- helpers -------------------------------------------------------------
@@ -134,6 +139,8 @@ class Analyzer:
                 seen.add(key)
                 loc = (space, addr)
                 if loc in self.forced_data or not self.cart.in_space(space, addr):
+                    if loc in self.forced_data:
+                        self.block_stops.add(loc)
                     break
                 # manual override: assert which bank is really in the $8000
                 # window here, for paths the constant-tracker cannot follow
@@ -249,6 +256,10 @@ class Analyzer:
                 if mn == "JSR":
                     tspace = self.target_space(space, operand, bank)
                     self.add_entry(tspace, operand, bank, "sub", loc)
+                    # the subroutine may leave anything in A, X and Y: a bank number
+                    # loaded before the call is not known to be the one stored after it
+                    if CLOBBER_ON_JSR:
+                        a = x = y = None
                 elif mn == "JMP" and mode == "abs":
                     tspace = self.target_space(space, operand, bank)
                     self.add_entry(tspace, operand, bank, "sub", loc, (a, x, y))
@@ -694,6 +705,9 @@ class Emitter:
                 nm = self.ref_name((space, addr + i), v)
                 w.append("    .word %-20s ; %04X: %02X %02X"
                          % (nm, addr + i, data[i], data[i + 1]))
+            if len(data) % 2:               # an odd length leaves one byte over
+                w.append("    .byte $%02X                      ; %04X: odd byte left by the "
+                         "words block" % (data[-1], addr + len(data) - 1))
         else:
             # a label can land inside a data block (something references the
             # middle of a table); break the block so the label still gets a
@@ -754,7 +768,18 @@ def analyse(cart, cfg):
     # [lo, hi] pairs; MARIA's display-interrupt slot is the usual one, but it
     # is per-game and there is no way to guess it.
     dli = {}
-    for lo_a, hi_a in cfg.ram_vectors:
+    pairs = list(cfg.ram_vectors)
+    if AUTO_RAM_VECTORS:
+        # a `JMP (vec)` through RAM names the vector itself: the pair of bytes the game
+        # fills with a handler address. Following the immediate-load/store pairs that fill
+        # it needs no declaration.
+        seen_v = {tuple(p) for p in pairs}
+        for (_sp, _a), (mn, mode, operand, _n) in sorted(an.insn.items()):
+            if mn == "JMP" and mode == "ind" and operand is not None and operand < 0x4000:
+                if (operand, operand + 1) not in seen_v:
+                    seen_v.add((operand, operand + 1))
+                    pairs.append((operand, operand + 1))
+    for lo_a, hi_a in pairs:
       for _ in range(8):
         new = []
         for tgt, site in an.scan_ram_vectors(lo_a, hi_a):
@@ -787,6 +812,8 @@ def main():
                     help="what sits at $4000-$7FFF, when the header is wrong")
     ap.add_argument("--mapper", choices=["linear", "supergame", "absolute"],
                     help="override the mapper the header declares")
+    ap.add_argument("--ignore-lint", action="store_true",
+                    help="disassemble even if annotations.py finds errors in the config")
     ap.add_argument("--cycles", action="store_true",
                     help="note each instruction's cycle count")
     ap.add_argument("--check-gaps", action="store_true",
@@ -828,10 +855,15 @@ def main():
                 open(args.config, encoding="utf-8").read(), args.config)
             if report.errors:
                 sys.stderr.write(
-                    "warning: %s has %d problem%s (%s). Run: python tools/annotations.py "
+                    "%s has %d problem%s (%s). Run: python tools/annotations.py "
                     "\"%s\"\n" % (args.config, len(report.errors),
                                    "" if len(report.errors) == 1 else "s",
                                    report.errors[0][:90], args.config))
+                if not args.ignore_lint:
+                    sys.stderr.write("Not disassembling: an annotation the tracer would "
+                                     "misread gives a plausible, wrong listing. Fix it, or "
+                                     "pass --ignore-lint.\n")
+                    return 2
         except Exception:                                    # noqa: BLE001
             pass                    # never let the check get in the way of the work
     try:
@@ -844,9 +876,12 @@ def main():
     em = Emitter(cart, an, cfg, cycles=args.cycles)
     em.gfx, em.gfx_wide = gfx, gfx_wide
     spaces = cart.spaces()
+    # every stretch of the file gets a listing, traced or not, so that the image
+    # rebuilds and verify.py has something to say about all of it
+    listed = set(cart_module.canonical_spaces(cart))
     for space in spaces:
         n = sum(1 for (s, a) in an.code if s == space)
-        if space.startswith("b") and n == 0 and space not in cfg.notes:
+        if n == 0 and space not in listed and space not in cfg.notes:
             continue
         em.emit_space(space, os.path.join(args.outdir, "%s.asm" % space))
     if cart.bankset:
@@ -859,6 +894,11 @@ def main():
             mem.emit_space(space, os.path.join(args.outdir, "m%s.asm" % space))
 
     # ---- report ----
+    if an.block_stops:
+        print("note: %d trace%s ran into a declared data block and stopped there (first: %s); "
+              "if that block is really code, the code after it is not listed"
+              % (len(an.block_stops), "" if len(an.block_stops) == 1 else "s",
+                 ", ".join(fmt_loc(l) for l in sorted(an.block_stops)[:3])))
     print("vectors: NMI=$%04X RESET=$%04X IRQ=$%04X" % (nmi, res, irq))
     print("\ncoverage (bytes reached as code, per 16K space):")
     tot = 0

@@ -107,7 +107,11 @@ def run(rom, probe, out, seconds=30, env=None, playback=None, mame=None,
     os.makedirs(out, exist_ok=True)
     before = {f: os.path.getmtime(os.path.join(out, f)) for f in os.listdir(out)}
     machine = capture.inspect(rom)["machine"]
-    cmd = [exe, machine] + capture.bios_args() + [
+    bios = capture.bios_args()
+    if machine == "a7800p" and bios:
+        # the PAL machine has no -bios a7800pr; give it the open BIOS under its own name
+        roms, bios = capture.pal_overlay(roms), []
+    cmd = [exe, machine] + bios + [
         "-rompath", roms, "-cart", rom, "-video", "none", "-sound", "none",
         "-skip_gameinfo", "-nothrottle", "-seconds_to_run", str(int(seconds))]
     if playback:

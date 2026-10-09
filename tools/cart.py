@@ -280,13 +280,15 @@ class Activision(Mapper):
     name = "activision"
     switch = (0xFF80, 0xFF8F)
     window_banks = 8
+    swapped = False          # the "(OM)" dumps: blocks 14 and 15 the other way round
 
     def regions(self):
+        b8, bE = (0x1C000, 0x1E000) if self.swapped else (0x1E000, 0x1C000)
         return [(0x4000, 0x6000, "fixed", (0x1A000, "h13")),
                 (0x6000, 0x8000, "fixed", (0x18000, "h12")),
-                (0x8000, 0xA000, "fixed", (0x1E000, "h15")),
+                (0x8000, 0xA000, "fixed", (b8, "h15")),
                 (0xA000, 0xE000, "window", None),
-                (0xE000, 0x10000, "fixed", (0x1C000, "h14"))]
+                (0xE000, 0x10000, "fixed", (bE, "h14"))]
 
     def bank_from_write(self, addr, value):
         """The address selects the bank here, not the value written."""
@@ -421,26 +423,31 @@ class Cart(object):
                 if ct & bit]
 
     def _check_activision(self):
-        """An Activision image whose vectors come out wrong is mis-ordered.
+        """An Activision image whose vectors come out wrong is laid out the other way.
 
         Verified against a7800: for a correct dump, $4000 is 8K block 13,
         $8000 is block 15 and $E000 is block 14, and the vectors read back
         sensibly. The "(OM)" dumps in circulation have blocks 14 and 15
-        swapped, so the vectors land in a block full of zeros -- and a7800
-        cannot boot them either, so this is the image being wrong rather than
-        the layout.
+        the other way round, so read the usual way the vectors land in a block
+        full of zeros. MAME 0.264 runs them (Rampage and Double Dragon, vectors
+        in cart code), so the layout is swapped for them -- when the vectors say
+        so -- rather than reported as a bad image.
         """
         if not isinstance(self.map, Activision):
             return
         rst = self.vectors().get("RESET", 0)
-        if 0x4000 <= rst <= 0xFFFF:
+        if 0x4000 <= rst < 0xFFFF:               # $FFFF is erased ROM, not an address
             return
         alt = self.rom[0x1FFFC] | (self.rom[0x1FFFD] << 8)
         extra = ""
-        if 0x4000 <= alt <= 0xFFFF:
-            extra = (" Blocks 14 and 15 look swapped: reading the vectors from "
-                     "block 15 instead gives RESET $%04X. The \"(OM)\" dumps "
-                     "are like this, and no emulator runs them." % alt)
+        if 0x4000 <= alt < 0xFFFF:
+            self.map.swapped = True
+            self._region = list(self.map.regions())
+            self.warnings.append(
+                "this is an \"(OM)\" Activision dump: blocks 14 and 15 are the other way "
+                "round, so they are laid out swapped (RESET $%04X). MAME 0.264 runs it "
+                "that way." % self.vectors().get("RESET", 0))
+            return
         self.warnings.append(
             "this Activision image's reset vector reads $%04X, which is not a "
             "usable address, so the fixed blocks are probably not in the order "
