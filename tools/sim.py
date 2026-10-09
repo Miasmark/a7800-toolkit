@@ -345,8 +345,11 @@ class Bus(object):
                 except Exception:                            # noqa: BLE001
                     return 0xFF
             return self.ram[a]
-        if (a & 0xFF) == 0x28 and 0x20 <= (a & 0xFF) <= 0x3F:
-            # MSTAT: bit 7 set during vertical blank
+        if (a & 0xFF) == 0x28 and a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
+            # MSTAT: bit 7 set during vertical blank. (This used to test only the low
+            # byte, so RAM at $1928, $1A28, $2028 ... read back as MSTAT: Choplifter keeps
+            # the high byte of voice 1's note pointer at $1928, read it as zero, and never
+            # played its second voice.)
             return 0x80 if self.vblank else 0x00
         if a in (0x0008, 0x0009, 0x000A, 0x000B):
             return 0x00                  # INPT0-3: no paddles
@@ -800,8 +803,35 @@ VBLANK_LINES = {"ntsc": 21, "pal": 21}
 DLI_LAG = 15
 
 
+def load_handover(path):
+    """The machine as a BIOS left it, from probes/handover.lua's log and its .ram.
+
+    Returns {"regs": {a, x, y, s, p}, "ram": {address: byte}} for the cartridge's
+    first instruction. Starting from this instead of from zeroed RAM and a bare
+    CPU is what the real BIOS hands a game: OpenBIOS clears $2000-$27FF but
+    leaves $FF in $40-$48 and parts of the stack and zero page, and a game that
+    reads before it writes (Forth systems do) can tell.
+    """
+    import re
+    text = open(path).read()
+    m = re.search(r"A=([0-9A-F]{2}) X=([0-9A-F]{2}) Y=([0-9A-F]{2}) SP=([0-9A-F]{2}) P=([0-9A-F]{2})", text)
+    if not m:
+        raise ValueError("%s is not a handover.lua log" % path)
+    a, x, y, sp, pp = [int(v, 16) for v in m.groups()]
+    data = open(path + ".ram", "rb").read()
+    if len(data) != 0x1C0 + 0x1000:
+        raise ValueError("%s.ram should be $40-$1FF and $1800-$27FF, %d bytes; "
+                         "this one is %d" % (path, 0x1C0 + 0x1000, len(data)))
+    ram = {}
+    for i, b in enumerate(data[:0x1C0]):
+        ram[0x40 + i] = b
+    for i, b in enumerate(data[0x1C0:]):
+        ram[0x1800 + i] = b
+    return {"regs": {"a": a, "x": x, "y": y, "s": sp, "p": pp}, "ram": ram}
+
+
 def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
-        frame_nmi=False, steal=False, log=None):
+        frame_nmi=False, steal=False, log=None, start_state=None):
     """Execute the cartridge for `frames` frames, collecting audio writes.
 
     Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
@@ -823,6 +853,12 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
     """
     bus = Bus(cart, drive=drive)
     cpu = CPU(bus)
+    if start_state:
+        for addr, b in start_state["ram"].items():
+            bus.ram[fold(addr)] = b
+        r = start_state["regs"]
+        cpu.a, cpu.x, cpu.y, cpu.s = r["a"], r["x"], r["y"], r["s"]
+        cpu.p = (r["p"] | U) & ~B & 0xFF
     lines = LINES[region]
     vb_line = lines - VBLANK_LINES[region]
     frame_cycles = lines * CYCLES_PER_LINE
@@ -1054,6 +1090,10 @@ def main():
                          "for comparison.")
     ap.add_argument("--no-nmi", action="store_true",
                     help="do not call the NMI handler each frame")
+    ap.add_argument("--handover", metavar="LOG",
+                    help="start from the machine as the BIOS left it: a log "
+                         "from probes/handover.lua (with its .ram beside it), "
+                         "instead of zeroed RAM and a bare CPU")
     ap.add_argument("--verify", metavar="LOG",
                     help="an emulator capture of the same game, to check "
                          "this against")
@@ -1067,8 +1107,16 @@ def main():
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     frames = args.frames or int(args.seconds * (50 if region == "pal" else 60))
 
+    start_state = None
+    if args.handover:
+        try:
+            start_state = load_handover(args.handover)
+        except (IOError, ValueError) as e:
+            sys.stderr.write("sim: %s\n" % e)
+            return 2
     bus = run(cart, frames, region, drive=args.drive, nmi=not args.no_nmi,
-              frame_nmi=args.frame_nmi, steal=args.dma_steal)
+              frame_nmi=args.frame_nmi, steal=args.dma_steal,
+              start_state=start_state)
     out = args.out or (os.path.splitext(args.rom)[0] + "-sim.log")
     n = write_log(bus, cart, out, region)
     print("%s -- %d frames simulated, %d audio writes, %d changed rows"

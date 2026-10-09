@@ -392,6 +392,46 @@ def t_sim_random():
     return "%d distinct values over 64 reads" % len(seen)
 
 
+def t_sim_bus():
+    """sim.py's bus: RAM whose address merely ends in $28 is RAM, not MSTAT; MSTAT
+    answers at $28 and its mirror $128; RAM through both views of the zero page and
+    stack is the same bytes; a BIOS hand-over loads where it should."""
+    import sim
+
+    class FakeCart(object):
+        nbanks = 1
+        def pokeys(self):
+            return []
+        def space_of(self, a, b):
+            return None
+        def byte(self, sp, a):
+            return 0xFF
+
+    bus = sim.Bus(FakeCart())
+    bus.vblank = True
+    for a in (0x1928, 0x1A28, 0x2028, 0x2728):
+        bus.ram[a] = 0x5A
+        assert bus.read(a) == 0x5A, "RAM at $%04X reads back as MSTAT" % a
+    assert bus.read(0x28) == 0x80 and bus.read(0x128) == 0x80
+    bus.vblank = False
+    assert bus.read(0x28) == 0x00
+    bus.write(0x93, 0x77)                       # zero page, through its low view
+    assert bus.ram[0x2093] == 0x77 and bus.read(0x2093) == 0x77
+    # a hand-over from probes/handover.lua: registers and RAM
+    work = tempfile.mkdtemp(prefix="selftest-ho-")
+    log = os.path.join(work, "ho.log")
+    io.open(log, "w").write("handover at frame 322: A=60 X=FF Y=01 SP=FF P=B5 (D=0 I=1)\n")
+    ram = bytearray(0x1C0 + 0x1000)
+    ram[0x93 - 0x40] = 0x42
+    ram[0x1C0 + (0x1928 - 0x1800)] = 0xB0
+    io.open(log + ".ram", "wb").write(bytes(ram))
+    st = sim.load_handover(log)
+    assert st["regs"] == {"a": 0x60, "x": 0xFF, "y": 1, "s": 0xFF, "p": 0xB5}
+    assert st["ram"][0x93] == 0x42 and st["ram"][0x1928] == 0xB0
+    shutil.rmtree(work, True)
+    return "$xx28 is RAM, MSTAT at $28/$128, zero-page mirror, hand-over loads"
+
+
 def t_cycles():
     import m6502
     if len(m6502.CYCLES) != 256:
@@ -3603,6 +3643,7 @@ def main():
     r.check("TIA periods", t_tia_periods)
     r.check("address origins", t_origins)
     r.check("POKEY to TIA", t_pokey2tia)
+    r.check("sim bus", t_sim_bus)
     r.check("sim timing", t_sim_timing)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
