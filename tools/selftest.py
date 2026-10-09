@@ -843,6 +843,18 @@ def t_pokey2tia():
     return "loudest-two with sticky channels, groups, arp, noise, fit, and the command"
 
 
+def t_sim_window():
+    """sim.window_hint says when the simulation ran past the end of the capture."""
+    import sim
+    ref = [(1, "z"), (334, "a"), (700, "b"), (1199, "c")]       # power-on frames
+    near = [(1, "z"), (12, "a"), (378, "b"), (877, "c")]        # 322 earlier
+    assert sim.window_hint(ref, near, 882) is None
+    longer = sim.window_hint(ref, near, 1200)
+    assert longer and 870 <= longer <= 920, longer
+    assert sim.window_hint(ref[:1], near, 1200) is None
+    return "a 1,200-frame run against a capture that covers 877 is flagged"
+
+
 def t_sim_timing():
     """sim.py's frame is MAME's: 263 lines of 113.5 cycles, VBLANK rising 242 lines
     after the display starts, and a display interrupt taken as its flagged zone
@@ -3644,6 +3656,7 @@ def main():
     r.check("address origins", t_origins)
     r.check("POKEY to TIA", t_pokey2tia)
     r.check("sim bus", t_sim_bus)
+    r.check("sim window", t_sim_window)
     r.check("sim timing", t_sim_timing)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)

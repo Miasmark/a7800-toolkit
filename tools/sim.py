@@ -22,23 +22,28 @@ like for like -- same emulator, no input, same length -- across five TIA
 cartridges that play music on their own:
 
     Ikari Warriors    agreement 99.4%   progress 100.0%   timing 1.00x
-    Midnight Mutants            43.9%             100.0%         1.00x
-    Donkey Kong                 73.0%             100.0%         1.00x
-    Dark Chambers               46.6%             100.0%         1.00x
-    Choplifter                  55.6%             100.0%         1.00x
+    Midnight Mutants            94.3%             100.0%         1.00x
+    Donkey Kong                 99.2%             100.0%         1.00x
+    Dark Chambers               98.3%             100.0%         1.00x
+    Choplifter                  79.6%             100.0%         1.00x
 
-(Re-measured against the Trebor's PROPack v8_17 ROMs and MAME 0.264 with the
-7800OpenBIOS, after the timing and bus fixes below: Ikari over 882 frames, which is
-the stretch of the simulator's run that the capture covers -- the simulator counts
-from the cartridge's reset, MAME from power-on, 322 frames earlier with
-OpenBIOS -- and the others over 1,200. The earlier figures for the middle three
-(99.0, 89.0 and 78.4 per cent) came from runs whose lengths were not recorded and
-could not be reproduced at 20 seconds.)
+Measured against the Trebor's PROPack v8_17 ROMs and MAME 0.264 with the
+7800OpenBIOS, **over the same stretch of play**: 882 frames of the simulator, which
+is what a 1,200-frame MAME capture covers, because the simulator counts from the
+cartridge's reset and MAME from power-on, 322 frames earlier with OpenBIOS. Scoring
+a longer simulator run against the capture counts everything it plays after the
+capture ended as disagreement: the same simulator scored Midnight Mutants 43.9%
+over 1,200 frames and 94.3% over 882.
 
-Ikari Warriors reproduces a commercial game's music from its own code, 520 of
-529 states, with the frame clock exact. The others reach the end of the
-reference at the right pace but play it with a different order of events, which
-has not been traced -- Choplifter included, whose second voice now plays.
+Reference states reproduced, in order: Ikari 520 of 529, Midnight Mutants 83 of 83
+(the five extra states are a note that starts on the capture's last frame), Dark
+Chambers 173 of 173, Donkey Kong 119 of 120, Choplifter 148 of 180. The differences
+left in Ikari are one-frame envelope steps; Choplifter's 32 have not been traced.
+(The earlier figures for the middle three, 99.0, 89.0 and 78.4 per cent, came from
+runs whose lengths were not recorded and could not be reproduced.)
+
+Four of five reproduce a commercial game's music from its own code, with the frame
+clock exact in every one. That is what this was built to do.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
 generates its music from POKEY's random register and cannot be scored by log
@@ -1015,6 +1020,25 @@ def compare(sim_rows, ref_rows):
             "sim_states": len(sim), "ref_states": len(ref)}
 
 
+def window_hint(ref_rows, sim_rows, frames, slack=30):
+    """How many frames of simulation cover what the reference does, if it ran longer.
+
+    The simulator counts frames from the cartridge's reset and an emulator from
+    power-on, so the same moment has a larger frame number in the capture; the
+    difference is read off the first thing each played. A simulation that runs on
+    past the end of the capture has its extra states scored as disagreement: the
+    same run scored Midnight Mutants 43.9% over 1,200 frames and 94.3% over 882.
+    Returns None when the two already span the same stretch (within `slack`).
+    """
+    if len(ref_rows) < 2 or len(sim_rows) < 2:
+        return None
+    offset = ref_rows[1][0] - sim_rows[1][0]
+    covered = ref_rows[-1][0] - offset
+    if frames > covered + slack and covered > 0:
+        return covered + slack
+    return None
+
+
 def write_log(bus, cart, path, region="ntsc"):
     """The same per-frame format probes/audio.lua produces."""
     bases = cart.pokeys()
@@ -1123,8 +1147,15 @@ def main():
           % (os.path.basename(out), frames, len(bus.writes), n))
 
     if args.compare:
-        r = compare(read_log(out), read_log(args.compare))
+        sim_rows, ref_rows = read_log(out), read_log(args.compare)
+        r = compare(sim_rows, ref_rows)
         print("compared with %s" % os.path.basename(args.compare))
+        cover = window_hint(ref_rows, sim_rows, frames)
+        if cover:
+            print("  NOTE: the simulation ran %d frames but the capture ends about "
+                  "%d frames in\n  (the capture counts from power-on, this from "
+                  "reset): what it plays after that\n  is scored as disagreement. "
+                  "Try --frames %d." % (frames, cover - 30, cover))
         print("  reference %d states, simulated %d"
               % (r["ref_states"], r["sim_states"]))
         print("  agreement  %5.1f%%  of what it played is the reference's, "
