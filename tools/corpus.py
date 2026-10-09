@@ -49,7 +49,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-VERSION = 3          # bump when the measure changes, so old cache entries are not reused
+VERSION = 4          # bump when the measure changes, so old cache entries are not reused
 
 
 def find_roms(root):
@@ -71,6 +71,36 @@ def _bytes_of(an, cart, spaces):
         n = an.insn[(sp, a)][3]
         for i in range(n):
             out[sp].add(a + i)
+    return out
+
+
+def _sled(cart, executed, minrun=16):
+    """Executed locations that lie in a run of `minrun` or more identical instructions
+    following one another."""
+    import m6502
+    by = {}
+    for sp, a in executed:
+        by.setdefault(sp, []).append(a)
+    out = set()
+    for sp, addrs in by.items():
+        addrs.sort()
+        run = []
+        prev = None
+        for a in addrs:
+            try:
+                op = cart.byte(sp, a)
+                n = 2 if op == 0 else m6502.LENGTH[op]     # BRK skips a signature byte
+            except Exception:                                  # noqa: BLE001
+                continue
+            if prev is not None and prev[0] + prev[2] == a and prev[1] == op:
+                run.append(a)
+            else:
+                if len(run) >= minrun:
+                    out.update((sp, x) for x in run)
+                run = [a]
+            prev = (a, op, n)
+        if len(run) >= minrun:
+            out.update((sp, x) for x in run)
     return out
 
 
@@ -116,7 +146,15 @@ def measure(path, frames=300, drive=True):
                   "seconds": round(time.time() - t, 1)}
     # recall: executed instructions the static pass reached
     missed = sorted(loc for loc in col.x if loc not in an.code)
-    rec["recall"] = {"executed": len(col.x), "reached": len(col.x) - len(missed)}
+    # A sled is a long run of the same instruction executed back to back: the CPU walking
+    # zero fill (BRK, whose handler is an RTI) or $EA fill. It is real execution but not
+    # code anyone wrote, and a tracer is right not to follow it, so it is left out of the
+    # score and reported on its own.
+    sled = _sled(cart, col.x)
+    missed = [l for l in missed if l not in sled]
+    rec["sled"] = len(sled)
+    rec["recall"] = {"executed": len(col.x) - len(sled),
+                     "reached": len(col.x) - len(sled) - len(missed)}
     rec["missed_examples"] = ["%s:%04X" % l for l in missed[:6]]
     # why: for every missed location execution did not reach from another missed one,
     # how did it arrive? (the instruction that ran before it, or RAM, or an interrupt)
@@ -139,8 +177,8 @@ def measure(path, frames=300, drive=True):
     dyn.merge(doc, log)
     try:
         an2, _g, _w, _v = disasm.analyse(cart, disasm.Config(data=doc))
-        still = sum(1 for loc in col.x if loc not in an2.code)
-        rec["recall"]["assisted_reached"] = len(col.x) - still
+        still = sum(1 for loc in col.x if loc not in an2.code and loc not in sled)
+        rec["recall"]["assisted_reached"] = rec["recall"]["executed"] - still
     except Exception as e:                                    # noqa: BLE001
         rec["recall"]["assisted_error"] = str(e)[:80]
     # data reads against the static classification
@@ -222,6 +260,10 @@ def report(recs, worst=15):
     ass = sum(r["recall"].get("assisted_reached", r["recall"]["reached"]) for r in use)
     print("  all instructions pooled   static %s   with what the run observed %s   (%d executed)"
           % (pct(got, tot), pct(ass, tot), tot))
+    sl = [r.get("sled", 0) for r in use]
+    if any(sl):
+        print("  left out as sleds (the CPU walking fill, not code): %d instructions in %d cartridges"
+              % (sum(sl), sum(1 for x in sl if x)))
     per = [(r["recall"]["reached"] / float(r["recall"]["executed"]) if r["recall"]["executed"] else 1.0, r)
            for r in use]
     for lo, hi in ((0.999, 1.01), (0.99, 0.999), (0.95, 0.99), (0.8, 0.95), (0, 0.8)):

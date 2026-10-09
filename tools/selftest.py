@@ -1066,6 +1066,17 @@ def t_workbench_jobs():
             code, j = _wb_call(url, "/api/job", {"kind": "census", "params": {"seconds": 5}})
             d2 = _wb_wait(url, j["id"])
             assert d2["status"] == "done" and "--merge" in d2["commands"][0], d2["commands"]
+            # its suggestions are offered, can be added to the annotations once, and a
+            # second press changes nothing
+            code, cs = _wb_call(url, "/api/census")
+            blocks = [x for x in cs["suggestions"] if x["kind"] == "block" and x["type"] == "text"]
+            assert blocks and not blocks[0]["applied"], cs
+            code, ap = _wb_call(url, "/api/census/apply", {"ids": [blocks[0]["i"]]})
+            assert ap["added"] == 1, ap
+            code, ap = _wb_call(url, "/api/census/apply", {"ids": [blocks[0]["i"]]})
+            assert ap["added"] == 0, ap
+            code, an = _wb_call(url, "/api/annotations")
+            assert blocks[0]["loc"] in an["text"] and '"text"' in an["text"], an["text"]
         finally:
             WB.environment = real
             stop()

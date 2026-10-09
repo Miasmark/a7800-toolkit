@@ -548,6 +548,8 @@ def build_census(p):
     cmd = _py("census.py", ROM, "-o", out, "--frames", frames)
     if _bool(p, "explore", True):
         cmd.append("--explore")
+    if _bool(p, "force", False):
+        cmd.append("--force")
     if os.path.isfile(config_path()):
         cmd += ["-c", config_path()]
     prev = os.path.join(out, "census.json")
@@ -685,6 +687,7 @@ def _kinds():
              build=build_census,
              params=[p("seconds", "seconds of play", "int", 30, min=5, max=600),
                      p("explore", "sweep the joystick and console switches too", "bool", True),
+                     p("force", "also take untaken branches (slow)", "bool", False),
                      p("accumulate", "add to the previous census", "bool", True)]),
         dict(kind="profile", label="Where the time goes", group="Measure", mame=False,
              about="Where the 6502 spends its cycles, grouped under the routine "
@@ -774,6 +777,52 @@ def write_annotations(text):
     with io.open(config_path(), "w", encoding="utf-8", newline="\n") as f:
         f.write(text if text.endswith("\n") else text + "\n")
     return lint_annotations(text)
+
+
+def census_suggestions():
+    """What the last census proposed for annotations.json, each with an index the page
+    sends back, and whether the annotations already have it."""
+    path = os.path.join(PROJECT, "census", "census.json")
+    if not os.path.isfile(path):
+        return {"exists": False, "suggestions": []}
+    sug = json.load(io.open(path, encoding="utf-8")).get("suggestions", [])
+    cfg = {}
+    if os.path.isfile(config_path()):
+        try:
+            cfg = json.load(io.open(config_path(), encoding="utf-8"))
+        except ValueError:
+            cfg = {}
+    have_e = {str(e).upper().replace("$", "") for e in cfg.get("entries", [])}
+    have_b = {str(b.get("loc", "")).upper().replace("$", "") for b in cfg.get("blocks", [])}
+    out = []
+    for i, x in enumerate(sug):
+        y = dict(x)
+        y["i"] = i
+        loc = x["loc"].upper()
+        y["applied"] = loc in (have_e if x["kind"] == "entry" else have_b)
+        out.append(y)
+    return {"exists": True, "suggestions": out}
+
+
+def apply_census(ids):
+    """Add the chosen census suggestions to annotations.json (creating it), once each."""
+    cur = {s["i"]: s for s in census_suggestions()["suggestions"]}
+    cfg = {}
+    if os.path.isfile(config_path()):
+        cfg = json.load(io.open(config_path(), encoding="utf-8"))
+    added = 0
+    for i in ids:
+        x = cur.get(int(i))
+        if x is None or x["applied"]:
+            continue
+        if x["kind"] == "entry":
+            cfg.setdefault("entries", []).append(x["loc"])
+        else:
+            cfg.setdefault("blocks", []).append(
+                {"loc": x["loc"], "len": int(x["len"]), "type": x.get("type", "bytes")})
+        added += 1
+    findings = write_annotations(json.dumps(cfg, indent=2)) if added else []
+    return {"added": added, "findings": findings}
 
 
 def listing_files():
@@ -872,6 +921,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"files": listing_files()})
             if p == "/api/annotations":
                 return self._send(200, read_annotations())
+            if p == "/api/census":
+                return self._send(200, census_suggestions())
         except (ValueError, TypeError) as e:
             return self._send(400, {"error": str(e)})
         except Exception as e:                                # noqa: BLE001
@@ -899,6 +950,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": bool(job)})
             if self.path == "/api/annotations":
                 return self._send(200, {"findings": write_annotations(body.get("text", ""))})
+            if self.path == "/api/census/apply":
+                return self._send(200, apply_census(body.get("ids") or []))
             if self.path == "/api/open":
                 kind = body.get("kind")
                 if kind == "sprite":
@@ -1257,11 +1310,33 @@ async function drawJob(first){
     for(const f of outs) g.append(fileCard(f));
     right.append(g);
   }
+  if(d.kind==='census' && d.status==='done') await drawCensusSuggestions(right);
   clearTimeout(POLL);
   const live=d.status==='running'||d.status==='queued';
   if(SEEN[CUR]==='live' && !live && !$('t-results').hidden){ SEEN[CUR]='final'; drawResults(); return; }
   SEEN[CUR]=live?'live':'final';
   if(live) POLL=setTimeout(()=>{ if(!$('t-results').hidden) drawJob(); },1500);
+}
+async function drawCensusSuggestions(right){
+  const c=await api('/api/census');
+  if(!c.exists||!c.suggestions.length) return;
+  right.append(el('h2',{text:'suggested for annotations ('+c.suggestions.length+')'}),
+    el('div',{class:'muted',text:'Guesses from what the run did not reach. Tick the ones that look right in the listing; nothing is added until you press the button.'}));
+  const box=el('div',{});
+  const checks=[];
+  for(const s of c.suggestions){
+    const cb=el('input',{type:'checkbox'}); cb.disabled=s.applied; checks.push([cb,s.i]);
+    const what=s.kind==='entry'?('entry '+s.loc+' ('+s.size+' bytes)'):(s.type+' block '+s.loc+' ('+s.len+' bytes)');
+    box.append(el('div',{},cb,' ',el('span',{text:what}),' ',el('span',{class:'muted',text:(s.applied?'already in annotations -- ':'')+s.why})));
+  }
+  right.append(box);
+  const status=el('span',{class:'muted'});
+  right.append(el('button',{text:'add ticked to annotations',onclick:async()=>{
+    const ids=checks.filter(x=>x[0].checked).map(x=>x[1]);
+    try{ const r=await api('/api/census/apply',{ids:ids});
+      status.textContent=r.added+' added'+(r.findings&&r.findings.length?'; '+r.findings.length+' lint finding(s) -- see Annotations':'');
+    }catch(e){ status.textContent=e.message; }
+  }}),' ',status);
 }
 function fileCard(f){
   const url='/api/file?path='+encodeURIComponent(f.path);

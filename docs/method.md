@@ -55,6 +55,9 @@ them (Mat Mania went from 244 to 2133 instructions in 900 frames) but can also c
 so neither run contains the other. `--force` goes further and takes the untaken side of each branch in a
 sandbox (`tools/branchforce.py`); what that finds is marked as its own class, because a forced path may
 be one the game never reaches.
+After a census job the Results page lists what it suggests for the annotations -- entry points for dark
+code-like areas and for code branch forcing found, text and address-table blocks -- each with a tick box;
+"add ticked to annotations" writes them into `annotations.json` (once each) and the lint runs on the result.
 
 It is also where the later steps live. **Run** starts the toolkit's other tools on
 the cartridge -- the first-look report, the disassembly, *observe code* and *find

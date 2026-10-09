@@ -67,6 +67,7 @@ class Collector(sim.Observer):
         self._irq = False
         self.frames_with_list = 0
         self.arrival = {}            # location -> how it was first reached
+        self.pred = {}               # location -> the location fetched just before it, first time
 
     def attach(self, bus, cpu):
         sim.Observer.attach(self, bus, cpu)
@@ -115,6 +116,7 @@ class Collector(sim.Observer):
         if loc is not None:
             if loc not in self.x:
                 self.arrival[loc] = self._how(pc)
+                self.pred[loc] = self.last         # the instruction that ran just before
             self.x.add(loc)
             if self.profile is not None:
                 self.profile[loc] = self.profile.get(loc, 0) + m6502.CYCLES[opcode]
