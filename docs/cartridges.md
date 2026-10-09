@@ -225,19 +225,23 @@ the other half, at addresses the CPU never reads.
 * **`firstlook.py`** rebuilds the screen from MARIA's half (`Cart.for_maria()`).
 * `gfx.py`, `spriteedit.py` and the workbench's sprite editor take `--side`.
 
-**Not established, and MAME cannot establish it.** Which bank of MARIA's half is in view
-for a given bank register write is assumed to be the same number as the CPU's, which is
-what "two parallel sets of banks at the same addresses" says. Nothing here has read the
-MARIA side back from a running machine, and **MAME 0.264 cannot be asked**: it answers
+**Not established here, but the `a7800` fork can establish it.** Which bank of MARIA's half
+is in view for a given bank register write is assumed to be the same number as the CPU's,
+which is what "two parallel sets of banks at the same addresses" says. Nothing here has read
+the MARIA side back from a running machine. The 7800-devtools `a7800` fork runs bankset
+cartridges (docs/emulation.md), so it is the machine to ask; it is not installed in the
+environment this was written in, and **mainline MAME 0.264 cannot be asked**: it answers
 `Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images (the header
 values `$2000`, `$2812`, `$E002`, `$2012` all do), and the BIOS is left running its own
 built-in game. That game is KILOPARSEC -- the title screen seen "running" for
 `Bubble Bobble (v75a)` in an earlier check was OpenBIOS's, not the cartridge's, which is also why
 reads tapped from `$C000` matched no half of the file. `tools/mamecheck.py` now tells these apart
 (it compares the vectors MAME is executing with the cartridge's own) and prints MAME's
-message. Treat every MAME-based statement about a bankset image as void; the only evidence
+message. Treat every statement about a bankset image that rests on mainline MAME 0.264 as void; the only evidence
 for the layout is the `a7800` fork's, for the CPU's half. A rebuilt screen of a bankset
-cartridge is a reconstruction under the same-bank-number assumption.
+cartridge is a reconstruction under the same-bank-number assumption until it is checked on the
+fork (`capture.py` already recognises it and uses debugger watchpoints; `mamecheck.py` does
+not yet drive it).
 
 ## 52K
 
