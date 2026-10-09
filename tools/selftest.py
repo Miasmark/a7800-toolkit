@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -871,6 +872,258 @@ def t_sim_timing():
     assert len(nmi) == 1 and 80.0 <= nmi[0] < 80.5, nmi
     assert len(vb) == 1 and 242.0 <= vb[0] < 242.2, vb
     return "NMI at line %.2f, VBLANK at line %.2f of 263" % (nmi[0], vb[0])
+
+
+def _wb_setup(tag):
+    """Point the workbench module at the synthetic cartridge and a fresh project."""
+    import cart as cart_module
+    import workbench as WB
+    work = tempfile.mkdtemp(prefix="selftest-wb-%s-" % tag)
+    rom = os.path.join(work, "game.a78")
+    shutil.copy(os.path.join(ROOT, "tests", "carts", "synth128.a78"), rom)
+    WB.ROM, WB.CART = rom, cart_module.Cart(rom)
+    WB.PROJECT = os.path.join(work, "game-workbench")
+    WB.JOBS.clear()
+    return WB, work
+
+
+def _wb_serve(WB):
+    """The workbench's HTTP server on a free port, in a thread: (url, stop)."""
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), WB.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def stop():
+        srv.shutdown()
+        srv.server_close()
+    return "http://127.0.0.1:%d" % srv.server_address[1], stop
+
+
+def _wb_call(url, path, body=None):
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url + path, method="POST" if body is not None else "GET",
+                                 data=None if body is None else json.dumps(body).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw, code = r.read(), r.status
+    except urllib.error.HTTPError as e:
+        raw, code = e.read(), e.code
+    try:
+        return code, json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return code, raw
+
+
+def _wb_wait(url, jid, seconds=240):
+    import time
+    end = time.time() + seconds
+    while time.time() < end:
+        code, d = _wb_call(url, "/api/job?id=%d&since=0" % jid)
+        if d["status"] in ("done", "failed", "cancelled"):
+            return d
+        time.sleep(0.2)
+    raise AssertionError("job %d never finished" % jid)
+
+
+def t_workbench_jobs():
+    """The workbench runs the toolkit's tools as jobs: the right command lines in the
+    right order, project files and no others served, annotations saved and checked,
+    emulator jobs refused (with the reason) when there is no emulator, and the whole
+    thing over HTTP."""
+    WB, work = _wb_setup("jobs")
+    try:
+        # the command lines
+        job = WB.build_observe({"seconds": 12})
+        tools = [os.path.basename(c["cmd"][1]) for c in job.steps]
+        assert tools == ["runprobe.py", "init.py", "dyn.py", "disasm.py"], tools
+        assert job.steps[0]["cmd"][3] == "exectrace" and "A7800_XT_BANKS=8" in job.steps[0]["cmd"]
+        assert job.steps[-1].get("soft"), "the listing refresh must not fail the job"
+        os.makedirs(WB.PROJECT)
+        io.open(WB.config_path(), "w").write("{}")
+        job = WB.build_addresses({})
+        assert "init.py" not in [os.path.basename(c["cmd"][1]) for c in job.steps], \
+            "an existing annotations file must not be re-created"
+        for bad in ({"seconds": "x"}, {"seconds": 1}, {"seconds": 99999}):
+            try:
+                WB.build_observe(bad)
+            except ValueError:
+                continue
+            raise AssertionError("accepted %r" % bad)
+        # arguments that name probes and settings are checked, not passed through
+        try:
+            WB.build_probe({"probe": "nosuch"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unknown probe was accepted")
+        try:
+            WB.build_probe({"probe": "audio", "env": "BAD LINE"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a malformed setting was accepted")
+        # the project folder is a wall
+        os.makedirs(os.path.join(WB.PROJECT, "src"))
+        io.open(os.path.join(WB.PROJECT, "src", "a.asm"), "w").write("x")
+        io.open(os.path.join(work, "secret.txt"), "w").write("no")
+        assert WB.project_file("src/a.asm")
+        for rel in ("../secret.txt", "src/../../secret.txt", os.path.join(work, "secret.txt"),
+                    "", "src", "nosuch"):
+            assert WB.project_file(rel) is None, rel
+        # jobs that need MAME say why not
+        real = WB.environment
+        WB.environment = lambda: {"ready": False, "problem": "MAME was not found. selftest"}
+        try:
+            WB.start_job("observe", {})
+        except ValueError as e:
+            assert "MAME was not found" in str(e)
+        else:
+            raise AssertionError("an emulator job started without an emulator")
+        finally:
+            WB.environment = real
+        shutil.rmtree(WB.PROJECT)
+
+        # over HTTP
+        url, stop = _wb_serve(WB)
+        try:
+            code, kinds = _wb_call(url, "/api/kinds")
+            assert code == 200 and {"firstlook", "disasm", "observe", "probe"} <= \
+                {k["kind"] for k in kinds["kinds"]}
+            assert all("build" not in k for k in kinds["kinds"])
+            code, j = _wb_call(url, "/api/job", {"kind": "disasm", "params": {}})
+            assert code == 200 and j["status"] in ("running", "queued", "done"), j
+            d = _wb_wait(url, j["id"])
+            assert d["status"] == "done", d["lines"][-5:]
+            assert any(o["path"] == "src/f7.asm" for o in d["outputs"]), d["outputs"]
+            code, listing = _wb_call(url, "/api/listing")
+            assert listing["files"][0]["path"] == "src/f7.asm", listing   # fixed bank first
+            code, text = _wb_call(url, "/api/file?path=src/f7.asm")
+            assert code == 200 and b".org $C000" in text
+            for rel in ("../secret.txt", "%2e%2e/secret.txt"):
+                assert _wb_call(url, "/api/file?path=" + rel)[0] == 404, rel
+            assert _wb_call(url, "/api/job", {"kind": "nosuch"})[0] == 400
+            assert _wb_call(url, "/api/job", {"kind": "lint"})[0] == 400      # nothing to check yet
+            assert _wb_call(url, "/favicon.ico")[0] == 204
+            # annotations: start, break, mistype, fix
+            code, a = _wb_call(url, "/api/annotations")
+            assert a["exists"] is False
+            code, j = _wb_call(url, "/api/job", {"kind": "newannot", "params": {}})
+            assert _wb_wait(url, j["id"])["status"] == "done"
+            code, a = _wb_call(url, "/api/annotations")
+            assert a["exists"] and a["findings"] == [], a["findings"]
+            assert _wb_call(url, "/api/annotations", {"text": "{ nope"})[0] == 400
+            assert json.loads(open(WB.config_path()).read()), "a refused save must not touch the file"
+            code, r = _wb_call(url, "/api/annotations", {"text": '{"entrys": []}'})
+            assert any("entries" in f["message"] for f in r["findings"]), r
+            code, r = _wb_call(url, "/api/annotations", {"text": '{"entries": ["f7:C000"]}'})
+            assert code == 200 and r["findings"] == [], r
+            code, j = _wb_call(url, "/api/job", {"kind": "lint", "params": {}})
+            assert _wb_wait(url, j["id"])["status"] == "done"
+        finally:
+            stop()
+    finally:
+        shutil.rmtree(work, True)
+        WB.JOBS.clear()
+    return ("observe/addresses command chains, parameter checks, project folder walled, "
+            "emulator jobs refused cleanly, disassemble / annotations round trip over HTTP")
+
+
+def t_workbench_mame():
+    """An emulator job through the workbench: cycle budget and a generic probe."""
+    ctx = _mame_ctx()
+    if not ctx:
+        return None
+    WB, work = _wb_setup("mame")
+    try:
+        url, stop = _wb_serve(WB)
+        try:
+            code, j = _wb_call(url, "/api/job", {"kind": "budget", "params": {
+                "seconds": 5, "from_frame": 100, "frames": 150}})
+            assert code == 200, j
+            d = _wb_wait(url, j["id"])
+            assert d["status"] == "done", d["lines"][-6:]
+            code, txt = _wb_call(url, "/api/file?path=budget/cyclebudget.log")
+            m = re.search(rb"f\d+ executed (\d+) nmi (\d+) slow (\d+) dma (\d+)", txt)
+            assert m and abs(sum(int(x) for x in (m.group(1), m.group(3), m.group(4))) - 29850.5) < 3, txt
+            code, j = _wb_call(url, "/api/job", {"kind": "probe", "params": {
+                "probe": "dlitimes", "seconds": 5,
+                "env": "A7800_DT_FRAME=100\nA7800_DT_FROM=100\nA7800_DT_END=110"}})
+            d = _wb_wait(url, j["id"])
+            assert d["status"] == "done" and any(o["path"].endswith("dlitimes.log")
+                                                 for o in d["outputs"]), d["lines"][-5:]
+            # music capture on a POKEY cartridge converts to TIA when asked
+            code, j = _wb_call(url, "/api/job", {"kind": "music", "params": {
+                "seconds": 5, "drive": False, "to_tia": True}})
+            d = _wb_wait(url, j["id"])
+            names = [o["path"] for o in d["outputs"]]
+            assert d["status"] == "done" and "music/tia/tia.wav" in names and \
+                "music/song.wav" in names, (d["status"], names, d["lines"][-4:])
+        finally:
+            stop()
+    finally:
+        shutil.rmtree(work, True)
+        WB.JOBS.clear()
+    return "cycle budget, a generic probe, and POKEY-to-TIA music capture run as jobs"
+
+
+def t_workbench_browser():
+    """Drive the real page in a headless browser: tabs, a job run from its form with
+    live results, the listing search, and the annotations check -- the layer the
+    parse check cannot see. Skipped without Playwright and a browser."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    WB, work = _wb_setup("browser")
+    url, stop = _wb_serve(WB)
+    errors = []
+    try:
+        with sync_playwright() as p:
+            b = None
+            exes = [None] + sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome"))
+            if os.environ.get("A7800_CHROME"):
+                exes.insert(0, os.environ["A7800_CHROME"])
+            for exe in exes:
+                try:
+                    b = p.chromium.launch(executable_path=exe, args=["--no-sandbox"])
+                    break
+                except Exception:                              # noqa: BLE001
+                    continue
+            if b is None:
+                return None
+            pg = b.new_page(viewport={"width": 1250, "height": 900})
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.goto(url + "/#run")
+            pg.wait_for_selector(".card")
+            assert pg.locator("#tabs button").count() == 5
+            card = pg.locator(".card", has_text="Disassemble").first
+            card.locator("button.go").click()
+            pg.wait_for_function("document.querySelector('#jobdetail h3 span') && "
+                                 "document.querySelector('#jobdetail h3 span').textContent==='done'",
+                                 timeout=60000)
+            pg.wait_for_function("document.querySelector('.job .dot').classList.contains('done')",
+                                 timeout=10000)
+            assert pg.locator(".file").count() >= 1
+            pg.click("#tabs button[data-tab=listing]")
+            pg.wait_for_selector("#t-listing pre.code div")
+            pg.fill("#t-listing input[type=text]", "C000")
+            pg.click("#t-listing button:has-text('find')")
+            pg.wait_for_selector("#t-listing pre.code .hit")
+            pg.click("#tabs button[data-tab=annotations]")
+            pg.click("#t-annotations button:has-text('start one')")
+            pg.wait_for_selector("#t-annotations textarea", timeout=20000)
+            pg.fill("#t-annotations textarea", '{"entrys": []}')
+            pg.click("#t-annotations button:has-text('save')")
+            pg.wait_for_selector("#t-annotations .find.error")
+            assert "did you mean" in pg.inner_text("#t-annotations .find.error")
+            b.close()
+    finally:
+        stop()
+        shutil.rmtree(work, True)
+        WB.JOBS.clear()
+    assert not errors, errors
+    return "tabs, a job from its form, live results, listing search and annotation checks"
 
 
 def t_readme():
@@ -3655,6 +3908,8 @@ def main():
     r.check("TIA periods", t_tia_periods)
     r.check("address origins", t_origins)
     r.check("POKEY to TIA", t_pokey2tia)
+    r.check("workbench jobs", t_workbench_jobs)
+    r.check("workbench in a browser", t_workbench_browser)
     r.check("sim bus", t_sim_bus)
     r.check("sim window", t_sim_window)
     r.check("sim timing", t_sim_timing)
@@ -3686,6 +3941,7 @@ def main():
     r.check("workbench", lambda: t_workbench(args.rom))
     r.check("disassembler runs", lambda: t_disasm(args.rom))
     r.check("probes under MAME", lambda: t_probes_mame(args.rom))
+    r.check("workbench with MAME", t_workbench_mame)
     r.check("pixel formats vs MAME", t_pixel_formats)
 
     n_ok = sum(1 for x in r.rows if x[1] == PASS)

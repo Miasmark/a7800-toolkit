@@ -41,6 +41,8 @@ mame a7800  -cart game.a78 -autoboot_script probe.lua -video none -sound none -n
 mame a7800p -cart game.a78 ...
 ```
 
+`tools/runprobe.py game.a78 PROBE -o out -e KEY=VALUE` is that command with the machine name, the BIOS, the output folder and the environment worked out for you, and it reports which files the probe wrote (`--list` shows every probe). `tools/workbench.py` exposes the same thing as *Run any probe*.
+
 * `a7800` is NTSC, `a7800p` is PAL. Using the wrong one against a PAL image
   gives you a game that runs but times everything wrong.
 * `-str N` exits after N seconds of emulated time; combined with `-nothrottle`

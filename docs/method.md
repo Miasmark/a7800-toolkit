@@ -44,6 +44,17 @@ then a scan whose every result has a button that opens it in the right editor
 with the space, base and format already filled in. That last part is what is
 tedious by hand and silent when you get it wrong.
 
+It is also where the later steps live. **Run** starts the toolkit's other tools on
+the cartridge -- the first-look report, the disassembly, *observe code* and *find
+address tables* (which run the game and write what they saw into `annotations.json`),
+the annotation checks, music capture with optional POKEY-to-TIA conversion, a
+sampling profile, a cycle budget, display-interrupt timing, and any probe with its
+settings -- and **Results** shows each job's command line, its output as it runs, and
+the files it wrote, with pictures and audio in place. **Listing** is the disassembly,
+searchable by name or address, and **Annotations** edits `annotations.json` and shows
+the checks on every save, so the loop (disassemble, read, annotate, run again) stays
+in one window. Everything it writes goes to `<rom>-workbench` beside the cartridge.
+
 It launches each editor as its own process on its own port, and stops them when
 it stops -- a child left holding a port looks exactly like a stale server on the
 next run, which is a genuinely confusing way to lose an afternoon.
