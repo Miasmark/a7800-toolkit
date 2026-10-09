@@ -689,6 +689,40 @@ def t_tia_periods():
     return "14 AUDCs match the measured periods at 3 dividers each"
 
 
+def t_origins():
+    """origins.py groups where addresses came from: words, split tables at a stride,
+    immediates and computed pointers; a shared high byte is no table; blocks are
+    added once and never over an existing one."""
+    import cart
+    import origins as O
+    c = cart.Cart(os.path.join(ROOT, "tests", "carts", "synth128.a78"))
+    log = "\n".join(
+        ["P ptr f7:C100 f7:E00%X f7:E00%X x3 %04X %04X" % (k * 2 + 1, k * 2, 0x2000 + k, 0x2000 + k)
+         for k in range(3)] +
+        ["P ptr f7:C200 f7:E11%X f7:E10%X x3 %04X %04X" % (k, k, 0x3000 + k, 0x3000 + k)
+         for k in range(1, 3)] +
+        ["P ptr f7:C250 f7:E200 f7:E10%X x1 4000 4000" % k for k in range(4, 7)] +
+        ["P jmpind f7:C300 f7:C0D0 f7:C0CC x5 C000 C000", "I f7:C0CC", "I f7:C0D0",
+         "P rts f7:C320 r:0040 r:0041 x1 C000 C000"])
+    uses, imms = O.parse_log(log)
+    f = O.analyse(uses, imms, c)
+    shapes = sorted((t["shape"], t["lo"], t["n"]) for t in f["tables"])
+    assert shapes == [("split", ("f7", 0xE101), 2), ("words", ("f7", 0xE000), 3)], shapes
+    assert f["immediates"] == [("f7:C0CC", "jmpind"), ("f7:C0D0", "jmpind")], f["immediates"]
+    assert len(f["computed"]) == 1 and f["computed"][0][0] == "rts"
+    doc = {"blocks": []}
+    added = O.merge(doc, f, "t.log")
+    assert len(added) == 2 and len(doc["blocks"]) == 3, doc["blocks"]
+    assert doc["blocks"][0] == {"loc": "f7:E000", "len": 6, "type": "words",
+                                "note": "address table, as far as the run read it"}
+    assert O.merge(doc, f, "t.log") == [] and len(doc["blocks"]) == 3     # idempotent
+    mine = {"blocks": [{"loc": "f7:E000", "len": 2, "type": "bytes"}]}
+    O.merge(mine, f, "t.log")
+    assert mine["blocks"][0]["type"] == "bytes" and \
+        not any(b["loc"] == "f7:E000" and b["type"] == "words" for b in mine["blocks"])
+    return "words, split tables, immediates, computed; constants left out; merge idempotent"
+
+
 def t_readme():
     """The README lists the tools that exist, and no others."""
     s = io.open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
@@ -1358,6 +1392,24 @@ def t_probes_mame(rom):
     ex, nm, sl, dm, al = [int(x) for x in m.groups()]
     assert ex + sl + dm == 29868 and 0 < dm < 0.2 * 29868, cb[1]    # what is left is MARIA's
     assert 10 < nm < 200 and abs(al - ex) < 50, cb[1]   # one short NMI a frame; all code is up here
+    subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "10", "-autoboot_script",
+                            os.path.join(ROOT, "probes", "addrorigin.lua")],
+                   cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_AO_END="300"))
+    import cart
+    import origins
+    uses, imms = origins.parse_log(io.open(os.path.join(work, "addrorigin.log"),
+                                           encoding="utf-8").read())
+    found = origins.analyse(uses, imms, cart.Cart(os.path.join(ROOT, "tests", "carts",
+                                                               "synth128.a78")))
+    # the RAM vector is filled by LDA #<handler_a / LDA #>handler_a: both halves are
+    # immediates, and the operand bytes in the ROM are the handler's address
+    sc = cart.Cart(os.path.join(ROOT, "tests", "carts", "synth128.a78"))
+    ha = facts["sym"]["handler_a"]
+    got = sorted(sc.byte(sp, a) for sp, a in
+                 (origins.split_loc(loc) for loc, _k in found["immediates"]))
+    assert got == sorted([ha & 0xFF, ha >> 8]), (found["immediates"], hex(ha))
+    assert [u[0] for u in uses] == ["jmpind"], uses
     sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
                                  "-autoboot_script",
                                  os.path.join(ROOT, "probes", "audio.lua")],
@@ -1404,7 +1456,7 @@ def t_probes_mame(rom):
         note = " (WARNING: MAME %s; these notes were measured on %s)" % (
             _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
     return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
-            "exectrace, pcprof, hangsnap, rates, cyclebudget, a recording, the banked cart's facts, and a whole first look, under MAME"
+            "exectrace, pcprof, hangsnap, rates, cyclebudget, addrorigin, a recording, the banked cart's facts, and a whole first look, under MAME"
             + note)
 
 
@@ -3424,6 +3476,7 @@ def main():
     r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)
     r.check("TIA periods", t_tia_periods)
+    r.check("address origins", t_origins)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
     r.check("flake8", t_flake8)
