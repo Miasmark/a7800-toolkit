@@ -22,8 +22,11 @@ translation with losses, and every choice is an option:
   Mashing. When more voices want a channel than it has, `--mash loudest` (the
   default) lets the loudest win. `--mash arp` shares it: the voices take turns,
   one per `--arp N` frames (default 1), which is an arpeggio at 60/N a second.
-  It keeps every voice in the music and sounds buzzy; try N = 2 or 3 for a
-  chord-like shimmer. It can sound messy, which is why it is not the default.
+  It keeps every voice in the music and sounds buzzy. On Triple Punch the neatest
+  listening result was groups plus a slow arp (`--map groups --groups 1+2,3+4
+  --mash arp --arp 2`): each channel only shares among its own voices, so the
+  bass and lead stay apart. It can still sound messy, which is why it is not the
+  default.
 
   Pitch. TIA's pitches are sparse and fixed (AUDC $4, $C, $6 and $E, thirty-two
   dividers each), so a POKEY note lands up to about a quarter tone away, more in
