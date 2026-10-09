@@ -23,3 +23,7 @@ __pycache__/
 # ...except the test cartridge this repo builds from source (tests/synth.py):
 # it is ours, deterministic, and the tests compare a fresh build against it.
 !tests/carts/*.a78
+
+# ...and MAME's own dump of the RIOT test cartridge's timer, which t_sim_machine compares the
+# simulator against (a 4K RAM image, not a cartridge).
+!tests/golden/*.bin
