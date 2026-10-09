@@ -784,14 +784,14 @@ def t_pokey2tia():
                         out_dir, "--fit"], stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT)
     assert p.returncode == 0, p.stdout.decode()
-    # the defaults are groups 1+2,3+4 shared by turns, two frames each
+    # the defaults are groups 1+2,3+4, the loudest voice winning a shared channel
     explicit = os.path.join(work, "explicit")
     subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o", explicit,
-                    "--fit", "--map", "groups", "--groups", "1+2,3+4", "--mash", "arp",
-                    "--arp", "2"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    "--fit", "--map", "groups", "--groups", "1+2,3+4", "--mash",
+                    "loudest"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     same = [io.open(os.path.join(d, "tia.trk"), encoding="utf-8").read()
             for d in (out_dir, explicit)]
-    assert same[0] == same[1], "the defaults are not groups 1+2,3+4, arp 2"
+    assert same[0] == same[1], "the defaults are not groups 1+2,3+4, loudest wins"
     for name in ("tia.trk", "tia.asm", "tia.wav", "orig.wav", "report.txt"):
         assert os.path.getsize(os.path.join(out_dir, name)) > 0, name
     bad = subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o",

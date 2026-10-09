@@ -21,13 +21,12 @@ translation with losses, and every choice is an option:
   plays each frame's two LOUDEST voices, and a voice that keeps being chosen
   keeps its channel, so notes do not hop between them.
 
-  Mashing. When more voices want a channel than it has, they take turns
-  (`--mash arp`, the default), one per `--arp N` frames (default 2): an arpeggio
-  at 60/N a second. Every voice stays in the music, and each channel shares only
-  among its own group, so the bass and lead stay apart. On Triple Punch this
-  sounded cleanest, and did not sound as if an instrument were missing.
-  `--mash loudest` lets the loudest voice win instead and drops the rest, which is
-  thinner but has no flutter; `--arp 1` flutters fastest and is the buzziest.
+  Mashing. When more voices want a channel than it has, the loudest wins and the
+  rest are dropped (`--mash loudest`, the default). On Triple Punch this was
+  judged the cleanest. `--mash arp` shares the channel instead: the voices take
+  turns, one per `--arp N` frames (default 2), an arpeggio at 60/N a second.
+  Every voice stays in the music and it is more lively, but it flutters and
+  sounds messier; `--arp 1` is the buzziest.
 
   Pitch. TIA's pitches are sparse and fixed (AUDC $4, $C, $6 and $E, thirty-two
   dividers each), so a POKEY note lands up to about a quarter tone away, more in
@@ -253,9 +252,10 @@ def main(argv=None):
     ap.add_argument("--groups", help="with --map groups: voices for TIA channel 1 "
                                      "and 2 (default 1+2,3+4; 1+2+5+6,3+4+7+8 for "
                                      "two POKEYs)")
-    ap.add_argument("--mash", default="arp", choices=["loudest", "arp"])
+    ap.add_argument("--mash", default="loudest", choices=["loudest", "arp"])
     ap.add_argument("--arp", type=int, default=2,
-                    help="frames each voice holds a shared channel (default 2)")
+                    help="with --mash arp: frames each voice holds a shared "
+                         "channel (default 2)")
     ap.add_argument("--offset", type=int, default=0, help="shift pitch, in cents")
     ap.add_argument("--fit", action="store_true", help="choose the offset automatically")
     ap.add_argument("--buzz", default="noise", choices=["noise", "tone"])
