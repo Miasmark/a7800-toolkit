@@ -1328,6 +1328,10 @@ def t_branchforce():
     c = census.build(rom, 120, False, force=True)
     per, tot = census.summary(c["cart"], c["cls"])
     assert tot[census.FORCED] > 0 and tot[census.EXEC] > 0, tot
+    sug = census.forced_suggestions(c["cart"], c["cls"])
+    assert any(x["kind"] == "entry" and x["loc"].startswith("f7:") and
+               int(x["loc"][3:], 16) <= facts["forced_target"] <
+               int(x["loc"][3:], 16) + x["size"] for x in sug), sug
     return "forced branch found the computed-RTS target, junk path trimmed, data starts all dead"
 
 

@@ -197,10 +197,13 @@ def run(rom, frames=1800, explore=False, mapper=None, low=None, handover=None,
     col.forced, col.force_stats = set(), None
     if force:
         kept, dead, nfork = branchforce.force(cart, col, watcher, drive=mode)
-        col.forced = {l for l in kept if l not in col.x}
+        # only paths that rejoined code the run executed are counted as code; a path that
+        # merely ran its budget is not evidence enough to print as an instruction
+        col.forced = {l for l in kept if l not in col.x and kept[l] == "joined"}
         col.force_stats = {"forks": nfork, "dead": len(dead),
-                           "joined": sum(1 for l in col.forced if kept[l] == "joined"),
-                           "ran on": sum(1 for l in col.forced if kept[l] == "ran on")}
+                           "joined": len(col.forced),
+                           "ran on": sum(1 for l in kept
+                                         if l not in col.x and kept[l] == "ran on")}
     return cart, col, bus
 
 
@@ -500,12 +503,12 @@ def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
     stats = [s for s in stats if s]
     if stats:
         notes.append("forcing the untaken side of branches (branchforce.py) ran %d paths "
-                     "and kept %d instructions the runs never executed -- %d joined code "
-                     "that ran, %d ran on unchecked -- and trimmed %d dead paths; those "
-                     "are marked apart from what executed"
+                     "and kept %d instructions the runs never executed, all on paths that "
+                     "rejoined code that ran, marked apart from what executed; %d more "
+                     "ran on without rejoining and are not counted, and %d dead paths "
+                     "were trimmed"
                      % (sum(s["forks"] for s in stats), len(sets["forced"]),
-                        sum(s["joined"] for s in stats), sum(s["ran on"] for s in stats),
-                        sum(s["dead"] for s in stats)))
+                        sum(s["ran on"] for s in stats), sum(s["dead"] for s in stats)))
     static_code, blocks = static_view(cart, config)
     cls = classify(cart, sets, static_code, blocks)
     return {"cart": cart, "col": col, "bus": bus, "sets": sets, "cls": cls,
@@ -556,6 +559,18 @@ def suggestions(dark):
         elif g.startswith("address table"):
             out.append({"kind": "block", "loc": loc, "len": a["size"] & ~1, "type": "words",
                         "why": "pairs of bytes that look like addresses"})
+    return out
+
+
+def forced_suggestions(cart, cls):
+    """An entry for each run of code only branch forcing found. Still a proposal: the
+    path rejoined real code, but no run has been seen to take it."""
+    out = []
+    for sp in cls:
+        for lo, hi in runs_of(cls[sp], FORCED, cart.base_of(sp)):
+            out.append({"kind": "entry", "loc": "%s:%04X" % (sp, lo), "size": hi - lo + 1,
+                        "why": "reached by forcing an untaken branch; the path rejoined "
+                               "code that ran"})
     return out
 
 
@@ -611,7 +626,7 @@ def markdown(name, r):
             kinds[a["guess"]] = kinds.get(a["guess"], 0) + a["size"]
         L += ["", "By what they look like: " + ", ".join(
             "%s %d bytes" % kv for kv in sorted(kinds.items(), key=lambda kv: -kv[1])) + "."]
-    sug = suggestions(dark)
+    sug = suggestions(dark) + forced_suggestions(cart, cls)
     if sug:
         L += ["", "## What the dark areas suggest (guesses)", "",
               "%d code-like, %d text, %d address-table-like. In `census.json` under "
@@ -691,7 +706,8 @@ def to_json(name, r):
             "totals": {NAMES[k]: v for k, v in tot.items()},
             "per_space": {sp: {NAMES[k]: v for k, v in d.items()} for sp, d in per.items()},
             "dark": dark_areas(cart, r["cls"]),
-            "suggestions": suggestions(dark_areas(cart, r["cls"])),
+            "suggestions": suggestions(dark_areas(cart, r["cls"]))
+            + forced_suggestions(cart, r["cls"]),
             "sets": {k: ranges(v) for k, v in r["sets"].items()},
             "ram": {"touched": len(rows), "uninitialised_reads": uninit,
                     "pointers": sorted(col.ptr), "free": free,

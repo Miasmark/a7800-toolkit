@@ -157,9 +157,10 @@ def restore(cart, snap, drive, observer):
 class Trace(simprobe.Collector):
     """What one forced path runs, and the checks that declare it dead."""
 
-    def __init__(self, real, allow_illegal, budget):
+    def __init__(self, real, allow_illegal, budget, inside=()):
         simprobe.Collector.__init__(self)
         self.real = real
+        self.inside = inside          # operand bytes of instructions the real run executed
         self.allow_illegal = allow_illegal
         self.budget = budget
         self.n = 0
@@ -180,6 +181,8 @@ class Trace(simprobe.Collector):
         else:
             if loc in self.real.d and loc not in self.real.x:
                 raise Dead("%s:%04X is read as data" % loc)
+            if loc in self.inside:
+                raise Dead("%s:%04X is inside an instruction that ran" % loc)
             if self.n and loc in self.real.x:
                 self.verdict = "joined"
                 raise StopIteration
@@ -195,15 +198,30 @@ class Trace(simprobe.Collector):
             raise StopIteration
 
 
+def operand_bytes(cart, real):
+    """Locations that are the 2nd/3rd byte of an instruction the real run executed. Code
+    that starts there is out of step with code that is known to be code."""
+    out = set()
+    for sp, a in real.x:
+        try:
+            n = m6502.LENGTH[cart.byte(sp, a)]
+        except Exception:                                  # noqa: BLE001
+            continue
+        for k in range(1, n):
+            out.add((sp, a + k))
+    return out
+
+
 def force(cart, real, watcher, budget=2000, drive=True, log=None):
     """Run every saved copy down its other side. Returns (kept, dead, trimmed) where
     `kept` maps location -> "joined" / "ran on", `dead` maps branch location -> why."""
     kept, dead = {}, {}
     nfork = 0
+    inside = operand_bytes(cart, real)
     for (loc, taken), snaps in sorted(watcher.snaps.items()):
         alt_known = False
         for snap in snaps:
-            tr = Trace(real, watcher.illegal_seen, budget)
+            tr = Trace(real, watcher.illegal_seen, budget, inside)
             bus, cpu = restore(cart, snap, drive, tr)
             if not alt_known:
                 t0 = tr.loc(snap["pc"])
