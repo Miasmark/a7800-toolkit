@@ -803,6 +803,24 @@ def t_pokey2tia():
     return "loudest-two with sticky channels, groups, arp, noise, fit, and the command"
 
 
+def t_sim_timing():
+    """sim.py's frame is MAME's: 263 lines of 113.5 cycles, VBLANK rising 242 lines
+    after the display starts, and a display interrupt taken as its flagged zone
+    begins -- measured with probes/dlitimes.lua on the synthetic cartridge, whose one
+    DLI is on the zone that starts 80 lines in."""
+    import sim
+    import cart
+    assert sim.LINES["ntsc"] == 263 and sim.CYCLES_PER_LINE == 113.5
+    assert sim.LINES["ntsc"] - sim.VBLANK_LINES["ntsc"] == 242
+    log = []
+    sim.run(cart.Cart(os.path.join(ROOT, "tests", "carts", "synth128.a78")), 130, log=log)
+    nmi = [c / sim.CYCLES_PER_LINE for k, f, c in log if k == "nmi" and f == 120]
+    vb = [c / sim.CYCLES_PER_LINE for k, f, c in log if k == "vblank" and f == 120]
+    assert len(nmi) == 1 and 80.0 <= nmi[0] < 80.5, nmi
+    assert len(vb) == 1 and 242.0 <= vb[0] < 242.2, vb
+    return "NMI at line %.2f, VBLANK at line %.2f of 263" % (nmi[0], vb[0])
+
+
 def t_readme():
     """The README lists the tools that exist, and no others."""
     s = io.open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
@@ -1503,6 +1521,20 @@ def t_probes_mame(rom):
                  (origins.split_loc(loc) for loc, _k in found["immediates"]))
     assert got == sorted([ha & 0xFF, ha >> 8]), (found["immediates"], hex(ha))
     assert [u[0] for u in uses] == ["jmpind"], uses
+    subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "5", "-autoboot_script",
+                            os.path.join(ROOT, "probes", "dlitimes.lua")],
+                   cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_DT_FRAME="100", A7800_DT_FROM="100", A7800_DT_END="110"))
+    dt = io.open(os.path.join(work, "dlitimes.log"), encoding="utf-8").read()
+    zones = [(int(m.group(1)), int(m.group(2)), int(m.group(3))) for m in
+             re.finditer(r"zone +\d+ +line +(\d+) +height +(\d+) +dli (\d)", dt)]
+    flagged = [first for first, _h, dli in zones if dli]
+    nm = [float(x) for x in re.findall(r"nmi +frame \d+ +line ([\d.]+)", dt)]
+    vbe = [float(x) for x in re.findall(r"vblank begins +line ([\d.]+)", dt)]
+    # MARIA's zone 0 is raster 16: the interrupt arrives as the flagged zone begins,
+    # not as it ends; VBLANK rises at raster 258
+    assert flagged and nm and all(abs(x - (16 + flagged[0])) < 1.0 for x in nm), (flagged, nm[:3])
+    assert vbe and all(abs(x - 258) < 0.5 for x in vbe), vbe[:3]
     sp = subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "3",
                                  "-autoboot_script",
                                  os.path.join(ROOT, "probes", "audio.lua")],
@@ -1549,7 +1581,7 @@ def t_probes_mame(rom):
         note = " (WARNING: MAME %s; these notes were measured on %s)" % (
             _fmt_ver(ver), _fmt_ver(MAME_MEASURED))
     return ("reclength, liveslots, ramsnap, freeram, pcwrites, inputreaders, "
-            "exectrace, pcprof, hangsnap, rates, cyclebudget, addrorigin, a recording, the banked cart's facts, and a whole first look, under MAME"
+            "exectrace, pcprof, hangsnap, rates, cyclebudget, addrorigin, dlitimes, a recording, the banked cart's facts, and a whole first look, under MAME"
             + note)
 
 
@@ -3571,6 +3603,7 @@ def main():
     r.check("TIA periods", t_tia_periods)
     r.check("address origins", t_origins)
     r.check("POKEY to TIA", t_pokey2tia)
+    r.check("sim timing", t_sim_timing)
     r.check("README tool list", t_readme)
     r.check("doc links", t_links)
     r.check("flake8", t_flake8)

@@ -107,7 +107,7 @@ cartridge, **the first 427,399 instructions are identical**. That is about 124
 frames.
 
 MARIA's display interrupts are implemented -- the DLL the game builds in RAM
-is walked each frame and an NMI raised at the end of every zone whose entry has
+is walked each frame and an NMI raised at the start of every zone whose entry has
 bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
 fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 `$40` counts down exactly once per frame, as its author intended.
@@ -464,13 +464,14 @@ class Bus(object):
                 + (self.DMA_DLI if (flags & 0x80) else 0))
 
     def zones(self):
-        """Walk the DLL the game built in RAM -> [(line_after_zone, dli), ...].
+        """Walk the DLL the game built in RAM -> [(line_after_zone, dli, cost, height), ...].
 
         Three bytes per zone: byte 0 is flags and the offset (scanlines minus
         one) in bits 3-0, then the display list address high and low. Bit 7 is
-        the display interrupt, which is the only interrupt MARIA raises -- and
-        it fires at the END of its zone, which is what makes the line count
-        matter rather than just the flag.
+        the display interrupt, which is the only interrupt MARIA raises. It is taken
+        on the last line of the zone BEFORE the flagged one, so that its handler
+        runs ahead of the flagged zone's first line (docs/hardware.md); the line
+        count matters, not just the flag.
 
         Returns [] until the game has actually pointed MARIA somewhere, and
         gives up on a list that runs past the screen or past MAX_ZONES: during
@@ -496,7 +497,7 @@ class Bus(object):
             n = (b0 & 0x0F) + 1
             line += n
             out.append((line, bool(b0 & 0x80),
-                        self.zone_cost((hi << 8) | lo, n, b0)))
+                        self.zone_cost((hi << 8) | lo, n, b0), n))
             if line >= self.MAX_LINES:
                 break
         return out
@@ -780,29 +781,32 @@ class CPU(object):
         self.cycles += cyc
 
 
-# Measured, not quoted: a counting cartridge run under MAME put the NTSC
-# scanline at exactly 114.00 CPU cycles and the non-VBLANK window at exactly
-# 241.0 of the 262 lines. See docs/hardware.md, "What MARIA costs", and
-# probes/dma-costcart.py for the instrument. NOTE: a later direct count (probes/
-# cyclebudget.lua on a cartridge that never turns MARIA on) found the frame is 263
-# lines of 113.5 cycles = 29,850.5, which is also the 7800 Software Guide's figure;
-# these constants (262 x 114 = 29,868) are 17.5 cycles a frame long and have NOT been
-# changed, because the simulator's validation against MAME was done with them. The
-# Guide also says a DLI fires after DMA on the last line of the PREVIOUS zone, i.e.
-# before the flagged zone is drawn; the comment on run() below says 'at the end of
-# any zone whose DLL entry has bit 7 set', a zone later. PAL is derived the same way from
-# its own clock and line count, and has NOT been measured.
-CYCLES_PER_LINE = 114.0
-LINES = {"ntsc": 262, "pal": 312}
+# Measured on MAME 0.264 (probes/dlitimes.lua, probes/cyclebudget.lua), and the
+# 7800 Software Guide says the same: the NTSC frame is 263 lines of 113.5 CPU cycles
+# (454 cycles of the 7.16 MHz clock), 29,850.5 cycles. MSTAT's VBLANK bit rises at
+# raster 258 and falls at raster 16, 21 lines, and MARIA's zone 0 starts at raster 16.
+# This simulator's frame starts where VBLANK falls, so a zone that starts L lines into
+# the display starts L lines into the frame, and VBLANK rises 242 lines in.
+# (It used to have 262 lines of 114.00, from an early count that could not tell the
+# two apart, and fired each display interrupt at the END of its zone; MAME fires it
+# at the START of the flagged zone -- see docs/hardware.md. PAL is from the Guide,
+# 313 lines, and has NOT been measured.)
+CYCLES_PER_LINE = 113.5
+LINES = {"ntsc": 263, "pal": 313}
 VBLANK_LINES = {"ntsc": 21, "pal": 21}
+# The handler's first instruction runs 22-26 cycles into the line of the flagged
+# zone (measured); 7 of those are the interrupt sequence, so the interrupt is
+# taken about this far into the line.
+DLI_LAG = 15
 
 
 def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
-        frame_nmi=False, steal=False):
+        frame_nmi=False, steal=False, log=None):
     """Execute the cartridge for `frames` frames, collecting audio writes.
 
     Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
-    is MARIA's display interrupt, fired at the end of any zone whose DLL entry
+    is MARIA's display interrupt, taken as the flagged zone begins (the end of the
+    zone before it) for every zone whose DLL entry
     has bit 7 set. There is no separate vertical-blank interrupt. A game that
     wants one puts a DLI on its last zone -- Asteroids does exactly that, with
     one DLI in seventeen zones -- while a game doing per-zone work raises many
@@ -812,16 +816,24 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
     end of the visible screen, which is right for a game like Asteroids by
     accident and wrong for everything that hangs work off zone boundaries.
     `frame_nmi=True` restores that behaviour for comparison.
+
+    `log`, if a list, receives ("nmi" or "vblank", frame, cycles into the
+    frame) for every display interrupt and vertical-blank start, which is what
+    the timing is checked against MAME with (probes/dlitimes.lua).
     """
     bus = Bus(cart, drive=drive)
     cpu = CPU(bus)
     lines = LINES[region]
     vb_line = lines - VBLANK_LINES[region]
-    per = int(lines * CYCLES_PER_LINE)
+    frame_cycles = lines * CYCLES_PER_LINE
+    start = cpu.cycles
 
     for f in range(frames):
         bus.frame = f + 1
-        base = cpu.cycles
+        # frames are scheduled from the start, not from wherever the last one
+        # happened to end: an instruction that straddles the boundary does not
+        # lengthen the next frame
+        base = start + f * frame_cycles
         bus.vblank = False
 
         # The display list is rebuilt in RAM every frame by most games, so the
@@ -829,7 +841,7 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         events = []
         zones = bus.zones()
         if nmi:
-            for line_end, dli, _cost in zones:
+            for line_end, dli, _cost, height in zones:
                 # Every zone with the bit set raises its interrupt. An earlier
                 # version fired only zones ending before the VBLANK line, which
                 # was an invention -- MARIA walks the list and does not consult
@@ -839,8 +851,9 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
                 # interrupt, a counter at $74 never decremented, and the game
                 # spinning at $E24A for ever while looking like a cartridge
                 # that simply makes no sound.
-                if dli and line_end < lines:
-                    events.append((base + int(line_end * CYCLES_PER_LINE), "dli"))
+                first = line_end - height          # the flagged zone's first line
+                if dli and first < lines:
+                    events.append((base + first * CYCLES_PER_LINE + DLI_LAG, "dli"))
         # MARIA halts the 6502 while it draws, and it does so a scanline at a
         # time. Charging a whole zone's worth in one lump at the zone boundary
         # is not the same thing: it hands the CPU a burst of uninterrupted time
@@ -849,29 +862,34 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         # the cost is spread across the zone's scanlines, where it belongs.
         if steal:
             start = 0
-            for line_end, _dli, cost in zones:
-                n = max(1, line_end - start)
-                per = cost / float(n)
-                for ln in range(start + 1, line_end + 1):
+            top = 0
+            for line_end, _dli, cost, _height in zones:
+                n = max(1, line_end - top)
+                line_cost = cost / float(n)
+                for ln in range(top + 1, line_end + 1):
                     if ln <= vb_line:
-                        events.append((base + int(ln * CYCLES_PER_LINE),
-                                       ("steal", per)))
-                start = line_end
-        events.append((base + int(vb_line * CYCLES_PER_LINE), "vblank"))
+                        events.append((base + ln * CYCLES_PER_LINE,
+                                       ("steal", line_cost)))
+                top = line_end
+        events.append((base + vb_line * CYCLES_PER_LINE, "vblank"))
         if frame_nmi and nmi:
-            events.append((base + int(vb_line * CYCLES_PER_LINE), "dli"))
+            events.append((base + vb_line * CYCLES_PER_LINE, "dli"))
         events.sort(key=lambda e: e[0])
 
-        target = base + per
+        target = base + frame_cycles
         i = 0
         while cpu.cycles < target:
             while i < len(events) and cpu.cycles >= events[i][0]:
                 kind = events[i][1]
                 if kind == "vblank":
                     bus.vblank = True
+                    if log is not None:
+                        log.append(("vblank", f + 1, cpu.cycles - base))
                 elif isinstance(kind, tuple):
                     cpu.cycles += kind[1]          # MARIA takes these
                 else:
+                    if log is not None:
+                        log.append(("nmi", f + 1, cpu.cycles - base))
                     cpu.nmi()
                 i += 1
             cpu.step()
