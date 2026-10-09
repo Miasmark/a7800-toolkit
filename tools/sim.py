@@ -21,18 +21,24 @@ construction. The same goes for every other player in the library.
 like for like -- same emulator, no input, same length -- across five TIA
 cartridges that play music on their own:
 
-    Ikari Warriors    agreement 99.4%   progress  86.2%   timing 1.00x
-    Midnight Mutants            99.0%             100.0%         1.00x
-    Donkey Kong                 89.0%             100.0%         1.00x
-    Dark Chambers               78.4%             100.0%         1.00x
-    Choplifter                   0.8%               1.0%         0.04x
+    Ikari Warriors    agreement 99.4%   progress 100.0%   timing 1.00x
+    Midnight Mutants            43.9%             100.0%         1.00x
+    Donkey Kong                 73.0%             100.0%         1.00x
+    Dark Chambers               46.6%             100.0%         1.00x
+    Choplifter                  55.6%             100.0%         1.00x
 
-Four of five reproduce a commercial game's music from its own code, with the
-frame clock exact in every one. That is what this was built to do.
+(Re-measured against the Trebor's PROPack v8_17 ROMs and MAME 0.264 with the
+7800OpenBIOS, after the timing and bus fixes below: Ikari over 882 frames, which is
+the stretch of the simulator's run that the capture covers -- the simulator counts
+from the cartridge's reset, MAME from power-on, 322 frames earlier with
+OpenBIOS -- and the others over 1,200. The earlier figures for the middle three
+(99.0, 89.0 and 78.4 per cent) came from runs whose lengths were not recorded and
+could not be reproduced at 20 seconds.)
 
-The fifth is understood and is not a simulator defect: Choplifter's second
-voice is never triggered because its attract demo takes a different course
-here -- see below.
+Ikari Warriors reproduces a commercial game's music from its own code, 520 of
+529 states, with the frame clock exact. The others reach the end of the
+reference at the right pace but play it with a different order of events, which
+has not been traced -- Choplifter included, whose second voice now plays.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
 generates its music from POKEY's random register and cannot be scored by log
@@ -56,26 +62,21 @@ vertical blank starts. That filter silently dropped Donkey Kong's only
 interrupt, and the game span for ever. One bit, in one DLL entry, presenting
 as "makes no sound".
 
-### Choplifter, traced
+### Choplifter, traced -- and the real cause
 
-Its channel 0 matches the capture value for value, while `AUDC1` and `AUDF1`
-are never written at all. That looked like a missing write path. It is not.
+Its channel 0 matched the capture value for value, while `AUDC1` and `AUDF1`
+were never written at all. This was once put down to its attract demo taking a
+different course. **That was wrong.** Diffing every write to `$1920-$1928`
+against MAME's showed the two identical until the player at `$B29E` -- which is
+voice-generic -- ran `LDA ($95),Y` for voice 1 and read a zero where MAME read
+`$02`. The pointer's high byte lives at `$1928`, and `Bus.read` took any address
+whose low byte is `$28` for MSTAT, so it came back as the vertical-blank flag.
+The voice ended at once, every time.
 
-The player at `$B29E` is voice-generic -- `STA $15,X / STA $17,X / STA $19,X`
--- and the caller is unrolled per voice, each gated on its own counter:
-`$1923` for voice 0 at `$B326`, `$1926` for voice 1 at `$B346`, both skipped
-when the counter reads `$FF`. Sampled every 150 frames, the emulator's
-`$1926` holds `$AF`, `$0E`, `$01`; this simulator's reads `$FF` every single
-time.
-
-So nothing is failing to write. **Voice 1 is never asked to play.** The
-routine is correct and never invoked, because whatever triggers that sound
-never happens here -- which is what an attract-mode demo taking a different
-course would look like, and Choplifter runs one. That was suggested early and
-dismissed on the strength of the register columns; the columns showed which
-voice was silent, not why, and the why is consistent with the demo.
-
-Donkey Kong emits a single state and has not been traced.
+The same bug hid the last stretch of Ikari Warriors: its second tune read a
+table across an address ending in `$28`, the simulator wrote values no AUDC can
+hold (`$1F`) and then fell silent for the rest of the run. With MSTAT answering
+only at `$28` and `$128`, both play through.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
 generates its music from POKEY's random register and cannot be scored by log
@@ -897,7 +898,6 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         # miss its own deadlines and write a garbage display-list pointer. So
         # the cost is spread across the zone's scanlines, where it belongs.
         if steal:
-            start = 0
             top = 0
             for line_end, _dli, cost, _height in zones:
                 n = max(1, line_end - top)
