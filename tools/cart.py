@@ -586,6 +586,16 @@ class Cart(object):
             return addr - self.map.start
         return self._file_base(space) + (addr - self.base_of(space))
 
+    def file_offset(self, space, addr):
+        """Where `addr` lives in the image file, header excluded -- the position to write
+        to when an edit has to land in the file. `_offset` indexes `self.rom`, which is
+        the MARIA half of a bankset image on its own and the usual block order for an (OM)
+        Activision dump; this undoes both."""
+        o = self._offset(space, addr)
+        if self.om_order:
+            o = ((o // 0x2000) ^ 1) * 0x2000 + o % 0x2000
+        return self.file_base + o
+
     def byte(self, space, addr):
         return self.rom[self._offset(space, addr)]
 
@@ -598,6 +608,20 @@ class Cart(object):
 
     def in_space(self, space, addr):
         return self.base_of(space) <= addr < self.base_of(space) + self.size_of(space)
+
+    def probe_env(self, prefix="A7800_XT_"):
+        """What probes/exectrace.lua and dumpgfx.lua need to name a bank the way this class does:
+        how many banks, which file bank the window's value 0 selects, how many values it takes
+        before wrapping, and which file bank sits at $4000 (the EXROM layout is not the plain
+        SuperGame one: file bank 0 low, window value v showing file bank v+1)."""
+        env = {prefix + "BANKS": str(max(self.nbanks, 1))}
+        if self.map.name == "supergame":
+            env[prefix + "FIRST"] = str(self.map.first_window)
+            env[prefix + "WBANKS"] = str(self.map.nwindow)
+            for start, _end, kind, arg in self._region:
+                if kind == "fixed" and start == 0x4000:
+                    env[prefix + "LOWBANK"] = str(arg)
+        return env
 
     def vectors(self):
         """NMI/RESET/IRQ, read from whatever space owns $FFFA."""
@@ -783,6 +807,10 @@ class Sides(object):
     def _file_base(self, space):
         c, off = self._side(space)
         return off + c._file_base(self._bare(space))
+
+    def file_offset(self, space, addr):
+        c, off = self._side(space)
+        return off + c.file_offset(self._bare(space), addr)
 
     def _offset(self, space, addr):
         c, off = self._side(space)

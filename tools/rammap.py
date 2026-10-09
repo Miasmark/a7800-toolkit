@@ -36,6 +36,8 @@ def main():
     ap.add_argument("-o", "--out", default="RAM_MAP.md")
     args = ap.parse_args()
 
+    if args.config and not os.path.isfile(args.config):
+        sys.exit("rammap: no such annotations file: %s" % args.config)
     cart = Cart(args.rom)
     cfg = Config(args.config)
     an = Analyzer(cart, cfg)

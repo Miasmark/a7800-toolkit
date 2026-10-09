@@ -145,7 +145,7 @@ class Region(object):
         if not (base <= addr < base + size):
             raise ValueError("$%04X is outside %s" % (addr, self.space))
         head = 128 if self.cart.header_bytes else 0
-        return head + getattr(self.cart, "file_base", 0) + self.cart._offset(self.space, addr)
+        return head + self.cart.file_offset(self.space, addr)
 
     def pixels(self, cell):
         """One cell as height rows of (width * ppb) pixel values."""

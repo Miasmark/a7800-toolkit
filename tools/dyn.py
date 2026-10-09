@@ -209,41 +209,40 @@ def data_blocks(rom, doc, log, reads, low=None, mapper=None, min_len=4, gap=2):
                 return sp, base + o - start
         return None
 
+    def judge(cluster):
+        """The block a cluster of read bytes makes, or None if any check says it is not data."""
+        lo, hi = cluster[0], cluster[-1]
+        if lo in istart and istart[lo][0] != lo:           # starts inside an instruction
+            lo = istart[lo][0]
+        if hi in istart and istart[hi][0] + istart[hi][1] - 1 > hi:
+            hi = istart[hi][0] + istart[hi][1] - 1         # ends inside one
+        span = range(lo, hi + 1)
+        pos = where(lo)
+        if pos is not None and where(hi) is not None and where(hi)[0] != pos[0]:
+            pos = None
+        veto = (hi - lo + 1 < min_len or pos is None
+                or any(x in ran or x in existing or x in keep for x in span)
+                or sum(1 for x in span if x in code_bytes) * 2 < len(span)
+                # the read stream runs through code on either side
+                or any(x in through_code for x in range(lo - gap - 1, hi + gap + 2))
+                # retained code goes into it
+                or any(any(not (lo <= s <= hi) for s in targets.get(x, ())) for x in span))
+        if veto:
+            return None
+        return {"loc": "%s:%04X" % pos, "len": hi - lo + 1, "type": "bytes",
+                "note": "read as data by the simulator; listed as code"}
+
     out, cluster = [], []
     for o in data_off + [None]:
-        # a cluster never crosses from one space into the next: a block is `loc` + `len`
-        # inside one space, and a longer one overruns its listing
-        if cluster and o is not None and o - cluster[-1] <= gap and \
-                (where(o) or ("?",))[0] != (where(cluster[-1]) or ("?",))[0]:
-            cluster_end = cluster
-            cluster = []
-            lo, hi = cluster_end[0], cluster_end[-1]
-            pos = where(lo)
-            span = range(lo, hi + 1)
-            if pos is not None and hi - lo + 1 >= min_len and not any(
-                    x in ran or x in existing or x in keep for x in span):
-                out.append({"loc": "%s:%04X" % pos, "len": hi - lo + 1, "type": "bytes",
-                            "note": "read as data by the simulator; listed as code"})
-        if cluster and (o is None or o - cluster[-1] > gap):
-            lo, hi = cluster[0], cluster[-1]
-            if lo in istart and istart[lo][0] != lo:       # starts inside an instruction
-                lo = istart[lo][0]
-            if hi in istart and istart[hi][0] + istart[hi][1] - 1 > hi:
-                hi = istart[hi][0] + istart[hi][1] - 1     # ends inside one
-            span = range(lo, hi + 1)
-            pos = where(lo)
-            if pos is not None and where(hi) is not None and where(hi)[0] != pos[0]:
-                pos = None
-            veto = (hi - lo + 1 < min_len or pos is None
-                    or any(x in ran or x in existing or x in keep for x in span)
-                    or sum(1 for x in span if x in code_bytes) * 2 < len(span)
-                    # the read stream runs through code on either side
-                    or any(x in through_code for x in range(lo - gap - 1, hi + gap + 2))
-                    # retained code goes into it
-                    or any(any(not (lo <= s <= hi) for s in targets.get(x, ())) for x in span))
-            if not veto:
-                out.append({"loc": "%s:%04X" % pos, "len": hi - lo + 1, "type": "bytes",
-                            "note": "read as data by the simulator; listed as code"})
+        # a cluster never crosses from one space into the next (a block is `loc` + `len`
+        # inside one space, and a longer one overruns its listing); the piece before the
+        # boundary goes through the very same checks as any other
+        crosses = (cluster and o is not None and o - cluster[-1] <= gap
+                   and (where(o) or ("?",))[0] != (where(cluster[-1]) or ("?",))[0])
+        if cluster and (o is None or o - cluster[-1] > gap or crosses):
+            blk = judge(cluster)
+            if blk:
+                out.append(blk)
             cluster = []
         if o is not None:
             cluster.append(o)
@@ -328,7 +327,8 @@ def merge(doc, log, missed=None):
     return added
 
 
-def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
+def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False,
+          adopt_forced=False):
     """Merge, re-disassemble, seed what is still missed, until nothing is.
 
     Returns (doc, summary lines). `doc` is modified in place.
@@ -381,7 +381,8 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
             for a in runs(addrs):
                 loc = "%s:%04X" % (sp, a)
                 if loc not in doc.setdefault("entries", []):
-                    doc["entries"].append(loc)
+                    if adopt_forced:
+                        doc["entries"].append(loc)
                     forced_added.append(loc)
     n = sum(len(v) for v in log["x"].values())
     left = sum(len(v) for v in (missed or {}).values())
@@ -392,7 +393,10 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
         "executed": n, "still_unreached": left,
     }
     if forced_added:
-        note[logname]["forced_entries"] = forced_added
+        # the run never took these paths. Measured against longer runs, about a quarter of
+        # what a forced branch "joins" back is real code and the rest is not (Centipede 28%,
+        # Tomcat 0 of 10), so they are listed, and only become entries when asked for
+        note[logname]["forced_entries" if adopt_forced else "forced_proposals"] = forced_added
     lines.append("%d distinct instructions executed; %d reached by the "
                  "disassembler (%d unreached before, %d after)"
                  % (n, n - left, before, left))
@@ -403,9 +407,10 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
     for loc, banks in sorted(total["banksw"].items()):
         lines.append("  bank switch %s -> banks %s" % (loc, ", ".join(map(str, banks))))
     if forced_added:
-        lines.append("  %d more entr%s from code only a forced branch reached (a proposal; "
-                     "the run never took it): %s" % (
+        lines.append("  %d more entr%s from code only a forced branch reached (the run never "
+                     "took it; %s): %s" % (
                          len(forced_added), "y" if len(forced_added) == 1 else "ies",
+                         "added" if adopt_forced else "NOT added, --adopt-forced adds them",
                          ", ".join(forced_added[:6]) + (" ..." if len(forced_added) > 6 else "")))
     if left:
         lines.append("  %d executed instructions are still not reached; look at "
@@ -461,6 +466,10 @@ def main(argv=None):
                          "the listing prints as instructions become data blocks")
     ap.add_argument("--low", choices=["none", "ram", "bank6", "rom"])
     ap.add_argument("--mapper", choices=["linear", "supergame", "absolute"])
+    ap.add_argument("--adopt-forced", action="store_true",
+                    help="also make entries of code only a forced branch reached (a proposal: "
+                         "the run never took that path, and about a quarter of what forcing "
+                         "finds is real code)")
     ap.add_argument("--dry-run", action="store_true",
                     help="say what would be added; write nothing")
     args = ap.parse_args(argv)
@@ -470,7 +479,7 @@ def main(argv=None):
     doc, nl = annotations.read_json_keep(args.config)
     log = parse_log(io.open(args.log, encoding="utf-8").read())
     doc, lines = apply(args.rom, doc, log, os.path.basename(args.log),
-                       args.low, args.mapper)
+                       args.low, args.mapper, adopt_forced=args.adopt_forced)
     if doc is not None and args.dataread:
         reads = parse_dataread(io.open(args.dataread, encoding="utf-8").read())
         blocks, more = apply_blocks(args.rom, doc, log, reads, args.low, args.mapper)

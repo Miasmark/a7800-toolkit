@@ -42,7 +42,9 @@ local TO = tonumber(os.getenv("A7800_PC_TO") or "") or math.huge
 local NBANKS = tonumber(os.getenv("A7800_PC_BANKS") or "") or 8
 local SEL_LO, SEL_HI = (os.getenv("A7800_PC_BANKSEL") or "8000-BFFF"):match("^(%x+)%-(%x+)$")
 SEL_LO, SEL_HI = tonumber(SEL_LO, 16), tonumber(SEL_HI, 16)
-local MASK = NBANKS - 1
+local LOWBANK = tonumber(os.getenv("A7800_PC_LOWBANK") or "")        -- the file bank at $4000, if fixed
+local FIRST = tonumber(os.getenv("A7800_PC_FIRST") or "") or 0      -- window value 0 -> file bank FIRST
+local WBANKS = tonumber(os.getenv("A7800_PC_WBANKS") or "") or NBANKS  -- (EXROM: 1 and NBANKS - 1)
 
 local dpph, dppl, bank, F = nil, nil, 0, 0
 local counts = {}
@@ -55,7 +57,7 @@ TAPS[1] = mem:install_write_tap(0x20, 0x3F, "maria", function(offset, data)
   return data
 end)
 TAPS[2] = mem:install_write_tap(SEL_LO, SEL_HI, "banksel", function(offset, data)
-  bank = data & MASK
+  bank = FIRST + (data % WBANKS)
   return data
 end)
 TAPS[3] = mem:install_read_tap(0x1800, 0x27FF, "dll", function(offset, data)
@@ -64,7 +66,7 @@ TAPS[3] = mem:install_read_tap(0x1800, 0x27FF, "dll", function(offset, data)
     local d = offset - dll
     if d >= 0 and d < 120 and d % 3 == 0 then
       local pc = cpu.state["PC"].value
-      local space = (pc >= SEL_LO and pc <= SEL_HI) and ("b" .. bank) or ("f" .. (NBANKS - 1))
+      local space = (pc >= SEL_LO and pc <= SEL_HI) and ("b" .. bank) or ("f" .. ((LOWBANK and pc < 0x8000) and LOWBANK or (NBANKS - 1)))
       local key = string.format("%s:%04X", space, pc)
       counts[key] = (counts[key] or 0) + 1
     end

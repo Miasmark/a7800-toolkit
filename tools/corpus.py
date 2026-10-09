@@ -49,7 +49,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-VERSION = 5          # bump when the measure changes, so old cache entries are not reused
+VERSION = 6          # bump when the measure changes, so old cache entries are not reused
 
 
 def find_roms(root):
@@ -220,6 +220,18 @@ def measure(path, frames=300, drive=True):
             in_gap += 1
     rec["data"] = {"read": len(col.d), "in_static_code": in_code, "in_gap": in_gap,
                    "false_code_bytes": false_code}
+    # precision beyond the recall score: a listed instruction that starts INSIDE an executed
+    # one cannot be right (the run decoded those bytes the other way). This is the one error
+    # an unexecuted listing can be convicted of by the run; the rest of it is unmeasured.
+    inside = set()
+    for (sp, a) in col.x:
+        try:
+            n = m6502.LENGTH[cart.byte(sp, a)]
+        except Exception:                                     # noqa: BLE001
+            n = 1
+        inside.update((sp, a + k) for k in range(1, n))
+    clash = sorted(loc for loc in an.code if loc in inside and loc not in col.x and loc not in sled)
+    rec["clash"] = {"instructions": len(clash), "examples": ["%s:%04X" % l for l in clash[:4]]}
     rec["ok"] = True
     return rec
 
@@ -329,10 +341,14 @@ def report(recs, worst=15):
     ing = sum(r["data"]["in_gap"] for r in use)
     print("  %d bytes read; %d (%s) lie inside what the static pass printed as instructions, "
           "%d (%s) in gaps" % (dr, inc, pct(inc, dr).strip(), ing, pct(ing, dr).strip()))
+    cl = sum(r.get("clash", {}).get("instructions", 0) for r in use)
+    print("  %d listed instruction%s start inside an instruction the run executed (the run "
+          "decoded those bytes the other way; the only error of an unexecuted listing the "
+          "run can prove, so this is a floor, not a rate)" % (cl, "" if cl == 1 else "s"))
     fc = sum(r["data"].get("false_code_bytes", 0) for r in use)
     print("  of those, %d were never executed: printed as instructions yet read as data, which "
-          "is the measured lower bound on false code (the rest are code the program also "
-          "reads: checksums, copies)" % fc)
+          "is an UPPER bound on false code among the bytes it read (code that a checksum or "
+          "a copy loop walks over is read too), and says nothing about bytes never read" % fc)
     worstd = sorted(use, key=lambda r: -r["data"].get("false_code_bytes", 0))[:8]
     print("  most false code (read as data, never executed, listed as instructions):")
     for r in worstd:

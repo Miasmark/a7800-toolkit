@@ -59,7 +59,12 @@ local OUT = os.getenv("A7800_XT_LOG") or "exectrace.log"
 local SEL_LO, SEL_HI = range("A7800_XT_SELECT", "8000-BFFF")
 local WIN_LO, WIN_HI = range("A7800_XT_WINDOW", "8000-BFFF")
 local NBANKS = tonumber(os.getenv("A7800_XT_BANKS") or "") or 8
-local MASK = NBANKS - 1
+-- the window shows file bank FIRST + (value mod WBANKS); the plain SuperGame is FIRST 0 and
+-- WBANKS = NBANKS, the EXROM layout FIRST 1 and WBANKS = NBANKS - 1 with file bank LOWBANK
+-- (0) at $4000 as well as the last bank at $C000
+local FIRST = tonumber(os.getenv("A7800_XT_FIRST") or "") or 0
+local WBANKS = tonumber(os.getenv("A7800_XT_WBANKS") or "") or NBANKS
+local LOWBANK = tonumber(os.getenv("A7800_XT_LOWBANK") or "")
 local FIXED_BANK = NBANKS - 1          -- the fixed half is the last bank
 
 local bank = 0
@@ -70,6 +75,7 @@ local pending_j = nil                  -- "from" of a JMP (ind) awaiting its tar
 
 local function key(addr)
   if addr >= WIN_LO and addr <= WIN_HI then return string.format("b%d:%04X", bank, addr) end
+  if LOWBANK and addr < 0x8000 then return string.format("f%d:%04X", LOWBANK, addr) end
   return string.format("f%d:%04X", FIXED_BANK, addr)
 end
 
@@ -95,7 +101,7 @@ TAPS[1] = mem:install_write_tap(0x0001, 0x0001, "inptctrl", function(offset, dat
 end)
 TAPS[2] = mem:install_read_tap(0x4000, 0xFFFF, "exectrace", fetch)
 TAPS[3] = mem:install_write_tap(SEL_LO, SEL_HI, "banksel", function(offset, data)
-  local v = data & MASK
+  local v = FIRST + (data % WBANKS)
   if armed then
     local k = string.format("%s %d", key(cpu.state["PC"].value), v)
     seen_s[k] = (seen_s[k] or 0) + 1

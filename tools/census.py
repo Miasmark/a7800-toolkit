@@ -369,6 +369,36 @@ def decodable(data, starts=8):
     return best
 
 
+FLOW = ("RTS", "RTI", "JMP", "JSR", "BNE", "BEQ", "BCC", "BCS", "BPL", "BMI")
+
+
+def best_run(data, min_len=64, min_flow=5):
+    """The longest clean run of documented instructions begun ANYWHERE in `data`, if it is
+    long enough and has enough control flow to be code: (length, flow ops, offset), else None.
+    `decodable` only looks at the start of an area; real code is often preceded by a table, or
+    followed by one, so an area that is mostly data can hold a long run in the middle. MEASURED
+    on the census's own classes (Galaga, Centipede, Crossbow, Touchdown, Joust, Mario Bros and
+    others): 0 of ~330 64-byte chunks of what MARIA fetched passed this (1 of 165 at 32 bytes,
+    which is why the bar is 64), against about half the 64-byte chunks of executed code."""
+    n = len(data)
+    best = None
+    for s in range(n - min_len + 1):
+        if best and n - s <= best[0]:
+            break
+        i, flow = s, 0
+        while i < n:
+            mn, mode, illegal = m6502.OPCODES[data[i]]
+            ln = 1 + m6502.MODES[mode]
+            if illegal or mn == "BRK" or i + ln > n:
+                break
+            if mn in FLOW:
+                flow += 1
+            i += ln
+        if i - s >= min_len and flow >= min_flow and (best is None or i - s > best[0]):
+            best = (i - s, flow, s)
+    return best
+
+
 def guess(data, known=None, corroborated=False):
     """(label, evidence) for a block of dark bytes. A heuristic, said as such.
 
@@ -389,7 +419,15 @@ def guess(data, known=None, corroborated=False):
     if topn >= 0.9 * n:
         return "fill", "%d%% are $%02X" % (100 * topn // n, top)
     pr = sum(1 for b in data if 0x20 <= b < 0x7F)
-    if n >= 8 and pr >= 0.85 * n:
+    # text is mostly letters and spaces and is not a staircase: a table of 1, 2, 3 ... or of
+    # 10, 20, 30 ... is printable too, and so is a lot of pixel data (MEASURED on the corpus:
+    # the bare "85% printable" rule was right for about one block in five)
+    letters = sum(1 for b in data if b == 0x20 or 0x41 <= b <= 0x5A or 0x61 <= b <= 0x7A)
+    steps = {}
+    for i in range(n - 1):
+        steps[data[i + 1] - data[i]] = steps.get(data[i + 1] - data[i], 0) + 1
+    staircase = n > 1 and max(steps.values()) > 0.5 * (n - 1)
+    if n >= 8 and pr >= 0.85 * n and letters >= 0.7 * n and not staircase:
         return "text", "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in data[:24])
     frac, flow, at = decodable(data)
     strict = known is not None and not corroborated
@@ -397,12 +435,16 @@ def guess(data, known=None, corroborated=False):
             (flow >= 2 or not strict):
         return "code-like", "%d%% decodes as documented instructions with branches or returns%s" % (
             100 * frac, "" if not at else ", from offset %d" % at)
+    run = best_run(data) if n >= 64 else None
+    if run:
+        return "code-like", "a clean run of %d bytes with %d branches or returns, from offset %d" % run
     if n >= 8:
         words = [data[i] | (data[i + 1] << 8) for i in range(0, n - 1, 2)]
         near = sum(1 for w in words if w >= 0x4000)
         if known is not None:
-            hit = sum(1 for w in words if w >= 0x4000 and known(w))
-            if hit >= 0.7 * len(words) and len(set(words)) >= 0.5 * len(words):
+            # (a word whose two bytes are equal is a pair of pixel bytes, not an address)
+            hit = sum(1 for w in words if w >= 0x4000 and (w >> 8) != (w & 0xFF) and known(w))
+            if len(words) >= 6 and hit >= 0.7 * len(words) and len(set(words)) >= 0.6 * len(words):
                 return "address table?", "%d of %d words point at bytes the census saw used" % (
                     hit, len(words))
         elif near >= 0.8 * len(words) and len(set(words)) >= 0.5 * len(words):
@@ -523,6 +565,14 @@ def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
         if old.get("rom_sha1") and old["rom_sha1"] != rom_digest(cart):
             raise ValueError("%s is a census of a different cartridge (%s); not merged"
                              % (path, old.get("rom", "?")))
+        if not old.get("rom_sha1"):
+            # an older census carries no hash: its name and size are all there is to compare
+            sizes = {(sp, tuple(r)[1]) for sp, rs in old.get("sets", {}).get("exec", {}).items()
+                     for r in rs}
+            for sp, hi in sizes:
+                if sp not in cart.spaces() and sp.lstrip("m") not in cart.spaces():
+                    raise ValueError("%s is an old census (no hash) with a space %s this "
+                                     "cartridge does not have; not merged" % (path, sp))
         for key in ("exec", "read", "gfx", "forced"):
             sets[key] |= set(expand({sp: [tuple(r) for r in rs]
                                      for sp, rs in old["sets"].get(key, {}).items()}))
@@ -591,7 +641,12 @@ def dark_areas(cart, cls, min_size=4, targets=()):
             data = cart.slice(sp, lo, hi - lo + 1)
             hit = any(lo <= a <= hi for a in aimed.get(sp, ()))
             label, why = guess(data, known, hit)
-            at = decodable(data)[2] if label == "code-like" else 0
+            at = 0
+            if label == "code-like":
+                if why.startswith("a clean run"):            # the run in the middle of the area
+                    at = (best_run(data) or (0, 0, 0))[2]
+                else:
+                    at = decodable(data)[2]
             out.append({"space": sp, "lo": lo, "hi": hi, "size": hi - lo + 1,
                         "guess": label, "evidence": why, "code_at": at})
     # MARIA reads a sprite a row at a time, a page apart: the same-sized dark area at the same
@@ -816,6 +871,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not os.path.isfile(args.rom):
         sys.exit("census: no such file: %s" % args.rom)
+    if args.config and not os.path.isfile(args.config):
+        sys.exit("census: no such annotations file: %s" % args.config)
     try:
         r = build(args.rom, args.frames, args.explore, args.config, args.merge,
                   args.mapper, args.low, args.handover, args.force)

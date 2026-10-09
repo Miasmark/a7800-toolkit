@@ -474,7 +474,7 @@ def step_graphics(rom, mame, out, c, args, rep):
         env["A7800_GFX_SELECT"] = "1"
     if c.nbanks > 1:
         env["A7800_GFX_BANKSEL"] = "8000-BFFF"
-        env["A7800_GFX_BANKS"] = str(c.nbanks)
+        env.update(c.probe_env("A7800_GFX_"))
     mame.run("dumpgfx.lua", args.graphics_at / 20.0 + 15, out, env)
     if not (os.path.exists(ram) and os.path.exists(regs)):
         return ["The graphics run wrote no dump."]
@@ -611,7 +611,7 @@ def describe_slots(refs, seconds, rep):
 def step_code(rom, mame, out, c, args, rep):
     log = os.path.join(out, "code", "exectrace.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
-    env = {"A7800_XT_LOG": log, "A7800_XT_BANKS": str(max(c.nbanks, 1))}
+    env = dict(c.probe_env(), A7800_XT_LOG=log)
     mame.run("exectrace.lua", args.code_seconds, out, env)
     if not os.path.exists(log):
         return ["The run wrote no log."]

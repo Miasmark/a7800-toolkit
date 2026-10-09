@@ -60,7 +60,9 @@ local OUT = os.getenv("A7800_AO_LOG") or "addrorigin.log"
 local SEL_LO, SEL_HI = range("A7800_AO_SELECT", "8000-BFFF")
 local WIN_LO, WIN_HI = range("A7800_AO_WINDOW", "8000-BFFF")
 local NBANKS = tonumber(os.getenv("A7800_AO_BANKS") or "") or 8
-local MASK = NBANKS - 1
+local FIRST = tonumber(os.getenv("A7800_AO_FIRST") or "") or 0      -- window value 0 -> file bank FIRST
+local WBANKS = tonumber(os.getenv("A7800_AO_WBANKS") or "") or NBANKS  -- (EXROM: 1 and NBANKS - 1)
+local LOWBANK = tonumber(os.getenv("A7800_AO_LOWBANK") or "")        -- the file bank at $4000, if fixed
 local FIXED = NBANKS - 1
 local END = tonumber(os.getenv("A7800_AO_END") or "")
 
@@ -74,7 +76,9 @@ local INNER = false
 
 local function key(a)
   if a >= WIN_LO and a <= WIN_HI then return string.format("b%d:%04X", bank, a) end
-  if a >= 0x4000 then return string.format("f%d:%04X", FIXED, a) end
+  if a >= 0x4000 then
+    return string.format("f%d:%04X", (LOWBANK and a < 0x8000) and LOWBANK or FIXED, a)
+  end
   return string.format("r:%04X", a)
 end
 local function rd(a) INNER = true; local v = mem:read_u8(a & 0xFFFF); INNER = false; return v end
@@ -158,7 +162,7 @@ TAPS[2] = mem:install_read_tap(0x0000, 0xFFFF, "ao-fetch", function(offset, data
 end)
 TAPS[3] = mem:install_write_tap(0x0000, 0xFFFF, "ao-write", function(offset, data)
   if not cur then return data end
-  if offset >= SEL_LO and offset <= SEL_HI then bank = data & MASK end
+  if offset >= SEL_LO and offset <= SEL_HI then bank = FIRST + (data % WBANKS) end
   local mn = cur.mn
   if offset >= 0x100 and offset < 0x200 and offset ~= cur.ea then
     if mn == "PHA" then memsrc[offset] = srcA

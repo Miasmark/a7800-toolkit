@@ -91,10 +91,12 @@ end)
 local bank = nil
 local SEL_LO, SEL_HI = (os.getenv("A7800_GFX_BANKSEL") or ""):match("^(%x+)%-(%x+)$")
 if SEL_LO then
-  local mask = (tonumber(os.getenv("A7800_GFX_BANKS") or "") or 8) - 1
+  local nb = tonumber(os.getenv("A7800_GFX_BANKS") or "") or 8
+  local first = tonumber(os.getenv("A7800_GFX_FIRST") or "") or 0
+  local wbanks = tonumber(os.getenv("A7800_GFX_WBANKS") or "") or nb     -- see exectrace.lua
   TAPS[2] = mem:install_write_tap(tonumber(SEL_LO, 16), tonumber(SEL_HI, 16),
                                   "banksel", function(offset, data)
-    bank = data & mask
+    bank = first + (data % wbanks)
     return data
   end)
 end

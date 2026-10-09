@@ -1825,9 +1825,58 @@ def t_exrom_layout():
         sp = c.spaces()
         assert sp[0] == "f0" and "b1" in sp and "b0" not in sp and "b%d" % (nb - 1) in sp and sp[-1] == "f%d" % (nb - 1), sp
         assert c.byte("b6", 0x8000) == 6
+        # the Lua probes are told the same layout, or they name the wrong banks
+        pe = c.probe_env()
+        assert (pe["A7800_XT_FIRST"], pe["A7800_XT_WBANKS"], pe["A7800_XT_LOWBANK"]) == ("1", str(nb - 1), "0"), pe
     finally:
         shutil.rmtree(work, True)
     return "EXROM: f0 at $4000, last bank at $C000, window value v -> file bank v+1"
+
+
+def t_om_file_offsets():
+    """An (OM) Activision dump is read in the usual block order, so a write by address must
+    be mapped back to the file: songfmt and the sprite editor once wrote into the XOR-1
+    neighbour 8K block."""
+    import cart as cart_module
+    import songfmt
+    import spriteedit as SE
+    am = bytearray()
+    for b in range(16):
+        am += bytes([b]) * 0x2000
+    am[0x1DFFA:0x1E000] = bytes([0x00, 0xA0] * 3)       # AM order: block 14 ends with the vectors
+    am[-6:] = bytes([0xFF] * 6)
+    fl = bytearray(len(am))
+    for i in range(16):
+        fl[i * 0x2000:(i + 1) * 0x2000] = am[(i ^ 1) * 0x2000:((i ^ 1) + 1) * 0x2000]
+    hdr = bytearray(128)
+    hdr[0] = 1
+    hdr[1:10] = b"ATARI7800"
+    hdr[49:53] = len(fl).to_bytes(4, "big")
+    hdr[53], hdr[54] = 0x01, 0x00
+    hdr[55] = 1
+    work = tempfile.mkdtemp(prefix="selftest-om-")
+    try:
+        rom = os.path.join(work, "om.a78")
+        raw = bytes(hdr) + bytes(fl)
+        io.open(rom, "wb").write(raw)
+        c = cart_module.Cart(rom)
+        assert c.om_order, "the (OM) order was not recognised"
+        for sp in c.spaces():
+            for a in range(c.base_of(sp), c.base_of(sp) + c.size_of(sp), 97):
+                assert raw[128 + c.file_offset(sp, a)] == c.byte(sp, a), (sp, a)
+        sp = c.spaces()[0]
+        a = c.base_of(sp) + 0x10
+        out = songfmt.apply_writes(raw, c, [(sp, a, b"\xA5\x5A", "test")])
+        io.open(rom, "wb").write(out)
+        c2 = cart_module.Cart(rom)
+        assert c2.slice(sp, a, 2) == b"\xA5\x5A", "the write did not land where the reader looks"
+        assert sum(1 for x, y in zip(raw, out) if x != y) <= 2
+        SE.CART, SE.PATH, SE.DATA = c, rom, bytearray(raw)
+        SE.REGION = SE.Region(c, sp, c.base_of(sp), 1, 8, 256, 256, "160")
+        assert SE.DATA[SE.REGION.file_offset(a)] == c.byte(sp, a)
+    finally:
+        shutil.rmtree(work, True)
+    return "(OM) dumps: addresses map back to the file's block order for songs and sprites"
 
 
 def t_dispatch_tables():
@@ -1927,6 +1976,74 @@ vectors_pad:
     return "interleaved and split tables followed; the table stops at implausible code"
 
 
+def t_ram_vector_runs():
+    """`LDA #<x / STA v / LDA #>x / STA v+1` installs one after another each find their own
+    handler: every store is equidistant from two others, which a nearest-and-mutual rule
+    resolved to the first only."""
+    import asm
+    import disasm
+    src = """
+    .org $C000
+reset:
+    SEI
+    CLD
+    LDA #<ha
+    STA $0200
+    LDA #>ha
+    STA $0201
+    LDA #<hb
+    STA $0200
+    LDA #>hb
+    STA $0201
+    LDA #<hc
+    STA $0200
+    LDA #>hc
+    STA $0201
+    JMP ($0200)
+ha:
+    INX
+    INX
+    INX
+    RTS
+hb:
+    INY
+    INY
+    INY
+    RTS
+hc:
+    DEX
+    DEX
+    DEX
+    RTS
+nmi:
+    RTI
+vectors_pad:
+    .res $FFFA-vectors_pad,$00
+    .word nmi
+    .word reset
+    .word nmi
+"""
+    a = asm.Assembler()
+    data = a.assemble(src.splitlines())
+    work = tempfile.mkdtemp(prefix="selftest-ramvec-")
+    try:
+        rom = os.path.join(work, "v.a78")
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = (0x4000).to_bytes(4, "big")
+        hdr[55] = 1
+        io.open(rom, "wb").write(bytes(hdr) + bytes(data))
+        an, *_ = disasm.analyse(disasm.Cart(rom), disasm.Config())
+        for h in ("ha", "hb", "hc"):
+            assert ("rom", a.sym[h]) in an.code, "handler not found: " + h
+        # and none that is half of one and half of another
+        assert not [x for x in an.code if x[1] not in range(0xC000, 0xC040)], sorted(an.code)[-3:]
+    finally:
+        shutil.rmtree(work, True)
+    return "consecutive RAM-vector installs each find their own handler"
+
+
 def t_branchforce():
     """branchforce.py on the synthetic cartridge: a branch the run never takes leads to a
     hand-pushed RTS and code the static tracer cannot reach (kept, as joined), and its
@@ -1978,6 +2095,9 @@ def t_dyn_sim():
         assert any(facts["forced_target"] in v for v in log["f"].values()), log["f"]
         doc = {}
         doc, lines = dyn.apply(rom, doc, log, "exectrace.log")
+        assert "f7:%04X" % facts["forced_target"] not in doc.get("entries", []), doc["entries"]
+        assert "f7:%04X" % facts["forced_target"] in doc["_dynamic"]["exectrace.log"]["forced_proposals"]
+        doc, lines = dyn.apply(rom, {}, log, "exectrace.log", adopt_forced=True)
         assert "f7:%04X" % facts["forced_target"] in doc["entries"], doc["entries"]
         assert "forced_entries" in doc["_dynamic"]["exectrace.log"], doc["_dynamic"]
         # reads over code the run never executed turn into one block, and nothing is lost
@@ -1991,6 +2111,12 @@ def t_dyn_sim():
         assert not [b for b in dyn.data_blocks(rom, doc, log, {"f7": set(range(fe, fe + 8)),
                                                                 "b0": set(range(0x8000, 0x8008))})
                     if b["len"] > 8], "a block crossed a space boundary"
+        # the piece before the boundary is judged like any other: bytes the listing does not
+        # show as code are not "listed as code", so nothing is proposed for them
+        assert not [b for b in dyn.data_blocks(rom, doc, log, {"b0": set(range(0xBFFA, 0xC000)),
+                                                                "f7": set(range(0xC000, 0xC004))},
+                                               min_len=4) if b["loc"].startswith("b0:")], \
+            "the piece before a space boundary skipped the vetoes"
         # nor over a forced entry, which is code
         ft = facts["forced_target"]
         assert not dyn.data_blocks(rom, doc, log, {"f7": set(range(ft, ft + 3))}, min_len=3), \
@@ -2023,6 +2149,14 @@ def t_census_guess():
     assert census.guess(code)[0] == "code-like"
     assert census.guess(b"PRESS FIRE TO START")[0] == "text"
     assert census.guess(bytes([0xFF] * 40))[0] == "fill"
+    # printable is not text: a staircase of values and a short run of letters in a table are not
+    assert census.guess(b"-NOPQRST")[0] != "text" and census.guess(bytes(range(0x30, 0x3A)))[0] != "text"
+    assert census.guess(bytes([0x1E, 0x28, 0x32, 0x3C, 0x46, 0x50, 0x5A, 0x64, 0x6E, 0x78]))[0] != "text"
+    # real code in the middle of an area that starts and ends with bytes that are not
+    mid = bytes([0x02] * 40) + bytes([0xA9, 0x01, 0x85, 0x10, 0xD0, 0xFA] * 12) + bytes([0x02] * 40)
+    lab, why = census.guess(mid)
+    assert lab == "code-like" and "from offset 40" in why, (lab, why)
+    assert census.guess(bytes([0x02] * 20 + [0xA9, 0x01, 0x85, 0x10, 0xD0, 0xFA] * 3 + [0x02] * 100))[0] != "code-like"
     table = b"".join(bytes([lo, 0xC0 + i]) for i, lo in enumerate(range(0x10, 0x30, 4)))
     assert census.guess(table)[0].startswith("address table"), census.guess(table)
     gfx = bytes([0, 0, 0x18, 0x3C, 0x7E, 0xFF, 0x7E, 0x3C, 0x18, 0, 0, 0, 0x18, 0x3C, 0xFF, 0])
@@ -4895,6 +5029,8 @@ def main():
     r.check("local server rules", t_localserver)
     r.check("workbench hardening", t_workbench_hardening)
     r.check("workbench handoff", t_workbench_handoff)
+    r.check("(OM) file offsets", t_om_file_offsets)
+    r.check("RAM vector runs", t_ram_vector_runs)
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
     r.check("simulated address origins", t_simorigins)

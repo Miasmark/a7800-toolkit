@@ -333,17 +333,19 @@ class Analyzer:
                 for reg, clobbers in self._VEC_CLOBBERS.items():
                     if mn in clobbers:
                         last_imm[reg] = None
-            # pair each low-byte store with the NEAREST high-byte store, and only if each is
-            # the other's nearest: every low byte matched with every high byte within the
-            # window invents handlers (the low byte of one, the high byte of the next)
-            for la, lv in los:
-                near = [(abs(ha - la), ha, hv) for ha, hv in his if abs(ha - la) <= window]
-                if not near:
+            # pair low-byte and high-byte stores one to one, nearest first (ties by address):
+            # every low byte matched with every high byte within the window invents handlers
+            # (the low byte of one, the high byte of the next), and a run of installs one
+            # after another has every store equidistant from two others
+            cand = sorted((abs(ha - la), la, ha, lv, hv)
+                          for la, lv in los for ha, hv in his if abs(ha - la) <= window)
+            used_lo, used_hi = set(), set()
+            for _d, la, ha, lv, hv in cand:
+                if la in used_lo or ha in used_hi:
                     continue
-                _d, ha, hv = min(near)
-                back = min((abs(la2 - ha), la2) for la2, _v in los)
-                if back[1] == la:
-                    found.append((lv | (hv << 8), (space, la)))
+                used_lo.add(la)
+                used_hi.add(ha)
+                found.append((lv | (hv << 8), (space, la)))
         return found
 
     # -- jump tables ---------------------------------------------------------
@@ -601,8 +603,7 @@ class Emitter:
         """Where this space begins in the image file, header included."""
         c = self.cart
         head = 128 if c.header_bytes else 0
-        return (head + getattr(self, "shift", 0) + getattr(c, "file_base", 0)
-                + c._offset(space, c.base_of(space)))
+        return head + getattr(self, "shift", 0) + c.file_offset(space, c.base_of(space))
 
     def emit_space(self, space, out):
         cart, an, cfg = self.cart, self.an, self.cfg

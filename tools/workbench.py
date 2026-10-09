@@ -653,12 +653,14 @@ def build_observe(p):
             cmd.append("--force")
         steps = [{"cmd": cmd}]
     else:
-        steps = [{"cmd": _probe("exectrace", out, secs, {"A7800_XT_BANKS": _banks()})}]
+        steps = [{"cmd": _probe("exectrace", out, secs, CART.probe_env())}]
     _need_config(steps)
     dyn_cmd = _py("dyn.py", ROM, os.path.join(out, "exectrace.log"), "-c", config_path())
     if _engine(p) == "sim":
         # the bytes it read as data, so what the listing prints as code can be cut out
         dyn_cmd += ["--dataread", os.path.join(out, "dataread.log")]
+        if _bool(p, "force", False):
+            dyn_cmd.append("--adopt-forced")      # they ticked it: the paths it found are entries
     steps.append({"cmd": dyn_cmd})
     _refresh_listing(steps)
     return Job("observe", "observe code", steps, out,
@@ -672,7 +674,7 @@ def build_addresses(p):
     if _engine(p) == "sim":
         steps = [{"cmd": _py("simorigins.py", ROM, "-o", out, "--frames", _frames(p, 10))}]
     else:
-        steps = [{"cmd": _probe("addrorigin", out, secs, {"A7800_AO_BANKS": _banks()})}]
+        steps = [{"cmd": _probe("addrorigin", out, secs, CART.probe_env("A7800_AO_"))}]
     _need_config(steps)
     steps.append({"cmd": _py("origins.py", os.path.join(out, "addrorigin.log"), ROM,
                              "-c", config_path())})
@@ -688,7 +690,7 @@ def build_profile(p):
         steps = [{"cmd": _py("simprobe.py", ROM, "-o", out, "--frames", _frames(p, 20),
                              "--drive", "--profile")}]
     else:
-        steps = [{"cmd": _probe("pcprof", out, secs, {"A7800_PC_BANKS": _banks()})}]
+        steps = [{"cmd": _probe("pcprof", out, secs, CART.probe_env("A7800_PC_"))}]
     cmd = _py("pcmap.py", os.path.join(out, "pcprof.log"))
     if os.path.isfile(config_path()):
         cmd += ["-c", config_path()]
