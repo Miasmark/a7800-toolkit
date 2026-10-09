@@ -6,7 +6,7 @@ byte-identical disassembly of a 128K commercial game, and grew through several
 more.
 
 Nothing here is specific to those games. The cartridge model was tested against
-**2,664 retail and homebrew images** and lays out all but four of them — including Activision's 8K-granular mapper and bankset cartridges, whose two halves are read separately with `side=`; the
+**1,309 retail and homebrew images** (Trebor's 7800 ROM PROPack v8_17, the library the rest of these docs count) and lays out all but two of them (it refuses SOUPER, which has its own mapper and extra hardware, and a 512K linear demo), Activision's 8K-granular mapper and bankset cartridges, whose two halves are read separately with `side=`; the
 disassembler reproduces the hand-verified 128K disassembly byte for byte while
 also handling unbanked 4K-48K ROMs.
 
