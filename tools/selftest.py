@@ -1346,6 +1346,47 @@ def t_branchforce():
     return "forced branch found the computed-RTS target, junk path trimmed, data starts all dead"
 
 
+def t_dyn_sim():
+    """What a simulated run hands the disassembler beyond jump targets: with --explore
+    --force the code only a forced branch reached arrives as `F` lines and becomes an
+    entry marked as a proposal; bytes the run read as data but the listing prints as
+    instructions are cut out as blocks, without losing a reached instruction; RAM
+    trampolines count as jumps."""
+    import dyn
+    import simprobe
+    synth = _synth()
+    _d, facts = synth.build()
+    rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    out = tempfile.mkdtemp(prefix="selftest-dynsim-")
+    try:
+        simprobe.probe(rom, out, frames=120, drive=True, explore=True, force=True)
+        log = dyn.parse_log(io.open(os.path.join(out, "exectrace.log"), encoding="utf-8").read())
+        assert any(facts["forced_target"] in v for v in log["f"].values()), log["f"]
+        doc = {}
+        doc, lines = dyn.apply(rom, doc, log, "exectrace.log")
+        assert "f7:%04X" % facts["forced_target"] in doc["entries"], doc["entries"]
+        assert "forced_entries" in doc["_dynamic"]["exectrace.log"], doc["_dynamic"]
+        # reads over code the run never executed turn into one block, and nothing is lost
+        lo = facts["sym"]["rare_path"]
+        reads = {"f7": set(range(lo, lo + 8))}
+        blocks = dyn.data_blocks(rom, doc, log, reads)
+        assert len(blocks) == 1 and blocks[0]["loc"] == "f7:%04X" % lo and blocks[0]["len"] == 8, blocks
+        added, msg = dyn.apply_blocks(rom, doc, log, reads)
+        assert added and doc["blocks"], msg
+        # a read of an executed byte is code, not data
+        ex = sorted(log["x"]["f7"])[0]
+        assert not dyn.data_blocks(rom, doc, log, {"f7": set(range(ex, ex + 8))})
+    finally:
+        shutil.rmtree(out, True)
+    # a jump from a RAM trampoline is recorded, by where it went
+    c = simprobe.Collector()
+    c.kind = {0xC1: "f7"}
+    c.bus = type("B", (), {"bank": 0})()
+    c.jump_indirect(0x20EA, 0xC123)
+    assert (("ram", 0x20EA), ("f7", 0xC123)) in c.j, c.j
+    return "forced entries marked as proposals, read-as-data tables cut out, RAM trampolines recorded"
+
+
 def t_census_guess():
     """The dark-area guesses on bytes whose nature is known."""
     import census
@@ -4217,6 +4258,7 @@ def main():
     r.check("simulated address origins", t_simorigins)
     r.check("census", t_census)
     r.check("census guesses", t_census_guess)
+    r.check("dynamic evidence from the sim", t_dyn_sim)
     r.check("branch forcing", t_branchforce)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)

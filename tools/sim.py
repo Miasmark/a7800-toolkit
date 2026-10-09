@@ -368,8 +368,9 @@ class Bus(object):
         The polynomial is x^17 + x^12 + 1, clocked at the CPU rate, so it is
         advanced by however many cycles have passed since it was last asked.
         """
-        step = cycles - self.poly_at
-        self.poly_at = cycles
+        # the cycle count is fractional once MARIA's DMA has taken its share of a line
+        step = int(cycles - self.poly_at)
+        self.poly_at += step
         p = self.poly
         for _ in range(min(step, 4096)):
             p = ((p >> 1) | (((p ^ (p >> 5)) & 1) << 16)) & 0x1FFFF

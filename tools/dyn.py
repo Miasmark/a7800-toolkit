@@ -37,19 +37,95 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def parse_log(text):
     """{'x': {space: set(addr)}, 'j': [(from, to)], 's': {loc: set(bank)}}."""
-    x, j, s = {}, [], {}
+    x, j, s, f, rc = {}, [], {}, {}, []
     for ln in text.splitlines():
         p = ln.split()
         if not p:
             continue
-        if p[0] == "X" and len(p) == 2:
+        if p[0] in ("X", "F") and len(p) == 2:
             sp, _, a = p[1].partition(":")
-            x.setdefault(sp, set()).add(int(a, 16))
+            (x if p[0] == "X" else f).setdefault(sp, set()).add(int(a, 16))
+        elif p[0] == "R" and len(p) == 4:
+            rc.append((int(p[1].lstrip("$"), 16), int(p[2]), p[3]))
         elif p[0] == "J" and len(p) == 3:
             j.append((p[1], p[2]))
         elif p[0] == "S" and len(p) >= 3:
             s.setdefault(p[1], set()).add(int(p[2]))
-    return {"x": x, "j": j, "s": s}
+    return {"x": x, "j": j, "s": s, "f": f, "r": rc}
+
+
+def parse_dataread(text):
+    """{space: set(addr)} from a dataread.log (`D space:addr xN` lines)."""
+    out = {}
+    for ln in text.splitlines():
+        p = ln.split()
+        if len(p) >= 2 and p[0] == "D":
+            sp, _, a = p[1].partition(":")
+            out.setdefault(sp, set()).add(int(a, 16))
+    return out
+
+
+def data_blocks(rom, doc, log, reads, low=None, mapper=None, min_len=4, gap=2):
+    """Proposed `blocks` for bytes the run READ AS DATA that the listing prints as
+    instructions, and the run never executed.
+
+    A table the game indexes into is not code, but a tracer that reached its first byte by
+    falling through from something else disassembles it as if it were. The run knows
+    better: it read those bytes as data, and no byte in them was ever fetched. Only the
+    range actually read is proposed (clusters of reads within `gap` bytes, at least
+    `min_len` long), never extended on a guess, and only where the listing currently has
+    instructions. Returns [{"loc", "len", "type", "note"}], none overlapping a block
+    already in `doc`.
+    """
+    import disasm
+    import m6502
+    cart = disasm.Cart(rom, mapper=mapper, low=low) if (mapper or low) else disasm.Cart(rom)
+    cfg = disasm.Config(data=doc)
+    an, _g, _w, _v = disasm.analyse(cart, cfg)
+    ran = set()                                  # every byte of every executed instruction
+    for sp, addrs in log["x"].items():
+        for a in addrs:
+            try:
+                n = m6502.LENGTH[cart.byte(sp, a)]
+            except Exception:                    # noqa: BLE001
+                n = 1
+            ran.update((sp, a + k) for k in range(n))
+    code_bytes = set()
+    for (sp, a) in an.code:
+        n = an.insn[(sp, a)][3]
+        code_bytes.update((sp, a + k) for k in range(n))
+    existing = set()
+    for b in doc.get("blocks", []):
+        sp, a = disasm.parse_loc(b["loc"])
+        end = disasm.parse_loc(b["end"])[1] if "end" in b else a + b.get("len", 1)
+        existing.update((sp, x) for x in range(a, end))
+    out = []
+    # ROM bytes the game copied to RAM and ran there: from the ROM's side they are data
+    for ramaddr, n, src in log.get("r", []):
+        sp, _, a = src.partition(":")
+        span = [(sp, int(a, 16) + k) for k in range(n)]
+        if not any(l in ran or l in existing for l in span):
+            out.append({"loc": src, "len": n, "type": "bytes",
+                        "note": "copied to RAM $%04X and run there" % ramaddr})
+            existing.update(span)
+    for sp, addrs in sorted(reads.items()):
+        cluster = []
+        # a byte that was both read and executed is code; it ends a cluster of data
+        for a in sorted(x for x in addrs if (sp, x) not in ran) + [None]:
+            if cluster and (a is None or a - cluster[-1] > gap):
+                lo, hi = cluster[0], cluster[-1]
+                span = [(sp, x) for x in range(lo, hi + 1)]
+                if (hi - lo + 1 >= min_len
+                        and not any(l in ran for l in span)
+                        and not any(l in existing for l in span)
+                        and sum(1 for l in span if l in code_bytes) * 2 >= len(span)):
+                    out.append({"loc": "%s:%04X" % (sp, lo), "len": hi - lo + 1,
+                                "type": "bytes",
+                                "note": "read as data by the simulator; listed as code"})
+                cluster = []
+            if a is not None:
+                cluster.append(a)
+    return out
 
 
 def reached(srcdir):
@@ -159,6 +235,23 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
             return None, ["the disassembler failed after merging; nothing kept"]
         if not missed:
             break
+    # code only a forced branch reached: entries for what is still not reached, kept apart
+    # because the run never took those paths
+    forced_added = []
+    if log.get("f") and missed is not None:
+        trial = {"x": {sp: set(a) for sp, a in log["f"].items()}, "j": [], "s": {}}
+        saved = log["x"]
+        log["x"] = trial["x"]
+        try:
+            fmiss = unreached()
+        finally:
+            log["x"] = saved
+        for sp, addrs in sorted((fmiss or {}).items()):
+            for a in runs(addrs):
+                loc = "%s:%04X" % (sp, a)
+                if loc not in doc.setdefault("entries", []):
+                    doc["entries"].append(loc)
+                    forced_added.append(loc)
     n = sum(len(v) for v in log["x"].values())
     left = sum(len(v) for v in (missed or {}).values())
     note = doc.setdefault("_dynamic", {})
@@ -167,6 +260,8 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
         "entries": total["entries"], "banksw": total["banksw"],
         "executed": n, "still_unreached": left,
     }
+    if forced_added:
+        note[logname]["forced_entries"] = forced_added
     lines.append("%d distinct instructions executed; %d reached by the "
                  "disassembler (%d unreached before, %d after)"
                  % (n, n - left, before, left))
@@ -176,10 +271,49 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False):
             ", ".join(total["entries"][:8]) + (" ..." if len(total["entries"]) > 8 else "")))
     for loc, banks in sorted(total["banksw"].items()):
         lines.append("  bank switch %s -> banks %s" % (loc, ", ".join(map(str, banks))))
+    if forced_added:
+        lines.append("  %d more entr%s from code only a forced branch reached (a proposal; "
+                     "the run never took it): %s" % (
+                         len(forced_added), "y" if len(forced_added) == 1 else "ies",
+                         ", ".join(forced_added[:6]) + (" ..." if len(forced_added) > 6 else "")))
     if left:
         lines.append("  %d executed instructions are still not reached; look at "
                      "them with disasm.py --gaps" % left)
     return doc, lines
+
+
+def apply_blocks(rom, doc, log, reads, low=None, mapper=None):
+    """Add `data_blocks` to `doc` if the disassembler then still reaches every instruction
+    it reached before; otherwise add nothing. Returns (added, lines)."""
+    blocks = data_blocks(rom, doc, log, reads, low, mapper)
+    if not blocks:
+        return [], ["no bytes the run read as data are listed as code"]
+    work = tempfile.mkdtemp(prefix="dyn-blk-")
+
+    def left(d):
+        cfg = os.path.join(work, "a.json")
+        with io.open(cfg, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        out = disassemble(rom, cfg, low, mapper)
+        if out is None:
+            return None
+        got = reached(out)
+        return sum(1 for sp, addrs in log["x"].items() for a in addrs
+                   if a not in got.get(sp, ()))
+
+    before = left(doc)
+    trial = json.loads(json.dumps(doc))
+    trial.setdefault("blocks", []).extend(blocks)
+    after = left(trial)
+    if before is None or after is None or after > before:
+        return [], ["%d data blocks were proposed but cutting them out lost executed code "
+                    "(%s -> %s unreached); none added" % (len(blocks), before, after)]
+    doc.setdefault("blocks", []).extend(blocks)
+    total = sum(b["len"] for b in blocks)
+    return blocks, ["%d data block%s added (%d bytes the run read as data, listed as code): %s"
+                    % (len(blocks), "" if len(blocks) == 1 else "s", total,
+                       ", ".join("%s +%d" % (b["loc"], b["len"]) for b in blocks[:6])
+                       + (" ..." if len(blocks) > 6 else ""))]
 
 
 def main(argv=None):
@@ -191,6 +325,9 @@ def main(argv=None):
     ap.add_argument("log", help="a log from probes/exectrace.lua")
     ap.add_argument("-c", "--config", required=True,
                     help="the annotations file to add to (written in place)")
+    ap.add_argument("--dataread", metavar="LOG",
+                    help="a dataread.log from simprobe.py: bytes the run read as data that "
+                         "the listing prints as instructions become data blocks")
     ap.add_argument("--low", choices=["none", "ram", "bank6", "rom"])
     ap.add_argument("--mapper", choices=["linear", "supergame", "absolute"])
     ap.add_argument("--dry-run", action="store_true",
@@ -204,6 +341,13 @@ def main(argv=None):
     log = parse_log(io.open(args.log, encoding="utf-8").read())
     doc, lines = apply(args.rom, doc, log, os.path.basename(args.log),
                        args.low, args.mapper)
+    if doc is not None and args.dataread:
+        reads = parse_dataread(io.open(args.dataread, encoding="utf-8").read())
+        blocks, more = apply_blocks(args.rom, doc, log, reads, args.low, args.mapper)
+        lines += more
+        if blocks:
+            doc.setdefault("_dynamic", {}).setdefault(
+                os.path.basename(args.log), {})["blocks"] = [b["loc"] for b in blocks]
     print("\n".join(lines))
     if doc is None:
         return 1

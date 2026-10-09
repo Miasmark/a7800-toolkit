@@ -497,16 +497,24 @@ def build_observe(p):
     secs = _int(p, "seconds", 30, 5, 600)
     out = os.path.join(PROJECT, "observe")
     if _engine(p) == "sim":
-        steps = [{"cmd": _py("simprobe.py", ROM, "-o", out, "--frames", _frames(p, 30),
-                             "--drive")}]
+        cmd = _py("simprobe.py", ROM, "-o", out, "--frames", _frames(p, 30), "--drive")
+        if _bool(p, "explore", True):
+            cmd.append("--explore")
+        if _bool(p, "force", False):
+            cmd.append("--force")
+        steps = [{"cmd": cmd}]
     else:
         steps = [{"cmd": _probe("exectrace", out, secs, {"A7800_XT_BANKS": _banks()})}]
     _need_config(steps)
-    steps.append({"cmd": _py("dyn.py", ROM, os.path.join(out, "exectrace.log"),
-                             "-c", config_path())})
+    dyn_cmd = _py("dyn.py", ROM, os.path.join(out, "exectrace.log"), "-c", config_path())
+    if _engine(p) == "sim":
+        # the bytes it read as data, so what the listing prints as code can be cut out
+        dyn_cmd += ["--dataread", os.path.join(out, "dataread.log")]
+    steps.append({"cmd": dyn_cmd})
     _refresh_listing(steps)
     return Job("observe", "observe code", steps, out,
-               "jump targets and bank switches it saw, added to annotations.json")
+               "jump targets and bank switches it saw, tables it read that were listed as "
+               "code, added to annotations.json")
 
 
 def build_addresses(p):
@@ -653,10 +661,16 @@ def _kinds():
              build=build_newannot, params=[]),
         dict(kind="observe", label="Observe code", group="Annotate", mame=False,
              about="Run it and write down where indirect jumps went and which banks "
-                   "were switched in: entry points the static tracer cannot find.",
+                   "were switched in: entry points the static tracer cannot find. In "
+                   "the simulator it also cuts out bytes the game read as data that the "
+                   "listing printed as instructions.",
              build=build_observe,
              params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
-                     p("seconds", "seconds", "int", 30, min=5, max=600)]),
+                     p("seconds", "seconds", "int", 30, min=5, max=600),
+                     p("explore", "also sweep the stick and work the console switches "
+                       "(simulator)", "bool", True),
+                     p("force", "also take untaken branches (simulator, slow)", "bool",
+                       False)]),
         dict(kind="addresses", label="Find address tables", group="Annotate", mame=False,
              about="Follow every address the CPU uses back to the ROM bytes it came "
                    "from, and add the tables to annotations.json. Slow.",

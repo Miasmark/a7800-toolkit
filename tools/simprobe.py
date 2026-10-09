@@ -68,6 +68,8 @@ class Collector(sim.Observer):
         self.frames_with_list = 0
         self.arrival = {}            # location -> how it was first reached
         self.pred = {}               # location -> the location fetched just before it, first time
+        self.ramx = set()            # RAM addresses (folded) an instruction was fetched from
+        self.ramsrc = []             # (RAM address, length, ROM location it was copied from)
 
     def attach(self, bus, cpu):
         sim.Observer.attach(self, bus, cpu)
@@ -113,6 +115,8 @@ class Collector(sim.Observer):
 
     def fetch(self, pc, opcode):
         loc = self.loc(pc)
+        if loc is None and (pc & 0xFFFF) < 0x4000:
+            self.ramx.add(sim.fold(pc & 0xFFFF))
         if loc is not None:
             if loc not in self.x:
                 self.arrival[loc] = self._how(pc)
@@ -156,7 +160,9 @@ class Collector(sim.Observer):
             self.d[loc] = self.d.get(loc, 0) + 1
 
     def jump_indirect(self, pc, target):
-        a, b = self.loc(pc), self.loc(target)
+        # a trampoline in RAM (a `JMP (vec)` the game copies or writes there) is a jump
+        # too: where it came from is the RAM address, but where it went is what matters
+        a, b = self.loc(pc) or ("ram", pc & 0xFFFF), self.loc(target)
         if a and b:
             self.j[(a, b)] = self.j.get((a, b), 0) + 1
 
@@ -169,7 +175,7 @@ class Collector(sim.Observer):
             return
         # a return that did not come from a JSR: the return address was pushed by
         # hand (PHA / PHA / RTS), which is a computed jump no static tracer follows
-        a, b = self.loc(pc), self.loc(target)
+        a, b = self.loc(pc) or ("ram", pc & 0xFFFF), self.loc(target)
         if a and b:
             self.j[(a, b)] = self.j.get((a, b), 0) + 1
 
@@ -191,8 +197,45 @@ def fmt(loc):
     return "%s:%04X" % loc
 
 
+def ram_sources(cart, bus, col, probe_len=16):
+    """Where the code the run executed from RAM was copied from. For each cluster of RAM
+    addresses an instruction was fetched at, the bytes now in RAM are looked for in the
+    ROM; a match of `probe_len` bytes or the whole cluster names the source. Returns
+    [(RAM address, length, ROM (space, address))]."""
+    out = []
+    if not col.ramx:
+        return out
+    rom = bytes(cart.rom)
+    spans = []
+    for a in sorted(col.ramx):
+        if spans and a - spans[-1][1] <= 3:
+            spans[-1][1] = a
+        else:
+            spans.append([a, a])
+    for lo, hi in spans:
+        hi += 2                                   # an instruction's operand bytes
+        n = hi - lo + 1
+        if n < 8:
+            continue
+        data = bytes(bus.ram[sim.fold(a)] for a in range(lo, hi + 1))
+        k = data[:min(n, probe_len)]
+        off = rom.find(k)
+        if off < 0 or not any(k):
+            continue
+        for sp in cart.spaces():
+            o0, size, base = cart._file_base(sp), cart.size_of(sp), cart.base_of(sp)
+            if o0 <= off < o0 + size:
+                out.append((lo, n, (sp, base + off - o0)))
+                break
+    return out
+
+
 def write_exectrace(col, path):
     lines = ["X " + fmt(l) for l in col.x]
+    # F: code only a forced branch reached (branchforce.py); a proposal, not an observation
+    lines += ["F " + fmt(l) for l in getattr(col, "forced", ()) if l not in col.x]
+    # R: code that ran from RAM, and the ROM bytes it was copied from
+    lines += ["R $%04X %d %s" % (a, n, fmt(src)) for a, n, src in getattr(col, "ramsrc", ())]
     lines += ["J %s %s" % (fmt(a), fmt(b)) for (a, b) in col.j]
     lines += ["S %s %d x%d" % (fmt(a), b, n) for (a, b), n in col.s.items()]
     with open(path, "w") as f:
@@ -246,16 +289,49 @@ def write_dump(col, bus, ram_path, regs_path):
         f.write(snap["regs"])
 
 
+def merge_into(col, other):
+    """Add what `other` observed to `col`: executed, read, jumped, switched, forced."""
+    col.x |= other.x
+    for k, v in other.d.items():
+        col.d[k] = col.d.get(k, 0) + v
+    for k, v in other.j.items():
+        col.j[k] = col.j.get(k, 0) + v
+    for k, v in other.s.items():
+        col.s[k] = col.s.get(k, 0) + v
+    col.forced = set(getattr(col, "forced", ())) | set(getattr(other, "forced", ()))
+    col.frames_with_list = max(col.frames_with_list, other.frames_with_list)
+
+
 def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=None,
-          low=None, profile=False):
-    """Run `rom` for `frames` frames and write the files; returns a summary dict."""
+          low=None, profile=False, explore=False, force=False):
+    """Run `rom` for `frames` frames and write the files; returns a summary dict.
+
+    `explore` runs it twice more, sweeping the joystick and then working the console
+    switches as well, and unions what the runs saw; `force` also takes the untaken side
+    of branches (branchforce.py) and writes what rejoined real code as `F` lines."""
     cart = cart_module.Cart(rom, mapper=mapper, low=low)
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     start = sim.load_handover(handover) if handover else None
-    col = Collector(dump_frame=frames, profile=profile)
-    bus = sim.run(cart, frames, region, drive=drive, steal=steal,
-                  start_state=start, observer=col)
-    col.finish()
+    modes = [drive] + (["explore", "switches"] if explore else [])
+    col = bus = None
+    for mode in modes:
+        c = Collector(dump_frame=frames, profile=profile)
+        watcher = None
+        if force:
+            import branchforce
+            watcher = branchforce.Watcher(c)
+        b = sim.run(cart, frames, region, drive=mode, steal=steal,
+                    start_state=start, observer=watcher or c)
+        c.finish()
+        c.forced = set()
+        if force:
+            kept, _dead, _n = branchforce.force(cart, c, watcher, drive=mode)
+            c.forced = {l for l, v in kept.items() if v == "joined" and l not in c.x}
+        if col is None:
+            col, bus = c, b
+        else:
+            merge_into(col, c)
+    col.ramsrc = ram_sources(cart, bus, col)
     os.makedirs(out, exist_ok=True)
     write_exectrace(col, os.path.join(out, "exectrace.log"))
     write_dataread(col, os.path.join(out, "dataread.log"))
@@ -282,6 +358,12 @@ def main(argv=None):
     ap.add_argument("--frames", type=int, default=600)
     ap.add_argument("--drive", action="store_true",
                     help="tap fire now and then, to get past a title screen")
+    ap.add_argument("--explore", action="store_true",
+                    help="also run with the joystick swept and with the console switches "
+                         "worked, and union the runs")
+    ap.add_argument("--force", action="store_true",
+                    help="also take the untaken side of branches; what rejoins real code "
+                         "is written as F lines (a proposal, not an observation)")
     ap.add_argument("--handover", metavar="LOG",
                     help="start from a probes/handover.lua capture, not zeroed RAM")
     ap.add_argument("--profile", action="store_true",
@@ -294,7 +376,7 @@ def main(argv=None):
         sys.exit("simprobe: no such file: %s" % args.rom)
     try:
         r = probe(args.rom, args.out, args.frames, args.drive, args.handover,
-                  args.steal, args.mapper, args.low, args.profile)
+                  args.steal, args.mapper, args.low, args.profile, args.explore, args.force)
     except (cart_module.UnknownMapper, cart_module.UnknownSpace, IOError) as e:
         sys.exit("simprobe: %s" % e)
     print("%d frames: %d distinct instructions, %d ROM bytes read as data, %d indirect "
