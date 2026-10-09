@@ -224,7 +224,7 @@ the other half, at addresses the CPU never reads.
 * **`firstlook.py`** rebuilds the screen from MARIA's half (`Cart.for_maria()`).
 * `gfx.py`, `spriteedit.py` and the workbench's sprite editor take `--side`.
 
-**Established from the `a7800` fork's source, not from a run.** Which bank of MARIA's half
+**Established from the `a7800` fork's source, and then observed running it.** Which bank of MARIA's half
 is in view for a given bank register write is the same number as the CPU's. The fork's
 `src/devices/bus/a7800/bankset.cpp` says so in code: every `read_40xx` takes the one `m_bank`
 the CPU wrote and, when MARIA is the one reading (`m_dmaactive`), adds the size of the first
@@ -237,12 +237,17 @@ code and are modelled: with bank RAM (`$4000` header bit) the 16K at `$4000` is 
 each chip; with POKEY at `$800` and no RAM it reads `$FF`; otherwise the second-last bank is
 fixed there, whatever the SuperGame low-memory bits say.
 
-**Not modelled:** the fork gives each chip its own 16K of bank RAM at `$4000`, and the CPU's
-writes to `$C000-$FFFF` land in *MARIA's* RAM. The simulator does not do this, so a bankset
-game that builds its artwork in MARIA's RAM (Bubble Bobble's header, `$E002`, has bank RAM)
-draws from RAM the simulator never fills. **Not run:** nothing here has watched a bankset
-image execute on the fork -- it was not built or installed for this check -- so this is the
-fork's code, read, not the fork's behaviour, observed. **Mainline MAME 0.264 cannot be
+**Bank RAM is modelled, and was observed.** The fork gives each chip its own 16K of bank RAM
+at `$4000`, and the CPU's writes to `$C000-$FFFF` land in *MARIA's*. The simulator does the
+same (`Bus.mram`, `t_bankset_ram`), reads MARIA's display lists and graphics from the other
+half with the CPU's bank, and `firstlook.py` renders from that RAM. On the fork's own
+output the 2x128K RAM demo's "BANKRAM 1" line is text written into MARIA's RAM; it was blank
+in the simulator before. The fork was built and run for this (docs/emulation.md): the
+simulator and the fork draw the same screens on the library's bankset demos and on Attack of
+the Petscii Robots. What is *not* settled is a short list in docs/emulation.md (Pit Fighter's
+Alt 1 prototype above all). `forkshot.py` repeats the comparison for any image.
+
+**Mainline MAME 0.264 cannot be
 asked:** it answers `Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images
 (the header values `$2000`, `$2812`, `$E002`, `$2012` all do), and the BIOS is left running
 its own built-in game. That game is KILOPARSEC -- the title screen seen "running" for

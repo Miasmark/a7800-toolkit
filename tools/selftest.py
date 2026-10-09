@@ -1831,6 +1831,63 @@ def t_bankset_fork_model():
     return "%d reads on 5 bankset forms, CPU and MARIA, agree with the a7800 fork's code" % tested
 
 
+def t_bankset_ram():
+    """A bankset's bank RAM, as the a7800 fork's bankset.cpp has it and as the simulator now
+    models it: 16K of RAM at $4000 for each chip, the CPU's writes to $C000-$FFFF landing in
+    MARIA's, MARIA reading the other half of the ROM with the CPU's bank, and (flat banksets
+    with POKEY at $4000) ROM, not the chip, answering reads at $4000. Observed on the fork:
+    "BANKRAM 1" on the 2x128K RAM demo is text the CPU wrote into MARIA's RAM."""
+    import random
+    import cart as cart_module
+    import sim
+    rng = random.Random(3)
+    work = tempfile.mkdtemp(prefix="selftest-bsram-")
+
+    def image(name, mapper, size):
+        body = bytes(rng.randrange(256) for _ in range(size))
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = size.to_bytes(4, "big")
+        hdr[53], hdr[54] = mapper >> 8, mapper & 0xFF
+        hdr[55] = 1
+        path = os.path.join(work, name)
+        io.open(path, "wb").write(bytes(hdr) + body)
+        return path
+    try:
+        c = cart_module.Cart(image("sg.a78", 0x6002, 0x40000))
+        assert c.bankram and not cart_module.Cart(image("sg0.a78", 0x2002, 0x40000)).bankram
+        bus = sim.Bus(c)
+        assert bus.mram is not None and bus.mcart is not None
+        bus.write(0x8000, 3)                                   # the CPU selects bank 3
+        assert bus.bank == 3
+        bus.write(0xC123, 0x5A)                                # ... and writes MARIA's RAM
+        assert bus.bank == 3 and bus.mram[0x123] == 0x5A, "a write to $C000+ switched or was lost"
+        bus.write(0x4123, 0x77)                                # the CPU's own RAM
+        assert bus.read(0x4123) == 0x77 and bus.mem(0x4123) == 0x5A, "the two RAMs are one"
+        m = cart_module.Cart(c.path, side="maria")
+        assert bus.mem(0x8000) == m.byte("b3", 0x8000), "MARIA did not read its half, bank 3"
+        assert bus.mem(0xC000) == m.byte(m.space_of(0xC000, None), 0xC000)
+        # a flat 2x48K with POKEY at $4000: the ROM answers at $4000
+        f = cart_module.Cart(image("flat.a78", 0x2001, 0x18000))
+        fb = sim.Bus(f)
+        assert fb.mram is None
+        assert fb.read(0x4000) == f.byte(f.space_of(0x4000, None), 0x4000), "POKEY hid the ROM"
+        # ... but with no ROM there (2x32K) it is the chip's, as before
+        g = cart_module.Cart(image("flat32.a78", 0x2001, 0x10000))
+        assert sim.Bus(g).read(0x4000) == 0xFF
+        # a flat bankset with bank RAM: RAM at $4000 for the CPU, MARIA's through $C000
+        r = cart_module.Cart(image("flatram.a78", 0x6000, 0x10000))
+        rb = sim.Bus(r)
+        assert r.bankram and rb.mram is not None and r.space_of(0x4000, None) is None
+        rb.write(0x4000, 5)
+        rb.write(0xC001, 9)
+        assert rb.read(0x4000) == 5 and rb.mram[1] == 9 and rb.mem(0x4001) == 9
+    finally:
+        shutil.rmtree(work, True)
+    return "bank RAM per chip, CPU writes through $C000, MARIA's half and bank, ROM over POKEY at $4000"
+
+
 def t_mamecheck():
     """mamecheck.py's judgement, without MAME: a display list kept live on half the frames
     counts as running, and the four verdicts come out right and report without error."""
@@ -5098,6 +5155,7 @@ def main():
     r.check("census, bankset", t_census_bankset)
     r.check("bankset round trip", t_bankset_roundtrip)
     r.check("bankset vs a7800 source", t_bankset_fork_model)
+    r.check("bankset RAM", t_bankset_ram)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)

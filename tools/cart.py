@@ -421,6 +421,11 @@ class Cart(object):
                                bankset=self.bankset)
         self.nbanks = self.map.nbanks
         self._region = list(self.map.regions())
+        # a bankset with bank RAM ($4000 header bit) has 16K of RAM at $4000 for each chip: the
+        # CPU's, and MARIA's, which the CPU can write through $C000-$FFFF (a7800's bankset.cpp)
+        self.bankram = bool(self.bankset and (self.info or {}).get("cart_type", 0) & 0x4000)
+        if self.bankram and self.map.name == "linear" and self.map.start >= 0x8000:
+            self._region.insert(0, (0x4000, 0x8000, "ram", None))
         self.warnings = []
         self._check_pokey()
         self._check_activision()

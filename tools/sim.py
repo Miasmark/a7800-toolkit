@@ -365,6 +365,16 @@ class Bus(object):
         starts = [r[0] for r in regions if r[2] != "ram"]
         self.rom_low = min([0x4000] + starts)
         self.cart_ram = [(r[0], r[1]) for r in regions if r[2] == "ram"]
+        # a bankset cartridge: MARIA reads the other half of the image, with the bank the CPU
+        # selected, and (with bank RAM) its own 16K at $4000, which the CPU writes through
+        # $C000-$FFFF -- the a7800 fork's bankset.cpp
+        self.mcart = cart.for_maria() if getattr(cart, "bankset", False) else None
+        self.mram = bytearray(0x4000) if getattr(cart, "bankram", False) else None
+        # a flat bankset with POKEY at $4000 keeps its ROM readable there: the fork routes
+        # only WRITES to the chip (bankset.h, a78_bankset_rom_p4000_device), and StoneAge
+        # executes `JMP $4000` into that ROM
+        self.rom_over_pokey = bool(getattr(cart, "bankset", False)
+                                   and getattr(cart.map, "name", "") == "linear")
         self.wsync = False              # a write to WSYNC is waiting to stall the CPU
         self.jammed = None              # set to the address of a KIL the program ran
         self.timer = None               # the RIOT interval timer: (set at cycle, value, interval)
@@ -427,7 +437,7 @@ class Bus(object):
     # -- reads
     def read(self, a):
         a &= 0xFFFF
-        if a in self.pokeys:
+        if a in self.pokeys and not (self.rom_over_pokey and self.cart.space_of(a, self.bank)):
             reg = a & 0x0F
             if reg == 0x0A:                       # RANDOM
                 return self.random(self.cpu_cycles())
@@ -493,6 +503,9 @@ class Bus(object):
     def write(self, a, v):
         a &= 0xFFFF
         v &= 0xFF
+        if self.mram is not None and a >= 0xC000:
+            self.mram[a - 0xC000] = v         # the CPU writing MARIA's RAM
+            return
         if a >= 0x8000 and self.cart.nbanks > 1:
             b = self.cart.map.bank_from_write(a, v)
             if b is not None:
@@ -603,6 +616,16 @@ class Bus(object):
         f = fold(a & 0xFFFF)
         if 0x1800 <= f <= 0x27FF:
             return self.ram[f]
+        if self.mcart is not None and a >= self.rom_low:
+            if self.mram is not None and 0x4000 <= a < 0x8000:
+                return self.mram[a - 0x4000]
+            sp = self.mcart.space_of(a, self.bank)
+            if sp is not None:
+                try:
+                    return self.mcart.byte(sp, a)
+                except Exception:                            # noqa: BLE001
+                    return 0xFF
+            return 0xFF
         return self.read(a)
 
     def zones(self):
