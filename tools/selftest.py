@@ -1159,7 +1159,8 @@ def t_workbench_hardening():
             WB.JOBS[j.id] = j
             j.start()
             end = time.time() + 20
-            while not j.log and time.time() < end:
+            # the first log line is the "$ command" echo; the pid arrives after the child starts
+            while not any(ln.strip().isdigit() for ln in j.log) and time.time() < end:
                 time.sleep(0.1)
             pid = int([ln for ln in j.log if ln.strip().isdigit()][0])
             j.cancel()
