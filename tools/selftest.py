@@ -1385,6 +1385,29 @@ def t_bankset_roundtrip():
     return "CPU listing plus MARIA's half as data rebuilds the image byte for byte"
 
 
+def t_mamecheck():
+    """mamecheck.py's judgement, without MAME: a display list kept live on half the frames
+    counts as running, and the four verdicts come out right and report without error."""
+    import mamecheck
+    assert mamecheck.live_frames([(0x18, 0, 0x4B)] * 3 + [(0x00, 0, 0x4B), (0x18, 0, 0x7B)]) == (5, 3)
+    ran = lambda live: {"ran": True, "frames": 100, "live": live}      # noqa: E731
+    cases = {"both": (ran(90), ran(80)), "sim only": (ran(2), ran(90)),
+             "mame only": (ran(90), ran(0)), "neither": ({"ran": False}, ran(0))}
+    recs = []
+    for want, (m, s_) in cases.items():
+        rec = {"name": want, "ok": True, "mapper": "linear", "mame": m, "sim": s_}
+        assert mamecheck.verdict(rec) == want, (want, mamecheck.verdict(rec))
+        recs.append(rec)
+    buf = io.StringIO()
+    old, sys.stdout = sys.stdout, buf
+    try:
+        mamecheck.report(recs)
+    finally:
+        sys.stdout = old
+    assert "SIM ONLY" in buf.getvalue() and "MAME ONLY" in buf.getvalue()
+    return "live-display-list rule and the four verdicts"
+
+
 def t_branchforce():
     """branchforce.py on the synthetic cartridge: a branch the run never takes leads to a
     hand-pushed RTS and code the static tracer cannot reach (kept, as joined), and its
@@ -4332,6 +4355,7 @@ def main():
     r.check("dynamic evidence from the sim", t_dyn_sim)
     r.check("census, bankset", t_census_bankset)
     r.check("bankset round trip", t_bankset_roundtrip)
+    r.check("mamecheck", t_mamecheck)
     r.check("branch forcing", t_branchforce)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)
