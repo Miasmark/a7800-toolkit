@@ -768,7 +768,7 @@ for(const f of FIELDS){
   const el=$(f); if(!el) continue;
   el.onchange=()=>{
     let v=el.value.trim();
-    v=(v.startsWith('$')||v.startsWith('0x'))?parseInt(v.replace('$','0x'),16):parseInt(v,10);
+    v=parseInt(v.replace(/^(\$|0x)/i,''),16);   /* bare numbers are hex, as everywhere else */
     if(isNaN(v)) return;
     const p={}; p[f]=v; set(p);
   };

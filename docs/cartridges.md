@@ -89,8 +89,11 @@ quiet -- the code still disassembles, it just disassembles the wrong bank.
 The `$0008` layout is **measured**, in MAME 0.264, on Alien Brigade (144K), Lunar
 Patrol (272K), Kinetescape and Drone Patrol (528K): `$4000` shows **file bank 0**, `$C000`
 shows the last bank, and a write of value *v* to the window shows **file bank *v* + 1**,
-so the window is the banks between the two fixed ones (`b1`..`b(n-2)`; `f0` and `f(n-1)`
-are the fixed ones). An earlier version of this layout put bank *n*-2 at `$4000` and
+so the window covers file banks 1 up to the last (`b1`..`b(n-1)`; `f0` and `f(n-1)` are
+the fixed ones, and `b(n-1)` is the same bytes as `f(n-1)`). The less certain half is the
+top of that range: values up to *n*-3 are what was checked against MAME, and the top value
+reaching the last bank (rather than wrapping to bank 1) follows from the window being
+*n*-1 banks wide. An earlier version of this layout put bank *n*-2 at `$4000` and
 numbered the window from 0; none of those images ran in the simulator, and all of them do
 now.
 

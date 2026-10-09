@@ -224,7 +224,7 @@ class SuperGame(Mapper):
         self.inferred = False
         if low == "rom":
             self.first_window = 1
-            self.window_banks = max(nbanks - 2, 1)
+            self.window_banks = max(nbanks - 1, 1)   # file banks 1..n-1; the last is also fixed at $C000
 
     def regions(self):
         r = []
@@ -406,6 +406,9 @@ class Cart(object):
             half = len(raw) // 2
             raw = raw[:half] if side == "sally" else raw[half:]
         self.rom = raw
+        # where this object's bytes start in the image, header excluded: the
+        # MARIA half of a bankset cartridge sits after the CPU's half
+        self.file_base = (half if self.bankset and side == "maria" else 0)
         self.map = pick_mapper(len(raw), self.info, mapper, low,
                                bankset=self.bankset)
         self.nbanks = self.map.nbanks

@@ -1018,10 +1018,18 @@ def main():
                 sys.stderr.write("no song %d in this cartridge\n" % pick)
                 return 2
             SONG = chosen[0]["song"]
-            PATH = os.path.abspath("%s-song%d.trk"
-                                   % (os.path.splitext(path)[0], pick))
-            with io.open(PATH, "w", encoding="utf-8") as f:
-                f.write(tracker.dump(SONG))
+            # beside the project when the workbench says where it is; and a song that
+            # was saved before is opened as it was left, never rewritten from the ROM
+            where = os.environ.get("A7800_SONG_DIR") or os.path.dirname(os.path.abspath(path))
+            os.makedirs(where, exist_ok=True)
+            PATH = os.path.join(where, "%s-song%d.trk"
+                                % (os.path.splitext(os.path.basename(path))[0], pick))
+            if os.path.isfile(PATH):
+                print("   %s already exists: opening it as you left it" % PATH)
+                SONG = tracker.load(PATH)
+            else:
+                with io.open(PATH, "w", encoding="utf-8") as f:
+                    f.write(tracker.dump(SONG))
             path = None
         else:
             if not args.capture:

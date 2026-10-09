@@ -601,7 +601,8 @@ class Emitter:
         """Where this space begins in the image file, header included."""
         c = self.cart
         head = 128 if c.header_bytes else 0
-        return head + getattr(self, "shift", 0) + c._offset(space, c.base_of(space))
+        return (head + getattr(self, "shift", 0) + getattr(c, "file_base", 0)
+                + c._offset(space, c.base_of(space)))
 
     def emit_space(self, space, out):
         cart, an, cfg = self.cart, self.an, self.cfg
@@ -1269,4 +1270,4 @@ def coverage_status(an, cart, spaces):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

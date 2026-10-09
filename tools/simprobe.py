@@ -315,21 +315,29 @@ def regs_text(frame, bus, start, writes):
     return "\n".join(out) + "\n"
 
 
-def write_dlitimes(timing, zones, frame, last, path):
+def write_dlitimes(timing, zones, frame, last, path, lines=263, top=16):
     """probes/dlitimes.lua's output: the zones at `frame`, then every display interrupt from
     `frame` to `last` and the frames' VBLANK starts, each with the line it came on. `timing`
     is sim.run's log ((kind, frame, cycles into the frame) tuples); a line is the cycle count
-    over 113.5, counted from the first zone as the probe counts it."""
-    top = 0
-    out = ["# from the simulator (no emulator): lines count from the first zone"]
+    over 113.5. Zone lines count from the first zone, as the probe prints them; interrupt and
+    VBLANK lines are raster lines of the frame, as the probe prints them: the simulator's frame
+    starts where VBLANK falls, which is `top` lines (16) into MAME's, so those are shifted by
+    `top` and wrap into the next frame past the last line."""
+    out = ["# from the simulator (no emulator): zone lines count from the first zone; "
+           "nmi and mstat lines are raster lines of the frame"]
+    bottom = 0
     for i, (end, dli, _cost, height) in enumerate(zones):
         out.append("zone %2d  line %3d  height %2d  dli %d" % (i, end - height, height,
                                                               1 if dli else 0))
-        top = end
+        bottom = end
     for kind, f, cyc in timing:
         if not (frame <= f <= last):
             continue
-        line = cyc / sim.CYCLES_PER_LINE
+        line = cyc / sim.CYCLES_PER_LINE + top
+        if line >= lines:
+            line -= lines
+            f += 1
+        cyc = line * sim.CYCLES_PER_LINE
         if kind == "nmi":
             out.append("nmi   frame %d  line %.2f  (%d whole lines, %d cycles in)" % (
                 f, line, int(line), int(cyc - int(line) * sim.CYCLES_PER_LINE)))
@@ -337,7 +345,7 @@ def write_dlitimes(timing, zones, frame, last, path):
             out.append("mstat frame %d  vblank begins  line %.2f" % (f, line))
     with open(path, "w") as fh:
         fh.write("\n".join(out) + "\n")
-    return top
+    return bottom
 
 
 def write_dump(col, bus, ram_path, regs_path):
@@ -404,7 +412,7 @@ def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=N
     if interrupts:
         write_dlitimes(getattr(col, "timing", []), col.zone_snap.get(interrupts, []),
                        interrupts, min(frames, interrupts + 20),
-                       os.path.join(out, "dlitimes.log"))
+                       os.path.join(out, "dlitimes.log"), lines=sim.LINES[region])
     if profile:
         write_profile(col, os.path.join(out, "pcprof.log"))
     return {"frames": frames, "instructions": len(col.x), "data_bytes": len(col.d),

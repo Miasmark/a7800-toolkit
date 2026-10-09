@@ -1036,6 +1036,55 @@ def _wb_wait(url, jid, seconds=240):
     raise AssertionError("job %d never finished" % jid)
 
 
+def t_workbench_handoff():
+    """What the workbench hands to the editors and takes back: the sprite editor gets the
+    address in hex (it once got decimal and opened the wrong place), the annotation stamp
+    is a string that survives JavaScript, a check with a typo'd key fails, and a song or
+    path of the wrong type is refused."""
+    WB, work = _wb_setup("handoff")
+    seen = []
+    real = WB.launch
+    WB.launch = lambda tool, args, what: (seen.append((tool, list(args))) or {"url": "x"})
+    try:
+        os.makedirs(WB.PROJECT)
+        url, stop = _wb_serve(WB)
+        try:
+            sp = WB.CART.spaces()[-1]
+            code, r = _wb_call(url, "/api/open", {"kind": "sprite", "space": sp,
+                                                  "base": 0xE000, "height": 8})
+            assert code == 200 and seen, (code, r)
+            a = seen[-1][1]
+            assert a[a.index("--base") + 1] == "E000", a
+            code, r = _wb_call(url, "/api/annotations", {"text": '{"entries": []}'})
+            assert code == 200 and isinstance(r["stamp"], str), r
+            code, r = _wb_call(url, "/api/annotations", {"text": '{}', "base": r["stamp"]})
+            assert code == 200, r                       # the stamp it handed out is the stamp it accepts
+            code, r = _wb_call(url, "/api/annotations", {"text": '[1]'})
+            assert code == 400, (code, r)
+            code, r = _wb_call(url, "/api/annotations", {"text": '{}', "base": "1"})
+            assert code == 409, (code, r)
+            # check my work looks at the annotations first, and strictly
+            _wb_call(url, "/api/annotations", {"text": '{"entrys": []}'})
+            code, r = _wb_call(url, "/api/job", {"kind": "check", "params": {}})
+            assert code == 200, r
+            d = _wb_wait(url, r["id"], 120)
+            assert d["status"] == "failed", d["status"]
+        finally:
+            stop()
+    finally:
+        WB.launch = real
+        shutil.rmtree(work, True)
+        WB.JOBS.clear()
+    import localserver
+    for bad in (5, ["a"], None):
+        try:
+            localserver.confine(bad, [work])
+        except ValueError:
+            continue
+        raise AssertionError("confine accepted %r" % (bad,))
+    return "sprite address in hex, string stamp accepted, typo'd key fails the check, non-string paths refused"
+
+
 def t_workbench_hardening():
     """The workbench answers only its own page: a foreign Host, a foreign Origin and a
     non-JSON POST are refused, bodies are capped; probe settings are A7800_* with no
@@ -1471,15 +1520,15 @@ def t_workbench_browser():
             pg.wait_for_selector("#t-annotations textarea", timeout=20000)
             pg.fill("#t-annotations textarea", '{"entrys": []}')
             pg.click("#t-annotations button:has-text('save and check')")
-            try:
-                pg.wait_for_selector("#t-annotations .find.error", timeout=4000)
-            except Exception:                                  # noqa: BLE001
-                # the start-one job may still have been writing the file: the page says it
-                # changed on disk and asks for a second press to overwrite
-                assert "changed on disk" in pg.inner_text("#msg"), pg.inner_text("#msg")
-                pg.click("#t-annotations button:has-text('save and check')")
-                pg.wait_for_selector("#t-annotations .find.error")
+            # one press, no tolerance: the stamp is a string, so it survives the round
+            # trip through JavaScript (a 19-digit number did not)
+            pg.wait_for_selector("#t-annotations .find.error", timeout=6000)
             assert "did you mean" in pg.inner_text("#t-annotations .find.error")
+            pg.fill("#t-annotations textarea", '{"entries": []}')
+            pg.click("#t-annotations button:has-text('save and check')")
+            pg.wait_for_function("document.querySelector('#t-annotations .muted, #t-annotations span') && "
+                                 "/saved/.test(document.querySelector('#t-annotations').innerText)",
+                                 timeout=6000)
             b.close()
     finally:
         stop()
@@ -1539,7 +1588,8 @@ def t_simprobe():
         nmis = [float(m) for m in re.findall(r"nmi\s+frame \d+\s+line ([\d.]+)", dl)]
         assert "zone  0  line   0" in dl and len(nmis) >= 10, dl[:400]
         assert all(abs(x - nmis[0]) < 1.5 for x in nmis), nmis      # the same line every frame
-        assert "vblank begins  line 242" in dl, dl[-200:]
+        assert "vblank begins  line 258" in dl, dl[-200:]      # raster lines, as the probe prints them
+        assert all(abs(x - 96) < 1.5 for x in nmis), nmis   # zone 0 is raster 16; the flagged zone starts 80 lines in
     finally:
         shutil.rmtree(out, True)
     return "instructions, JMP (vec), computed RTS, computed switch, table reads (no immediates), dump, interrupt timing"
@@ -1703,9 +1753,25 @@ def t_bankset_roundtrip():
                             "-o", out], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         assert r.returncode == 0 and b"identical to reference ROM: YES" in r.stdout, r.stdout[-400:]
         assert io.open(out, "rb").read() == io.open(rom, "rb").read()
+        # the editors' idea of where a byte lives must match the reader's on both halves:
+        # the sprite editor once saved MARIA's artwork into the CPU's half
+        import spriteedit as SE
+        import cart as cart_module
+        raw = io.open(rom, "rb").read()
+        for side in ("sally", "maria"):
+            c = cart_module.Cart(rom, side=side)
+            sp = c.spaces()[0]
+            SE.CART, SE.PATH, SE.DATA = c, rom, bytearray(raw)
+            SE.REGION = SE.Region(c, sp, c.base_of(sp), 1, 8, 256, 256, "160")
+            for a in range(c.base_of(sp), c.base_of(sp) + c.size_of(sp), 397):
+                assert SE.DATA[SE.REGION.file_offset(a)] == c.byte(sp, a), (side, sp, a)
+        # and the disassembler's file start for MARIA's listing is the second half
+        sides = cart_module.Cart(rom).sides()
+        off = sides._offset("mrom", sides.base_of("mrom"))
+        assert raw[128 + off] == maria[0], "the MARIA listing starts in the second half"
     finally:
         shutil.rmtree(work, True)
-    return "CPU listing plus MARIA's half as data rebuilds the image byte for byte"
+    return "CPU listing plus MARIA's half as data rebuilds the image byte for byte; both halves' editor offsets agree with the reader"
 
 
 def t_mamecheck():
@@ -1754,9 +1820,10 @@ def t_exrom_layout():
         assert c.byte(c.space_of(0x4000, None), 0x4000) == 0, "$4000 is not file bank 0"
         assert c.byte(c.space_of(0xC000, None), 0xC000) == nb - 1, "$C000 is not the last bank"
         assert c.map.bank_from_write(0x8000, 5) == 6 and c.map.bank_from_write(0x8000, 0) == 1
-        assert c.map.bank_from_write(0x8000, 7) == 1, "the window has nb-2 banks and wraps"
+        assert c.map.bank_from_write(0x8000, 7) == nb - 1, "value 7 is the last bank, also fixed at $C000"
+        assert c.map.bank_from_write(0x8000, 8) == 1, "the window has nb-1 banks and wraps"
         sp = c.spaces()
-        assert sp[0] == "f0" and "b1" in sp and "b0" not in sp and sp[-1] == "f%d" % (nb - 1), sp
+        assert sp[0] == "f0" and "b1" in sp and "b0" not in sp and "b%d" % (nb - 1) in sp and sp[-1] == "f%d" % (nb - 1), sp
         assert c.byte("b6", 0x8000) == 6
     finally:
         shutil.rmtree(work, True)
@@ -4827,6 +4894,7 @@ def main():
     r.check("workbench jobs", t_workbench_jobs)
     r.check("local server rules", t_localserver)
     r.check("workbench hardening", t_workbench_hardening)
+    r.check("workbench handoff", t_workbench_handoff)
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
     r.check("simulated address origins", t_simorigins)

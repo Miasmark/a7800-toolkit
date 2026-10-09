@@ -65,7 +65,7 @@ def cart_info():
             spaces.append({"name": c._fixed_name(arg), "start": start,
                            "end": end, "kind": "fixed"})
         elif kind == "window":
-            for i in range(c.map.nwindow):
+            for i in range(c.map.first_window, c.map.first_window + c.map.nwindow):
                 spaces.append({"name": "b%d" % i, "start": start, "end": end,
                                "kind": "window"})
         else:
@@ -197,8 +197,18 @@ def launch(tool, args, what):
         cmd = [sys.executable, os.path.join(HERE, tool)] + list(args) + \
               ["--no-browser", "--port", str(port)]
     # the editors may write only beside the cartridge, in the working folder, or in the project
-    env = dict(os.environ, A7800_EDIT_ROOT=PROJECT or "")
-    proc = _spawn(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=env)
+    env = dict(os.environ, A7800_EDIT_ROOT=PROJECT or "",
+               A7800_SONG_DIR=os.path.join(PROJECT or ".", "songs"),
+               PYTHONUNBUFFERED="1")
+    # its output goes to a file, so a child that dies at once can say why
+    logdir = os.path.join(PROJECT or ".", "editors")
+    os.makedirs(logdir, exist_ok=True)
+    logpath = os.path.join(logdir, "%s-%d.log" % (os.path.splitext(tool)[0], port))
+    log = open(logpath, "wb")
+    try:
+        proc = _spawn(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
+    finally:
+        log.close()
     CHILDREN[port] = (proc, what)
     # hand the address back only once something answers there: a tab opened at once
     # gets "connection refused", and a child that died says why instead of leaving a
@@ -209,8 +219,9 @@ def launch(tool, args, what):
         if proc.poll() is not None:
             tail = b""
             try:
-                tail = proc.stdout.read()[-600:]
-            except (OSError, ValueError):
+                with open(logpath, "rb") as f:
+                    tail = f.read()[-600:]
+            except OSError:
                 pass
             raise ValueError("%s stopped at once: %s"
                              % (what, tail.decode("utf-8", "replace").strip() or "no output"))
@@ -420,7 +431,8 @@ class Job(object):
                 try:
                     self.proc = _spawn(
                         st["cmd"], cwd=st.get("cwd") or PROJECT,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        env=dict(os.environ, PYTHONUNBUFFERED="1"))   # live output
                     for raw in iter(self.proc.stdout.readline, b""):
                         self._say(raw.decode("utf-8", "replace").rstrip("\r\n"))
                     code = self.proc.wait()
@@ -579,16 +591,19 @@ def build_disasm(p):
 
 def build_check(p):
     cfg = config_path()
-    steps = [{"cmd": _py("disasm.py", ROM, "-o", src_dir()) +
-              (["-c", cfg] if os.path.isfile(cfg) else []) + ["--gaps"]}]
+    steps = []
     if os.path.isfile(cfg):
-        steps.append({"cmd": _py("annotations.py", cfg, "--rom", ROM), "soft": True})
+        # first, and strict: a typo'd key or a bad label is ignored by the disassembler,
+        # so a green round trip afterwards would say nothing about it
+        steps.append({"cmd": _py("annotations.py", cfg, "--rom", ROM, "--strict")})
+    steps.append({"cmd": _py("disasm.py", ROM, "-o", src_dir()) +
+                  (["-c", cfg] if os.path.isfile(cfg) else []) + ["--gaps"]})
     steps.append({"cmd": _py("verify.py", ROM, "-d", src_dir())})
     steps.append({"cmd": _py("build.py", ROM, "-d", src_dir(), "-o",
                              os.path.join(PROJECT, "build", "rebuilt.a78"))})
     return Job("check", "check my work", steps, os.path.join(PROJECT, "build"),
-               "stops at the first step that fails: the listing, the annotation checks, "
-               "the round trip, the rebuild")
+               "stops at the first step that fails: the annotation checks (warnings count), "
+               "the listing, the round trip, the rebuild")
 
 
 def build_verify(p):
@@ -1026,7 +1041,7 @@ def read_annotations():
     if not os.path.isfile(path):
         return {"path": path, "exists": False, "text": "", "findings": []}
     text = io.open(path, encoding="utf-8-sig").read()      # a Notepad-saved file has a BOM
-    return {"path": path, "exists": True, "text": text, "stamp": os.stat(path).st_mtime_ns,
+    return {"path": path, "exists": True, "text": text, "stamp": str(os.stat(path).st_mtime_ns),
             "findings": lint_annotations(text)}
 
 
@@ -1044,7 +1059,8 @@ def lint_annotations(text):
 def write_annotations(text):
     """Save the file if it is JSON at all; return the lint findings either way."""
     text = text.lstrip("\ufeff")
-    json.loads(text)                  # ValueError if it is not JSON: nothing written
+    if not isinstance(json.loads(text), dict):      # ValueError if it is not JSON: nothing written
+        raise ValueError("annotations.json is one JSON object, {...}")
     os.makedirs(PROJECT, exist_ok=True)
     # keep the file's own line ending: the page hands over LF text whatever the file has
     nl = "\n"
@@ -1263,14 +1279,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("text is a string")
                 base = body.get("base")
                 if (base is not None and not body.get("force") and os.path.isfile(config_path())
-                        and os.stat(config_path()).st_mtime_ns != base):
+                        and str(os.stat(config_path()).st_mtime_ns) != str(base)):
                     return self._send(409, {"error": "changed on disk since you opened it "
                                             "(a job or a census apply wrote to it): reload "
                                             "to see it, or save again to overwrite",
                                             "conflict": True})
                 r = write_annotations(text)
                 return self._send(200, {"findings": r, "stamp":
-                                        os.stat(config_path()).st_mtime_ns})
+                                        str(os.stat(config_path()).st_mtime_ns)})
             if self.path == "/api/census/apply":
                 return self._send(200, apply_census(body.get("items") or []))
             if self.path == "/api/open":
@@ -1280,7 +1296,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("this cartridge has no space %r (it has %s)"
                                          % (body.get("space"), ", ".join(CART.spaces())))
                     args = ["--space", body["space"], "--base",
-                            str(int(body["base"])), "--height",
+                            "%X" % int(body["base"]), "--height",
                             str(int(body.get("height", 8))), "--width",
                             str(int(body.get("width", 1))), "--mode",
                             str(body.get("mode", "160"))]
@@ -1552,7 +1568,7 @@ async function openExplore(loc){
        await openWhenUp(j.url,'the format explorer');}catch(e){msg(e.message,true);}
 }
 async function openTracker(song){
-  msg(INFO.format?'reading the songs out of the ROM with '+INFO.format+' — no emulator'
+  msg(INFO.format?'trying to read the songs out of the ROM with '+INFO.format+' (no emulator); if it does not fit this layout the game is recorded instead'
      :'no format file describes this cartridge, so it will be recorded first; that takes about a minute');
   try{ const j=await api('/api/open',{kind:'tracker',song:(typeof song==='string')?song:null});
        await openWhenUp(j.url,'the tracker');}
@@ -1754,7 +1770,7 @@ async function drawAnnotations(fresh){
   const box=$('t-annotations'); box.replaceChildren();
   if(fresh) ANNOT_DRAFT=null;
   const a=await api('/api/annotations');
-  ANNOT_BASE=a.stamp||null; ANNOT_FORCE=false;
+  if(ANNOT_DRAFT===null||ANNOT_BASE===null){ ANNOT_BASE=a.stamp||null; ANNOT_FORCE=false; }   /* a kept draft keeps the stamp it started from, so a change on disk still conflicts */
   if(!a.exists){
     box.append(el('div',{class:'muted',text:'There is no annotations.json in the project yet. It is the file the disassembler reads: names, entry points, data blocks, bank pins.'}),
       el('div',{class:'bar'},el('button',{text:'start one',onclick:async()=>{try{await api('/api/job',{kind:'newannot',params:{}});setTimeout(drawAnnotations,1500);}catch(e){msg(e.message,true);}}})));

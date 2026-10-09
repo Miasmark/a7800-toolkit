@@ -340,9 +340,11 @@ class Bus(object):
         self.cart = cart
         self.ram = bytearray(0x10000)
         self.bank = cart.nbanks - 1 if cart.nbanks > 1 else 0
-        first = getattr(getattr(cart, "map", None), "first_window", 0)
-        if first:
-            self.bank = first                       # the window's lowest bank, before any switch
+        # MAME shows the window's FIRST bank at power-on (a SuperGame's reset code can live
+        # there); the last bank is the fixed one at $C000
+        mapper = getattr(cart, "map", None)
+        if getattr(mapper, "name", "") == "supergame":
+            self.bank = getattr(mapper, "first_window", 0)
         self.audio = {}                 # address -> last value written
         self.writes = []                # (frame, address, value)
         self.frame = 0
@@ -471,11 +473,11 @@ class Bus(object):
                 step = (self.frame // 20) % 5
                 return (0xFF, 0x7F, 0xBF, 0xDF, 0xEF)[step] if step else 0xFF
             return 0xFF
-        if a in (0x0284, 0x0286, 0x0285, 0x0287):
+        if 0x0280 <= a < 0x0300 and (a & 0x04):
             # RIOT INTIM and TIMINT. The timer counts down once per interval from the value
             # written; when it passes zero it flags (TIMINT bit 7) and counts down every
             # cycle. A game that waits on it with BIT $0285 / BPL used to wait for ever.
-            return self.riot(a)
+            return self.riot(0x0285 if (a & 1) else 0x0284)    # INTIM / TIMINT, mirrored
         if a == 0x0282:
             # SWCHB: the console switches, and they are **active low** -- a set
             # bit means "not pressed". Returning zeros here reads as reset and
@@ -508,9 +510,10 @@ class Bus(object):
                     self.ram[a] = v      # RAM on the cartridge
                     return
             return                       # ROM: writes go nowhere
-        if 0x0294 <= a <= 0x0297:
-            # the RIOT's interval timer: TIM1T / TIM8T / TIM64T / T1024T
-            interval = (1, 8, 64, 1024)[a - 0x0294]
+        if 0x0280 <= a < 0x0300 and (a & 0x14) == 0x14:
+            # the RIOT's interval timer: TIM1T / TIM8T / TIM64T / T1024T, mirrored through
+            # the RIOT's whole range ($029C-$029F are the interrupt-enabled forms)
+            interval = (1, 8, 64, 1024)[a & 3]
             self.timer = (self.cpu_cycles(), v, interval, 2 if interval == 1 else self.RIOT_BIAS)
             self.timer_flag_cleared = False
             return
@@ -566,17 +569,17 @@ class Bus(object):
         per_line = self.DMA_LINE
         i = 0
         for _ in range(32):
-            b1 = self.ram[fold((dl + i + 1) & 0xFFFF)]
+            b1 = self.mem((dl + i + 1) & 0xFFFF)
             if b1 == 0:
                 break
-            lo = self.ram[fold((dl + i) & 0xFFFF)]
+            lo = self.mem((dl + i) & 0xFFFF)
             if (b1 & 0x1F) == 0:                      # five-byte entry
-                hi = self.ram[fold((dl + i + 2) & 0xFFFF)]
-                w = 32 - (self.ram[fold((dl + i + 3) & 0xFFFF)] & 0x1F)
+                hi = self.mem((dl + i + 2) & 0xFFFF)
+                w = 32 - (self.mem((dl + i + 3) & 0xFFFF) & 0x1F)
                 five, chars = True, bool(b1 & 0x20)
                 i += 5
             else:
-                hi = self.ram[fold((dl + i + 2) & 0xFFFF)]
+                hi = self.mem((dl + i + 2) & 0xFFFF)
                 w = 32 - (b1 & 0x1F)
                 five, chars = False, False
                 i += 4
@@ -594,6 +597,13 @@ class Bus(object):
                              + (self.DMA_FIVE if five else 0))
         return (lines * per_line + self.DMA_ZONE
                 + (self.DMA_DLI if (flags & 0x80) else 0))
+
+    def mem(self, a):
+        """A byte as MARIA reads it: RAM (through its mirrors), or the cartridge."""
+        f = fold(a & 0xFFFF)
+        if 0x1800 <= f <= 0x27FF:
+            return self.ram[f]
+        return self.read(a)
 
     def zones(self):
         """Walk the DLL the game built in RAM -> [(line_after_zone, dli, cost, height), ...].
@@ -619,13 +629,15 @@ class Bus(object):
         if (self.ctrl & 0x60) != 0x40:
             return []
         addr = ((self.dpph << 8) | self.dppl) & 0xFFFF
-        if addr < 0x1800 or addr > 0x27FF:      # 7800 RAM; anything else is
-            return []                           # a half-written pointer
+        # the list list is in RAM (or its zero-page and stack views) or in the cartridge's
+        # ROM -- several games keep a fixed screen there; anything else is a half-written pointer
+        if not (0x1800 <= fold(addr) <= 0x27FF or addr >= self.rom_low):
+            return []
         out, line = [], 0
         for z in range(self.MAX_ZONES):
-            b0 = self.ram[fold((addr + z * 3) & 0xFFFF)]
-            hi = self.ram[fold((addr + z * 3 + 1) & 0xFFFF)]
-            lo = self.ram[fold((addr + z * 3 + 2) & 0xFFFF)]
+            b0 = self.mem((addr + z * 3) & 0xFFFF)
+            hi = self.mem((addr + z * 3 + 1) & 0xFFFF)
+            lo = self.mem((addr + z * 3 + 2) & 0xFFFF)
             n = (b0 & 0x0F) + 1
             line += n
             out.append((line, bool(b0 & 0x80),

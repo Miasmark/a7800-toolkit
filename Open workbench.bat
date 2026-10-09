@@ -14,7 +14,8 @@ rem  closing it stops the workbench and every editor it launched, which is
 rem  deliberate -- an editor left holding its port looks exactly like a stale
 rem  server the next time you run one.
 rem
-rem  Set A7800_WORKBENCH_PORT to move it off 8120. The editors it launches take
+rem  Set A7800_WORKBENCH_PORT to pin it to one port (it starts at 8120 and takes
+rem  the next free one when that is busy). The editors it launches take
 rem  the ports above 8140.
 rem
 rem  Everything here is drag-and-drop-able:
@@ -25,7 +26,8 @@ rem ---------------------------------------------------------------------------
 
 set "HERE=%~dp0"
 set "WB=%HERE%tools\workbench.py"
-if not defined A7800_WORKBENCH_PORT set "A7800_WORKBENCH_PORT=8120"
+set "WBPORT="
+if defined A7800_WORKBENCH_PORT set "WBPORT=--port !A7800_WORKBENCH_PORT!"
 
 if not exist "%WB%" (
   echo Cannot find tools\workbench.py next to this batch file.
@@ -76,13 +78,13 @@ goto :finish
 echo Starting the workbench. Leave this window open while you work.
 echo Closing it stops the workbench and any editors it opened.
 echo.
-%PY% "!WB!" "!IN!" --port !A7800_WORKBENCH_PORT!
+%PY% "!WB!" "!IN!" !WBPORT!
 if errorlevel 2 (
   echo.
   echo The workbench could not lay this cartridge out. The reason is above.
   echo.
-  echo Four images in the 1,309-image library cannot be laid out: two SOUPER
-  echo and two 512K flat. If yours is not one of those, the header may
+  echo Two images in the 1,309-image library cannot be laid out: SOUPER
+  echo and the 512K flat SN Cart Demo. If yours is not one of those, the header may
   echo understate the mapping. To see what it claims:
   echo.
   echo   %PY% "%HERE%tools\cart.py" "!IN!"

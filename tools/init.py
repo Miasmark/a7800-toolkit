@@ -92,8 +92,8 @@ def build(cart, path):
             "",
             "What to do next, roughly in order:",
             "",
-            "  1. python tools/disasm.py %s -c %s"
-            % (os.path.basename(path), "annotations.json"),
+            '  1. python tools/disasm.py "%s" -c annotations.json'
+            % os.path.basename(path),
             "     Read the coverage it reports. Low coverage is normal at",
             "     first and is the number you are trying to move.",
             "",
@@ -101,7 +101,7 @@ def build(cart, path):
             "     target to `entries`, or the pointer pair to `ram_vectors` if",
             "     the handler is installed into RAM.",
             "",
-            "  3. python tools/audiotrace.py %s -c annotations.json"
+            '  3. python tools/audiotrace.py "%s" -c annotations.json'
             % os.path.basename(path),
             "     Finds the sound code and the tables feeding it.",
             "",

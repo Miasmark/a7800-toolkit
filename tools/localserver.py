@@ -88,6 +88,8 @@ def roots(*files):
 
 def confine(path, allowed):
     """`path` as an absolute path, if it lies inside one of `allowed`; else ValueError."""
+    if not isinstance(path, (str, os.PathLike)):
+        raise ValueError("a path is a string")
     full = os.path.realpath(os.path.abspath(str(path)))
     for r in allowed:
         root = os.path.realpath(r)

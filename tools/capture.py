@@ -100,6 +100,8 @@ def pal_overlay(rompath):
         shutil.copy(f, os.path.join(d, "a7800", os.path.basename(f)))
     shutil.copy(src[0], os.path.join(d, "a7800p", "c300558-001b.u7"))
     _OVERLAYS[rompath] = d
+    import atexit
+    atexit.register(shutil.rmtree, d, True)
     return d
 
 

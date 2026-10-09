@@ -38,7 +38,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-VERSION = 2
+VERSION = 3
 HANDOVER = 330            # MAME frame after which the cartridge is running (OpenBIOS)
 WINDOW = 360              # frames judged, in each engine
 
@@ -105,11 +105,10 @@ def run_mame(rom, work, seconds=40):
     ok, text, written = runprobe.run(rom, "rendersurvey", work, seconds=seconds, env=env)
     if not ok:
         return {"ran": False, "why": text[:140]}
+    # (An "Unsupported mapper" line is only a warning about header features -- YM2151, an
+    # extra POKEY -- on most images, which MAME then runs; it is the cartridge's own vectors
+    # below that tell a run of the cartridge from a run of the BIOS's built-in game.)
     why = mame_complaint(text)
-    if "Unsupported mapper" in why:
-        # MAME does not implement this cartridge type: whatever it shows is the BIOS's own
-        # game, not a reference for the image
-        return {"ran": False, "why": why}
     csv = os.path.join(work, "survey-frames.csv")
     if not os.path.isfile(csv):
         return {"ran": False, "why": why or "MAME wrote no frame log"}
@@ -142,7 +141,9 @@ def run_sim(rom):
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     col = simprobe.Collector()
     t = time.time()
-    sim_bus = sim.run(cart, WINDOW, region, drive=True, observer=col)
+    # no input, as MAME gets none: with fire tapped the simulator would start games that
+    # MAME leaves at the title screen, and the two would be comparing different screens
+    sim_bus = sim.run(cart, WINDOW, region, drive=False, observer=col)
     bus_jam = getattr(sim_bus, "jammed", None)
     return {"ran": True, "frames": WINDOW, "live": col.frames_with_list,
             "dli": len(col.nmi_frames), "seconds": round(time.time() - t, 1),
@@ -195,7 +196,8 @@ def _code_stamp():
     """A short hash of the code whose behaviour the result depends on, so a cached result is
     not reused after the simulator or the layout code changed."""
     h = hashlib.sha1()
-    for name in ("sim.py", "cart.py", "simprobe.py", "mamecheck.py"):
+    for name in ("sim.py", "cart.py", "m6502.py", "simprobe.py", "mamecheck.py", "capture.py",
+                 "runprobe.py", os.path.join("..", "probes", "rendersurvey.lua")):
         with open(os.path.join(HERE, name), "rb") as f:
             h.update(f.read())
     return h.hexdigest()[:8]
@@ -248,7 +250,7 @@ def load_cache(cache):
     return out
 
 
-def report(recs, show=12):
+def report(recs, show=None):
     ok = [r for r in recs if r.get("ok")]
     print("%d cartridges: %d compared, %d not (could not be laid out)"
           % (len(recs), len(ok), len(recs) - len(ok)))
@@ -286,7 +288,7 @@ def report(recs, show=12):
         rows = groups.get(key, [])
         if rows:
             print("\n%s (%d)" % (title, len(rows)))
-            for r in rows[:show]:
+            for r in (rows if show is None else rows[:show]):
                 m, s = r["mame"], r["sim"]
                 print("    %-48s %-9s mame %s  sim %s" % (
                     r["name"][:48], ("bankset" if r.get("bankset") else r.get("mapper", "?")),
