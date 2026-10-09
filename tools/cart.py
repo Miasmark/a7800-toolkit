@@ -215,6 +215,8 @@ class SuperGame(Mapper):
         # $C000, and a fixed ROM bank at $4000. Which bank lands low is inferred
         # from the 128K case rather than confirmed -- see probe_fixed_high() and
         # the docs to check it against a particular image.
+        # Also what the a7800 fork codes (a78_rom_sg9_device: $4000 is file bank 0, the window is
+        # (value & (n-2)) + 1, the last bank at $C000).
         # MEASURED in MAME 0.264 (Alien Brigade 144K, Lunar Patrol 272K, Kinetescape and
         # Drone Patrol 528K, all flagged $0008): $4000 shows FILE bank 0, $C000 the last bank,
         # and a write of value v to the window shows file bank v + 1 -- so the window is the
@@ -339,7 +341,13 @@ def pick_mapper(size, header=None, mapper=None, low=None, bankset=False):
             mapper = "absolute"
         elif flags & 0x0002:
             mapper = "supergame"
-            if low is None:
+            if low is None and bankset:
+                # as the a7800 fork's bankset.cpp does it, whatever the SuperGame low-memory
+                # bits say: with bank RAM ($4000) the 16K at $4000 is RAM, with POKEY at $800
+                # and no RAM it reads $FF, and otherwise the second-last bank is fixed there
+                low = ("ram" if flags & 0x4000 else
+                       "none" if flags & 0x8000 else "bank6")
+            elif low is None:
                 low = ("bank6" if flags & 0x0010 else
                        "ram" if flags & 0x0004 else
                        "rom" if flags & 0x0008 else "none")

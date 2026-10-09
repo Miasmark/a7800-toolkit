@@ -1775,6 +1775,62 @@ def t_bankset_roundtrip():
     return "CPU listing plus MARIA's half as data rebuilds the image byte for byte; both halves' editor offsets agree with the reader"
 
 
+def t_bankset_fork_model():
+    """The bankset layout against the `a7800` fork's own cartridge code (bankset.cpp, read_40xx,
+    transcribed here): for every CPU or MARIA read in $4000-$FFFF, in every window bank, the
+    byte the fork returns is the byte `Cart` returns, on synthetic images of the flat 2x32K,
+    2x48K, 2x52K and the SuperGame 2x128K and 2x256K forms. This is the evidence for MARIA's
+    half using the same bank number as the CPU's, which no run of mainline MAME can give."""
+    import random
+    import cart as cart_module
+
+    def fork_read(rom, mapper, addr, dma, bank):
+        size = len(rom)
+        mask = size // 0x4000 - (2 if (size // 0x4000) & 1 else 1)
+        off, half = addr - 0x4000, (mask // 2 + 1) * 0x4000
+        base = half if dma else 0
+        if mapper == 0x2002:                                   # SuperGame bankset, no RAM
+            if off < 0x4000:
+                return rom[off + (mask // 2) * 0x4000 - 0x4000 + base]
+            if off < 0x8000:
+                return rom[(off & 0x3FFF) + bank * 0x4000 + base]
+            return rom[(off & 0x3FFF) + (mask // 2) * 0x4000 + base]
+        if size >= 0x1A000:                                    # 52K: the image starts at $3000
+            return rom[off + 0x1000 + (0xD000 if dma else 0)]
+        start = 0xC000 - size // 2
+        return 0xFF if off < start else rom[off - start + (size // 2 if dma else 0)]
+
+    rng = random.Random(7)
+    work = tempfile.mkdtemp(prefix="selftest-bsfork-")
+    tested = 0
+    try:
+        for mapper, size in ((0x2000, 0x10000), (0x2000, 0x18000), (0x2000, 0x1A000),
+                             (0x2002, 0x40000), (0x2002, 0x80000)):
+            body = bytes(rng.randrange(256) for _ in range(size))
+            hdr = bytearray(128)
+            hdr[0] = 1
+            hdr[1:10] = b"ATARI7800"
+            hdr[49:53] = size.to_bytes(4, "big")
+            hdr[53], hdr[54] = mapper >> 8, mapper & 0xFF
+            hdr[55] = 1
+            rom = os.path.join(work, "b%X-%X.a78" % (mapper, size))
+            io.open(rom, "wb").write(bytes(hdr) + body)
+            sg = mapper == 0x2002
+            for who, dma in (("sally", 0), ("maria", 1)):
+                c = cart_module.Cart(rom, side=who)
+                for b in (range(c.map.nwindow) if sg else [0]):
+                    for addr in list(range(0x4000, 0x10000, 0x2F7)) + [0x4000, 0x7FFF, 0x8000,
+                                                                       0xBFFF, 0xC000, 0xFFFF]:
+                        sp = c.space_of(addr, b if sg else None)
+                        got = c.byte(sp, addr) if sp else 0xFF
+                        want = fork_read(body, mapper, addr, dma, b)
+                        assert got == want, (hex(mapper), hex(size), who, b, hex(addr), want, got)
+                        tested += 1
+    finally:
+        shutil.rmtree(work, True)
+    return "%d reads on 5 bankset forms, CPU and MARIA, agree with the a7800 fork's code" % tested
+
+
 def t_mamecheck():
     """mamecheck.py's judgement, without MAME: a display list kept live on half the frames
     counts as running, and the four verdicts come out right and report without error."""
@@ -1799,8 +1855,9 @@ def t_mamecheck():
 
 
 def t_exrom_layout():
-    """The `$0008` (EXROM) SuperGame layout as measured in MAME: file bank 0 at $4000, the
-    last bank at $C000, and the window showing file bank value + 1."""
+    """The `$0008` (EXROM) SuperGame layout as measured in MAME and as the a7800 fork codes it
+    (a78_rom_sg9_device): file bank 0 at $4000, the last bank at $C000, and the window showing
+    file bank (value & (n-2)) + 1."""
     import cart as cart_module
     work = tempfile.mkdtemp(prefix="selftest-exrom-")
     try:
@@ -5040,6 +5097,7 @@ def main():
     r.check("dynamic evidence from the sim", t_dyn_sim)
     r.check("census, bankset", t_census_bankset)
     r.check("bankset round trip", t_bankset_roundtrip)
+    r.check("bankset vs a7800 source", t_bankset_fork_model)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)

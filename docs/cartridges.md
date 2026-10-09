@@ -90,10 +90,9 @@ The `$0008` layout is **measured**, in MAME 0.264, on Alien Brigade (144K), Luna
 Patrol (272K), Kinetescape and Drone Patrol (528K): `$4000` shows **file bank 0**, `$C000`
 shows the last bank, and a write of value *v* to the window shows **file bank *v* + 1**,
 so the window covers file banks 1 up to the last (`b1`..`b(n-1)`; `f0` and `f(n-1)` are
-the fixed ones, and `b(n-1)` is the same bytes as `f(n-1)`). The less certain half is the
-top of that range: values up to *n*-3 are what was checked against MAME, and the top value
-reaching the last bank (rather than wrapping to bank 1) follows from the window being
-*n*-1 banks wide. An earlier version of this layout put bank *n*-2 at `$4000` and
+the fixed ones, and `b(n-1)` is the same bytes as `f(n-1)`). The fork's `a78_rom_sg9_device` says the same: `$4000` is file bank 0, the window is
+`(value & (n-2)) + 1` -- eight values for nine banks, *n*-1 of them in general -- and the last bank
+is at `$C000`, so the top value reaches the last bank rather than wrapping. An earlier version of this layout put bank *n*-2 at `$4000` and
 numbered the window from 0; none of those images ran in the simulator, and all of them do
 now.
 
@@ -225,23 +224,34 @@ the other half, at addresses the CPU never reads.
 * **`firstlook.py`** rebuilds the screen from MARIA's half (`Cart.for_maria()`).
 * `gfx.py`, `spriteedit.py` and the workbench's sprite editor take `--side`.
 
-**Not established here, but the `a7800` fork can establish it.** Which bank of MARIA's half
-is in view for a given bank register write is assumed to be the same number as the CPU's,
-which is what "two parallel sets of banks at the same addresses" says. Nothing here has read
-the MARIA side back from a running machine. The 7800-devtools `a7800` fork runs bankset
-cartridges (docs/emulation.md), so it is the machine to ask; it is not installed in the
-environment this was written in, and **mainline MAME 0.264 cannot be asked**: it answers
-`Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images (the header
-values `$2000`, `$2812`, `$E002`, `$2012` all do), and the BIOS is left running its own
-built-in game. That game is KILOPARSEC -- the title screen seen "running" for
+**Established from the `a7800` fork's source, not from a run.** Which bank of MARIA's half
+is in view for a given bank register write is the same number as the CPU's. The fork's
+`src/devices/bus/a7800/bankset.cpp` says so in code: every `read_40xx` takes the one `m_bank`
+the CPU wrote and, when MARIA is the one reading (`m_dmaactive`), adds the size of the first
+half to the file offset. The flat forms (2x32K, 2x48K, 2x52K) are the same address map on
+each half, the 52K ones starting at `$3000`. `t_bankset_fork_model` in `tools/selftest.py`
+transcribes those reads and compares them with `Cart` for the CPU's and MARIA's half in
+every window bank on synthetic images of five forms (3,834 reads, no disagreement), and the
+same comparison on the library's 14 bankset images found none. Three details come from that
+code and are modelled: with bank RAM (`$4000` header bit) the 16K at `$4000` is RAM, one for
+each chip; with POKEY at `$800` and no RAM it reads `$FF`; otherwise the second-last bank is
+fixed there, whatever the SuperGame low-memory bits say.
+
+**Not modelled:** the fork gives each chip its own 16K of bank RAM at `$4000`, and the CPU's
+writes to `$C000-$FFFF` land in *MARIA's* RAM. The simulator does not do this, so a bankset
+game that builds its artwork in MARIA's RAM (Bubble Bobble's header, `$E002`, has bank RAM)
+draws from RAM the simulator never fills. **Not run:** nothing here has watched a bankset
+image execute on the fork -- it was not built or installed for this check -- so this is the
+fork's code, read, not the fork's behaviour, observed. **Mainline MAME 0.264 cannot be
+asked:** it answers `Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images
+(the header values `$2000`, `$2812`, `$E002`, `$2012` all do), and the BIOS is left running
+its own built-in game. That game is KILOPARSEC -- the title screen seen "running" for
 `Bubble Bobble (v75a)` in an earlier check was OpenBIOS's, not the cartridge's, which is also why
-reads tapped from `$C000` matched no half of the file. `tools/mamecheck.py` now tells these apart
+reads tapped from `$C000` matched no half of the file. `tools/mamecheck.py` tells these apart
 (it compares the vectors MAME is executing with the cartridge's own) and prints MAME's
-message. Treat every statement about a bankset image that rests on mainline MAME 0.264 as void; the only evidence
-for the layout is the `a7800` fork's, for the CPU's half. A rebuilt screen of a bankset
-cartridge is a reconstruction under the same-bank-number assumption until it is checked on the
-fork (`capture.py` already recognises it and uses debugger watchpoints; `mamecheck.py` does
-not yet drive it).
+message. Treat every statement about a bankset image that rests on mainline MAME 0.264 as
+void. `capture.py` recognises the fork and uses debugger watchpoints; `mamecheck.py` does not
+yet drive it.
 
 ## 52K
 
