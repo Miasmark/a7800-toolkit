@@ -875,16 +875,15 @@ A POKEY game has four voices (eight with two chips) and the TIA has two, so
     A7800_POKEY=0x4000 mame a7800 -cart game.a78 -autoboot_script probes/audio.lua ...
     python tools/pokey2tia.py a7800-audio.log -o port-sound --fit
 
-By default the two loudest voices of each frame play and a voice that stays
-chosen stays on its channel. `--map groups --groups 1+2,3+4` pins POKEY voices
-to TIA channels instead (use it when the music has a bass line and a lead that
-should never swap). When more voices want a channel than it has, the loudest wins,
-or with `--mash arp` they take turns, one per `--arp N` frames: nothing is
-dropped, but an arpeggio at 60/N a second is buzzy, so it is an option and not
-the default. If you do want every voice, the combination judged neatest by ear on
-Triple Punch was groups plus `--mash arp --arp 2` (each channel shares only among
-its own voices, so bass and lead stay apart), better than arp across all voices.
-Only changes once a frame can be expressed.
+By default TIA channel 1 serves POKEY voices 1 and 2 and channel 2 serves voices
+3 and 4 (`--map groups --groups 1+2,3+4`), and a channel with two voices wanting it
+shares by turns, two frames each (`--mash arp --arp 2`). That pairing is a guess
+about how a game lays out its voices; give `--groups` another if the bass and lead
+are elsewhere. On Triple Punch this sounded the cleanest of the settings tried
+and did not sound as if an instrument were missing. `--map loudest` plays each
+frame's two loudest voices instead, with a held note keeping its channel;
+`--mash loudest` drops the quieter voice rather than sharing (thinner, no
+flutter). `--arp 1` is the buzziest. Only changes once a frame can be expressed.
 
 The TIA's pitches are few and fixed, so each tone lands on the nearest one (up to
 about a quarter tone away, more in the bass); `--offset CENTS` or `--fit` moves

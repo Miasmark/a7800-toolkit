@@ -781,15 +781,23 @@ def t_pokey2tia():
             f.write("%d 20 A8 30 A5 40 A3 50 8A 00\n" % fr)
     out_dir = os.path.join(work, "out")
     p = subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o",
-                        out_dir, "--mash", "arp", "--fit"], stdout=subprocess.PIPE,
+                        out_dir, "--fit"], stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT)
     assert p.returncode == 0, p.stdout.decode()
+    # the defaults are groups 1+2,3+4 shared by turns, two frames each
+    explicit = os.path.join(work, "explicit")
+    subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o", explicit,
+                    "--fit", "--map", "groups", "--groups", "1+2,3+4", "--mash", "arp",
+                    "--arp", "2"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    same = [io.open(os.path.join(d, "tia.trk"), encoding="utf-8").read()
+            for d in (out_dir, explicit)]
+    assert same[0] == same[1], "the defaults are not groups 1+2,3+4, arp 2"
     for name in ("tia.trk", "tia.asm", "tia.wav", "orig.wav", "report.txt"):
         assert os.path.getsize(os.path.join(out_dir, name)) > 0, name
     bad = subprocess.run([sys.executable, os.path.join(HERE, "pokey2tia.py"), log, "-o",
-                          out_dir, "--map", "groups"], stdout=subprocess.PIPE,
+                          out_dir, "--groups", "1+2"], stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT)
-    assert bad.returncode != 0 and b"needs --groups" in bad.stdout and \
+    assert bad.returncode != 0 and b"two channels" in bad.stdout and \
         b"Traceback" not in bad.stdout
     return "loudest-two with sticky channels, groups, arp, noise, fit, and the command"
 

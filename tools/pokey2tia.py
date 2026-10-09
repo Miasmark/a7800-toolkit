@@ -14,19 +14,20 @@ it) so the two can be listened to side by side, and `report.txt`.
 The TIA has two channels and a few hundred fixed pitches, so this is a
 translation with losses, and every choice is an option:
 
-  Which voices. By default each frame's two LOUDEST voices play, and a voice that
-  keeps being chosen keeps its channel, so notes do not hop between them.
-  `--map groups --groups 1+2,3+4` instead gives TIA channel 1 to POKEY voices 1
-  and 2, and channel 2 to voices 3 and 4.
+  Which voices. By default TIA channel 1 serves POKEY voices 1 and 2 and channel
+  2 serves voices 3 and 4 (`--map groups`, `--groups 1+2,3+4`; for two POKEYs
+  1+2+5+6,3+4+7+8). That pairing is a guess about how a game lays out its
+  voices -- change it if the bass and lead are elsewhere. `--map loudest` instead
+  plays each frame's two LOUDEST voices, and a voice that keeps being chosen
+  keeps its channel, so notes do not hop between them.
 
-  Mashing. When more voices want a channel than it has, `--mash loudest` (the
-  default) lets the loudest win. `--mash arp` shares it: the voices take turns,
-  one per `--arp N` frames (default 1), which is an arpeggio at 60/N a second.
-  It keeps every voice in the music and sounds buzzy. On Triple Punch the neatest
-  listening result was groups plus a slow arp (`--map groups --groups 1+2,3+4
-  --mash arp --arp 2`): each channel only shares among its own voices, so the
-  bass and lead stay apart. It can still sound messy, which is why it is not the
-  default.
+  Mashing. When more voices want a channel than it has, they take turns
+  (`--mash arp`, the default), one per `--arp N` frames (default 2): an arpeggio
+  at 60/N a second. Every voice stays in the music, and each channel shares only
+  among its own group, so the bass and lead stay apart. On Triple Punch this
+  sounded cleanest, and did not sound as if an instrument were missing.
+  `--mash loudest` lets the loudest voice win instead and drops the rest, which is
+  thinner but has no flutter; `--arp 1` flutters fastest and is the buzziest.
 
   Pitch. TIA's pitches are sparse and fixed (AUDC $4, $C, $6 and $E, thirty-two
   dividers each), so a POKEY note lands up to about a quarter tone away, more in
@@ -245,14 +246,16 @@ def main(argv=None):
     ap.add_argument("log", help="POKEY log from probes/audio.lua")
     ap.add_argument("-o", "--out", required=True, help="output folder")
     ap.add_argument("--region", default="ntsc", choices=sorted(T.CLOCK))
-    ap.add_argument("--chip", default="pokey", choices=["pokey", "pokey2"])
-    ap.add_argument("--map", default="loudest", choices=["loudest", "groups"],
+    ap.add_argument("--chip", choices=["pokey", "pokey2"],
+                    help="one POKEY or two (default: what the log's `# chip` line says)")
+    ap.add_argument("--map", default="groups", choices=["loudest", "groups"],
                     dest="mapping")
     ap.add_argument("--groups", help="with --map groups: voices for TIA channel 1 "
-                                     "and 2, e.g. 1+2,3+4")
-    ap.add_argument("--mash", default="loudest", choices=["loudest", "arp"])
-    ap.add_argument("--arp", type=int, default=1,
-                    help="frames each voice holds a shared channel (default 1)")
+                                     "and 2 (default 1+2,3+4; 1+2+5+6,3+4+7+8 for "
+                                     "two POKEYs)")
+    ap.add_argument("--mash", default="arp", choices=["loudest", "arp"])
+    ap.add_argument("--arp", type=int, default=2,
+                    help="frames each voice holds a shared channel (default 2)")
     ap.add_argument("--offset", type=int, default=0, help="shift pitch, in cents")
     ap.add_argument("--fit", action="store_true", help="choose the offset automatically")
     ap.add_argument("--buzz", default="noise", choices=["noise", "tone"])
@@ -260,18 +263,6 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not os.path.isfile(args.log):
         sys.exit("pokey2tia: no such file: %s" % args.log)
-    groups = None
-    if args.mapping == "groups":
-        if not args.groups:
-            sys.exit("pokey2tia: --map groups needs --groups, e.g. --groups 1+2,3+4")
-        try:
-            groups = [set(int(x) for x in g.split("+")) for g in args.groups.split(",")]
-        except ValueError:
-            sys.exit("pokey2tia: --groups is voice numbers joined by +, "
-                     "separated by commas: %r" % args.groups)
-        if len(groups) != 2:
-            sys.exit("pokey2tia: the TIA has two channels, so --groups needs two "
-                     "groups, not %d" % len(groups))
     if args.arp < 1:
         sys.exit("pokey2tia: --arp must be 1 or more")
     lo, _, hi = args.frames.partition("-")
@@ -283,6 +274,17 @@ def main(argv=None):
     if not len(song):
         sys.exit("pokey2tia: %s holds no POKEY frames. Is it a POKEY log (nine "
                  "values a line)? A TIA log needs no conversion." % args.log)
+    groups = None
+    if args.mapping == "groups":
+        text = args.groups or ("1+2+5+6,3+4+7+8" if song.nchips > 1 else "1+2,3+4")
+        try:
+            groups = [set(int(x) for x in g.split("+")) for g in text.split(",")]
+        except ValueError:
+            sys.exit("pokey2tia: --groups is voice numbers joined by +, "
+                     "separated by commas: %r" % text)
+        if len(groups) != 2:
+            sys.exit("pokey2tia: the TIA has two channels, so --groups needs two "
+                     "groups, not %d" % len(groups))
     tia, stats = convert(song, args.offset, args.fit, args.mash, args.arp, groups,
                          args.buzz, frames)
     os.makedirs(args.out, exist_ok=True)
