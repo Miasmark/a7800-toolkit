@@ -520,7 +520,7 @@ def pct(a, b):
 
 
 def markdown(name, r):
-    cart, col, bus, cls = r["cart"], r["col"], r["bus"], r["cls"]
+    cart, col, cls = r["cart"], r["col"], r["cls"]
     per, tot = summary(cart, cls)
     total = sum(tot.values())
     dark = dark_areas(cart, cls)
