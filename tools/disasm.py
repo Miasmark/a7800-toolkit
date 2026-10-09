@@ -497,7 +497,7 @@ class Emitter:
         """Where this space begins in the image file, header included."""
         c = self.cart
         head = 128 if c.header_bytes else 0
-        return head + c._offset(space, c.base_of(space))
+        return head + getattr(self, "shift", 0) + c._offset(space, c.base_of(space))
 
     def emit_space(self, space, out):
         cart, an, cfg = self.cart, self.an, self.cfg
@@ -519,6 +519,9 @@ class Emitter:
                  % (self._file_start(space), self._file_start(space)
                     + cart.size_of(space) - 1))
         w.append(";   %d instructions reached by the tracer" % ncode)
+        if getattr(self, "shift", 0):
+            w.append(";   MARIA's half of a bankset cartridge: what MARIA fetches, which the CPU")
+            w.append(";   never reads. Listed as data so the image rebuilds exactly.")
         if space in cfg.notes:
             for line in cfg.notes[space].splitlines():
                 w.append(";   " + line)
@@ -846,6 +849,14 @@ def main():
         if space.startswith("b") and n == 0 and space not in cfg.notes:
             continue
         em.emit_space(space, os.path.join(args.outdir, "%s.asm" % space))
+    if cart.bankset:
+        # MARIA's half: nothing is traced in it, but the rebuilt image needs it
+        mc = cart.for_maria()
+        mcfg = Config()
+        mem = Emitter(mc, Analyzer(mc, mcfg), mcfg)
+        mem.shift = len(cart.rom)
+        for space in cart_module.canonical_spaces(mc):
+            mem.emit_space(space, os.path.join(args.outdir, "m%s.asm" % space))
 
     # ---- report ----
     print("vectors: NMI=$%04X RESET=$%04X IRQ=$%04X" % (nmi, res, irq))

@@ -133,9 +133,11 @@ class CensusCollector(simprobe.Collector):
     def _mark(self, addr, bank):
         addr &= 0xFFFF
         if addr >= 0x4000:
-            sp = self.cart.space_of(addr, bank)
+            # MARIA reads its own half of a bankset cartridge (named m<space>)
+            maria = self.cart.for_maria()
+            sp = maria.space_of(addr, bank)
             if sp is not None:
-                self.gfx.add((sp, addr))
+                self.gfx.add((("m" + sp) if maria is not self.cart else sp, addr))
         else:
             a = self.canon(addr)
             if a is not None:
@@ -263,15 +265,7 @@ def static_view(cart, config):
 def canon_spaces(cart):
     """The spaces to report: each stretch of the file once. A SuperGame's last bank is
     both the fixed half at $C000 and a window at $8000; the fixed name wins."""
-    names = cart.spaces()
-    order = [s for s in names if not s.startswith("b")] + [s for s in names if s.startswith("b")]
-    seen, out = set(), []
-    for sp in order:
-        key = (cart._file_base(sp), cart.size_of(sp))
-        if key not in seen:
-            seen.add(key)
-            out.append(sp)
-    return sorted(out, key=names.index)
+    return cart_module.canonical_spaces(cart)
 
 
 def classify(cart, sets, static_code, blocks):
@@ -317,7 +311,8 @@ def classify(cart, sets, static_code, blocks):
         base, size = cart.base_of(sp), cart.size_of(sp)
         o1 = cart._file_base(sp)
         for sp2 in names:
-            if sp2 == sp or cart.base_of(sp2) != base or cart.size_of(sp2) != size:
+            if sp2 == sp or cart.base_of(sp2) != base or cart.size_of(sp2) != size \
+                    or sp.startswith("m") != sp2.startswith("m"):
                 continue
             o2 = cart._file_base(sp2)
             c1, c2 = out[sp], out[sp2]
@@ -510,6 +505,7 @@ def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
                      % (sum(s["forks"] for s in stats), len(sets["forced"]),
                         sum(s["ran on"] for s in stats), sum(s["dead"] for s in stats)))
     static_code, blocks = static_view(cart, config)
+    cart = cart.sides()              # a bankset cartridge: both halves, MARIA's as m<space>
     cls = classify(cart, sets, static_code, blocks)
     return {"cart": cart, "col": col, "bus": bus, "sets": sets, "cls": cls,
             "notes": notes, "frames": frames, "explore": explore,
@@ -548,6 +544,8 @@ def suggestions(dark):
     in the listing, not a finding; nothing here is applied for you."""
     out = []
     for a in dark:
+        if a["space"].startswith("m"):
+            continue                 # MARIA's half of a bankset cartridge: not code to annotate
         loc = "%s:%04X" % (a["space"], a["lo"])
         g = a["guess"]
         if g == "code-like":
@@ -567,6 +565,8 @@ def forced_suggestions(cart, cls):
     path rejoined real code, but no run has been seen to take it."""
     out = []
     for sp in cls:
+        if sp.startswith("m"):
+            continue
         for lo, hi in runs_of(cls[sp], FORCED, cart.base_of(sp)):
             out.append({"kind": "entry", "loc": "%s:%04X" % (sp, lo), "size": hi - lo + 1,
                         "why": "reached by forcing an untaken branch; the path rejoined "

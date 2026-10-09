@@ -304,7 +304,7 @@ checked against a live list pulled out of a running game, not only against its
 own self-test.
 
 Activision banking and Bankset are laid out (see
-[`docs/cartridges.md`](docs/cartridges.md)). SOUPER and the 512K flat layout are
+[`docs/cartridges.md`](docs/cartridges.md)). Bankset images disassemble with MARIA's half as data, rebuild exactly, and the census and the screen rebuild read each half as the chip that uses it; which of MARIA's banks is in view is assumed, not yet confirmed (that doc says how). SOUPER and the 512K flat layout are
 recognised and refused with an explanation rather than laid out wrongly.
 
 ## Examples

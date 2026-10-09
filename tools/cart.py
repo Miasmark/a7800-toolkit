@@ -375,6 +375,7 @@ class Cart(object):
     def __init__(self, path, mapper=None, low=None, side="sally"):
         raw = open(path, "rb").read()
         self.path = path
+        self._mapper_arg, self._low_arg, self._maria = mapper, low, None
         self.header_bytes = None
         self.info = read_header(raw)
         if self.info is not None:
@@ -595,6 +596,25 @@ class Cart(object):
         return {"ranked": best, "default": self.nbanks - 1,
                 "agrees": bool(best) and best[0]["bank"] == self.nbanks - 1}
 
+    # -- the two halves of a bankset cartridge ---------------------------------
+    def for_maria(self):
+        """The cartridge as MARIA sees it: the other half of a bankset cartridge, or
+        this very object when there is only one half. Display lists and graphics are
+        fetched from here, not from what the CPU executes."""
+        if not self.bankset or self.side == "maria":
+            return self
+        if getattr(self, "_maria", None) is None:
+            self._maria = Cart(self.path, mapper=self._mapper_arg, low=self._low_arg,
+                               side="maria")
+        return self._maria
+
+    def sides(self):
+        """This cartridge, or for a bankset one a `Sides` holding both halves, with
+        MARIA's spaces named `m` + the CPU name (`mb3`, `mf7`, `mrom`)."""
+        if not self.bankset or self.side == "maria":
+            return self
+        return Sides(self, self.for_maria())
+
     def file_bytes(self, rom=None):
         """The image as it sits on disk, header included if it had one."""
         return (self.header_bytes or b"") + bytes(self.rom if rom is None else rom)
@@ -667,3 +687,74 @@ def main():
 if __name__ == "__main__":
     import sys
     sys.exit(main())
+
+
+def canonical_spaces(cart):
+    """The spaces to report or list: each stretch of the file once, a fixed name winning
+    over the window that aliases it (a SuperGame's last bank is both). Works on a `Cart`
+    or a `Sides`, where MARIA's `mb3` counts as a window like `b3`."""
+    names = cart.spaces()
+    windowed = lambda sp: sp.lstrip("m").startswith("b")      # noqa: E731
+    order = [s for s in names if not windowed(s)] + [s for s in names if windowed(s)]
+    seen, out = set(), []
+    for sp in order:
+        key = (cart._file_base(sp), cart.size_of(sp))
+        if key not in seen:
+            seen.add(key)
+            out.append(sp)
+    return sorted(out, key=names.index)
+
+
+class Sides(object):
+    """Both halves of a bankset cartridge, addressed by one set of space names.
+
+    The CPU's half keeps its usual names (`f7`, `b3`, `rom`); MARIA's is the same
+    layout under `m` + the name (`mf7`, `mb3`, `mrom`). `rom` is the whole file body,
+    CPU half first, so a byte has one file offset whichever side it is on. Read-only,
+    and only what a tool that reports on the whole file needs.
+    """
+
+    def __init__(self, cpu, maria):
+        self.cpu, self.maria = cpu, maria
+        self.info, self.path = cpu.info, cpu.path
+        self.rom = bytes(cpu.rom) + bytes(maria.rom)
+        self._half = len(cpu.rom)
+        self.bankset = True
+
+    def _side(self, space):
+        return (self.maria, self._half) if space.startswith("m") else (self.cpu, 0)
+
+    @staticmethod
+    def _bare(space):
+        return space[1:] if space.startswith("m") else space
+
+    def spaces(self):
+        return self.cpu.spaces() + ["m" + s for s in self.maria.spaces()]
+
+    def base_of(self, space):
+        return self._side(space)[0].base_of(self._bare(space))
+
+    def size_of(self, space):
+        return self._side(space)[0].size_of(self._bare(space))
+
+    def _file_base(self, space):
+        c, off = self._side(space)
+        return off + c._file_base(self._bare(space))
+
+    def _offset(self, space, addr):
+        c, off = self._side(space)
+        return off + c._offset(self._bare(space), addr)
+
+    def byte(self, space, addr):
+        c, _off = self._side(space)
+        return c.byte(self._bare(space), addr)
+
+    def slice(self, space, addr, n):
+        c, _off = self._side(space)
+        return c.slice(self._bare(space), addr, n)
+
+    def space_of(self, addr, bank=None):
+        return self.cpu.space_of(addr, bank)
+
+    def is_maria(self, space):
+        return space.startswith("m")

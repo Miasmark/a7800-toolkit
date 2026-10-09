@@ -201,6 +201,28 @@ This is worth knowing when hunting for artwork: on a bankset cartridge the
 graphics are not hiding in an unreached corner of the CPU's ROM. They are in
 the other half, at addresses the CPU never reads.
 
+### What the tools do with a bankset cartridge
+
+* **`disasm.py` and `build.py`** list the CPU's half as always and MARIA's half as
+  data, `m<space>.asm` beside the others (`mrom.asm`, `mb3.asm`, `mf7.asm`), so the
+  image rebuilds byte for byte. Nothing is traced in MARIA's half: the CPU never runs it.
+* **`sim.py`** runs the CPU's half, which is what executes. MARIA's reads of display
+  lists in ROM are not modelled (the sim only walks lists in RAM), bankset or not.
+* **`census.py`** reports both halves: MARIA's spaces are `m` + the CPU name. What MARIA
+  was seen fetching is marked in MARIA's half, not the CPU's, and no annotation
+  suggestions are made for MARIA's half.
+* **`firstlook.py`** rebuilds the screen from MARIA's half (`Cart.for_maria()`).
+* `gfx.py`, `spriteedit.py` and the workbench's sprite editor take `--side`.
+
+**Not established:** which bank of MARIA's half is in view for a given bank register
+write. The tools use the same bank number on both sides, which is what "two parallel
+sets of banks at the same addresses" says, but only the CPU's side has been read back
+from a running machine. The check that was tried -- tapping reads of `$C000-$C7FF` in
+MAME while the title of `Bubble Bobble (v75a)` (it reads KILOPARSEC) was up -- returned bytes that match neither half at
+the fixed bank's offset, and that image also sets the "halt banked RAM" flag, so its
+display is not simply two ROM halves. A rebuilt screen of a bankset cartridge is a
+reconstruction under that assumption.
+
 ## 52K
 
 52K is exactly `$3000-$FFFF` — four kilobytes below where a 48K image starts,

@@ -1314,6 +1314,77 @@ def t_census():
     return "dark = the text bank and the two untouched banks; RAM counters found; merge only grows"
 
 
+def t_census_bankset():
+    """A bankset cartridge is two halves: the CPU runs the first and MARIA draws from the
+    second. The census reports both, and the sprite MARIA reads shows up in MARIA's half
+    (`mf7`) and not in the CPU's."""
+    import census
+    import cart as cart_module
+    synth = _synth()
+    data, facts = synth.build()
+    body = bytearray(data[128:])
+    maria = bytearray(body)
+    row = facts["sprite_row"] - 0xC000 + 0x1C000          # the sprite, in the fixed bank
+    for i in range(facts["sprite_width"]):
+        maria[row + i] ^= 0xFF                              # make the MARIA copy differ
+    hdr = bytearray(data[:128])
+    ctype = (hdr[53] << 8) | hdr[54]
+    hdr[53], hdr[54] = (ctype | 0x2000) >> 8, (ctype | 0x2000) & 0xFF
+    hdr[49:53] = (2 * len(body)).to_bytes(4, "big")
+    work = tempfile.mkdtemp(prefix="selftest-bankset-")
+    try:
+        rom = os.path.join(work, "bankset.a78")
+        io.open(rom, "wb").write(bytes(hdr) + bytes(body) + bytes(maria))
+        cart = cart_module.Cart(rom)
+        assert cart.bankset and cart.for_maria() is not cart
+        assert cart.for_maria().byte("f7", facts["sprite_row"]) != cart.byte("f7", facts["sprite_row"])
+        assert "mf7" in cart.sides().spaces() and cart.sides()._file_base("mf7") == len(body) + 0x1C000
+        r = census.build(rom, 120, False)
+        per, tot = census.summary(r["cart"], r["cls"])
+        assert per["mf7"][census.GFX] >= facts["sprite_width"], per["mf7"]
+        assert per["f7"][census.GFX] == 0, per["f7"]
+        assert per["f7"][census.EXEC] > 0 and per["mf7"][census.EXEC] == 0
+        assert not any(x["loc"].startswith("m") for x in census.suggestions(
+            census.dark_areas(r["cart"], r["cls"])))
+    finally:
+        shutil.rmtree(work, True)
+    return "both halves reported; the sprite is MARIA's, in mf7; no suggestions for MARIA's half"
+
+
+def t_bankset_roundtrip():
+    """A bankset cartridge disassembles into the CPU's listing plus MARIA's half as data
+    (`m<space>.asm`), and build.py puts the two back together byte for byte."""
+    import asm
+    synth = _synth()
+    fixed = asm.Assembler().assemble(synth.fixed_source("Bankset").splitlines())
+    assert len(fixed) == 0x4000
+    maria = bytes((i * 7 + 3) & 0xFF for i in range(0x4000))
+    hdr = bytearray(128)
+    hdr[0] = 1
+    hdr[1:10] = b"ATARI7800"
+    hdr[17:24] = b"Bankset"
+    hdr[49:53] = (0x8000).to_bytes(4, "big")
+    hdr[53], hdr[54] = 0x20, 0x00
+    hdr[55] = 1
+    work = tempfile.mkdtemp(prefix="selftest-bsrt-")
+    try:
+        rom = os.path.join(work, "b.a78")
+        io.open(rom, "wb").write(bytes(hdr) + bytes(fixed) + maria)
+        src = os.path.join(work, "src")
+        for cmd in ([sys.executable, os.path.join(HERE, "disasm.py"), rom, "-o", src],):
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            assert r.returncode == 0, r.stdout[-400:]
+        assert sorted(f for f in os.listdir(src) if f.endswith(".asm")) == ["mrom.asm", "rom.asm"]
+        out = os.path.join(work, "out.a78")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "build.py"), rom, "-d", src,
+                            "-o", out], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        assert r.returncode == 0 and b"identical to reference ROM: YES" in r.stdout, r.stdout[-400:]
+        assert io.open(out, "rb").read() == io.open(rom, "rb").read()
+    finally:
+        shutil.rmtree(work, True)
+    return "CPU listing plus MARIA's half as data rebuilds the image byte for byte"
+
+
 def t_branchforce():
     """branchforce.py on the synthetic cartridge: a branch the run never takes leads to a
     hand-pushed RTS and code the static tracer cannot reach (kept, as joined), and its
@@ -4259,6 +4330,8 @@ def main():
     r.check("census", t_census)
     r.check("census guesses", t_census_guess)
     r.check("dynamic evidence from the sim", t_dyn_sim)
+    r.check("census, bankset", t_census_bankset)
+    r.check("bankset round trip", t_bankset_roundtrip)
     r.check("branch forcing", t_branchforce)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)

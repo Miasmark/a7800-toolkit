@@ -35,14 +35,19 @@ def main():
     if not os.path.isdir(args.dir):
         sys.exit("build: no such listing directory: %s" % args.dir)
     cart = Cart(args.rom, mapper=args.mapper, low=args.low)
-    banks = {}
+    # a bankset cartridge is two halves; MARIA's listings are m<space>.asm
+    mcart = cart.for_maria() if cart.bankset else None
+    banks, mbanks = {}, {}
     for name in sorted(os.listdir(args.dir)):
         if not name.endswith(".asm"):
             continue
         space = name[:-4]
-        b = cart.bank_of(space)
+        target, store = cart, banks
+        if mcart is not None and space.startswith("m"):
+            target, store, space = mcart, mbanks, space[1:]
+        b = target.bank_of(space)
         # prefer the listing whose .org matches where the bank really lives
-        if b in banks and space.startswith("b"):
+        if b in store and space.startswith("b"):
             continue
         path = os.path.join(args.dir, name)
         try:
@@ -50,18 +55,25 @@ def main():
                 open(path, encoding="utf-8").read().splitlines())
         except AsmError as e:
             sys.exit("build: %s: %s" % (path, e))
-        want = cart.size_of(space)
+        want = target.size_of(space)
         if len(data) != want:
-            print("  %s: %d bytes, expected %d" % (space, len(data), want))
+            print("  %s: %d bytes, expected %d" % (name[:-4], len(data), want))
             return 1
-        banks[b] = data
+        store[b] = data
 
     missing = [b for b in range(cart.nbanks) if b not in banks]
     if missing:
         print("missing listings for banks: %s" % missing)
         return 1
+    if mcart is not None:
+        missing = [b for b in range(mcart.nbanks) if b not in mbanks]
+        if missing:
+            print("missing listings for MARIA's banks: %s (run disasm.py again)" % missing)
+            return 1
 
     image = b"".join(banks[b] for b in range(cart.nbanks))
+    if mcart is not None:
+        image += b"".join(mbanks[b] for b in range(mcart.nbanks))
     out = (cart.header_bytes or b"") + image
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     open(args.out, "wb").write(out)

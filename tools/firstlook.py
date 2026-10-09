@@ -323,7 +323,8 @@ class Screen(object):
 
     def __init__(self, c, ram, d):
         import dlwalk
-        self.c, self.d, self.dlwalk = c, d, dlwalk
+        # MARIA fetches lists and graphics from its own half of a bankset cartridge
+        self.c, self.d, self.dlwalk = c.for_maria(), d, dlwalk
         self.ram = ram
         self.skipped = {}                   # (read mode, write mode) -> zone count
         # display lists, character lists and graphics may be in RAM or in ROM
