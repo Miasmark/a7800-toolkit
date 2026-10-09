@@ -319,6 +319,8 @@ class Bus(object):
         self.poly = 0x1FFFF             # POKEY's 17-bit polynomial counter
         self.poly_at = 0                # ... and the cycle it was last advanced
         self.drive = drive
+        self.obs = None                 # an observer, or None
+        self.maria = {}                 # MARIA register -> last value written
         self.cpu_cycles = lambda: 0     # set by CPU.__init__
         self.pokeys = set()
         for base in cart.pokeys():
@@ -403,6 +405,8 @@ class Bus(object):
             b = self.cart.map.bank_from_write(a, v)
             if b is not None:
                 self.bank = b
+                if self.obs is not None:
+                    self.obs.bank_switch(a, v, b)
                 return
         if a >= 0x4000:
             if a in self.pokeys:
@@ -415,6 +419,10 @@ class Bus(object):
             # MARIA's display-list pointer. Write-only on hardware, so nothing
             # can read it back -- the sim has to catch it on the way past or
             # it never learns where the display list is.
+            if 0x20 <= low <= 0x3F:
+                self.maria[low] = v
+                if self.obs is not None:
+                    self.obs.maria_write(low, v)
             if low == 0x2C:
                 self.dpph = v
             elif low == 0x30:
@@ -539,6 +547,7 @@ class CPU(object):
         self.p = U | I
         self.pc = self.word(0xFFFC)
         self.cycles = 0
+        self.obs = None                 # an observer (see Observer), or None
 
     def word(self, a):
         return self.bus.read(a) | (self.bus.read(a + 1) << 8)
@@ -660,9 +669,13 @@ class CPU(object):
 
     def step(self):
         b = self.bus
-        op = b.read(self.pc)
+        obs = self.obs
+        pc0 = self.pc
+        op = b.read(pc0)
         entry = m6502.OPCODES.get(op)
         self.pc = (self.pc + 1) & 0xFFFF
+        if obs is not None:
+            obs.fetch(pc0, op)
         if entry is None:
             self.cycles += 2
             return
@@ -670,8 +683,13 @@ class CPU(object):
         cyc = m6502.CYCLES[op]
         a, extra = self.addr(mode)
 
-        def rd():
-            return b.read(a)
+        if obs is None or mode == "imm":
+            def rd():
+                return b.read(a)
+        else:
+            def rd():
+                obs.data_read(a)
+                return b.read(a)
 
         if mn == "LDA":
             self.a = self.setzn(rd())
@@ -754,14 +772,21 @@ class CPU(object):
             self.p = (self.p & ~(Z | N | V)) | (Z if not (self.a & v) else 0) \
                 | (v & (N | V))
         elif mn == "JMP":
+            if obs is not None and mode == "ind":
+                obs.jump_indirect(pc0, a)
             self.pc = a
         elif mn == "JSR":
             r = (self.pc - 1) & 0xFFFF
             self.push((r >> 8) & 0xFF)
             self.push(r & 0xFF)
             self.pc = a
+            if obs is not None:
+                obs.call(pc0, a, r + 1, self.s)
         elif mn == "RTS":
+            sp = self.s
             self.pc = (self.pop() | (self.pop() << 8)) + 1 & 0xFFFF
+            if obs is not None:
+                obs.ret(pc0, self.pc, sp)
         elif mn == "RTI":
             self.p = (self.pop() | U) & ~B
             self.pc = self.pop() | (self.pop() << 8)
@@ -820,6 +845,44 @@ VBLANK_LINES = {"ntsc": 21, "pal": 21}
 DLI_LAG = 15
 
 
+class Observer(object):
+    """What a run can be watched with. Subclass and override what you need.
+
+    The hooks are called from inside the CPU loop, so they should be cheap. Addresses
+    are CPU addresses; the bank that was mapped at the time is `self.bus.bank`.
+    """
+
+    def attach(self, bus, cpu):
+        self.bus, self.cpu = bus, cpu
+
+    def frame_start(self, frame):
+        pass
+
+    def fetch(self, pc, opcode):
+        """An instruction is about to run at `pc`."""
+
+    def data_read(self, addr):
+        """An instruction read `addr` as data (not an operand byte, not a fetch)."""
+
+    def jump_indirect(self, pc, target):
+        """`JMP (vector)` at `pc` went to `target`."""
+
+    def call(self, pc, target, ret, sp):
+        """`JSR` at `pc` to `target`; it will return to `ret` (stack pointer now `sp`)."""
+
+    def ret(self, pc, target, sp):
+        """`RTS` at `pc` went to `target`; `sp` was the stack pointer before the pops."""
+
+    def bank_switch(self, addr, value, bank):
+        """A store of `value` to `addr` selected `bank`."""
+
+    def nmi(self):
+        """A display-list interrupt is being taken."""
+
+    def maria_write(self, reg, value):
+        """A write to MARIA register `reg` ($20-$3F)."""
+
+
 def load_handover(path):
     """The machine as a BIOS left it, from probes/handover.lua's log and its .ram.
 
@@ -848,7 +911,7 @@ def load_handover(path):
 
 
 def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
-        frame_nmi=False, steal=True, log=None, start_state=None):
+        frame_nmi=False, steal=True, log=None, start_state=None, observer=None):
     """Execute the cartridge for `frames` frames, collecting audio writes.
 
     Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
@@ -864,12 +927,19 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
     accident and wrong for everything that hangs work off zone boundaries.
     `frame_nmi=True` restores that behaviour for comparison.
 
+    `observer`, if given, is told what the CPU does (see Observer): every fetch, data
+    read, indirect jump, JSR/RTS, bank switch, interrupt and frame -- what the MAME
+    probes in probes/ record, without MAME.
+
     `log`, if a list, receives ("nmi" or "vblank", frame, cycles into the
     frame) for every display interrupt and vertical-blank start, which is what
     the timing is checked against MAME with (probes/dlitimes.lua).
     """
     bus = Bus(cart, drive=drive)
     cpu = CPU(bus)
+    if observer is not None:
+        cpu.obs = bus.obs = observer
+        observer.attach(bus, cpu)
     if start_state:
         for addr, b in start_state["ram"].items():
             bus.ram[fold(addr)] = b
@@ -883,6 +953,8 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
 
     for f in range(frames):
         bus.frame = f + 1
+        if observer is not None:
+            observer.frame_start(f + 1)
         # frames are scheduled from the start, not from wherever the last one
         # happened to end: an instruction that straddles the boundary does not
         # lengthen the next frame
@@ -942,6 +1014,8 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
                 else:
                     if log is not None:
                         log.append(("nmi", f + 1, cpu.cycles - base))
+                    if observer is not None:
+                        observer.nmi()
                     cpu.nmi()
                 i += 1
             cpu.step()

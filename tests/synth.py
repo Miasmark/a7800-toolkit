@@ -14,6 +14,8 @@ does the things a static tracer finds hard, each of them on purpose:
     reports the switch unresolved;
   * a `JMP (vector)` through a RAM vector filled in at run time, so the handler
     it reaches (`handler_a`) is on no path the tracer can follow;
+  * a computed RETURN: `PHA / PHA / RTS` with an address pushed by hand, a jump no
+    static tracer follows (`rts_target`, `trick_rts` is the RTS that takes it);
   * a POKEY tune played from bank 3, with its frequency and control tables
     there -- an audio table to find, and POKEY writes to hear;
   * text in bank 5 that is never code; banks 0 and 6 that are never touched.
@@ -92,6 +94,17 @@ computed_switch:
     JSR $8000               ; every switched bank has its routine here
     JMP (VEC)               ; a jump through a RAM vector: handler_a
 handler_a:
+    JSR rts_caller          ; and a computed return, below
+    RTS
+rts_caller:
+    LDA #>rts_target-1    ; push an address by hand ...
+    PHA
+    LDA #<rts_target-1
+    PHA
+trick_rts:
+    RTS                     ; ... so this RTS goes to rts_target, not to its caller
+rts_target:
+    INC $B8
     RTS
 bank_table:
     .byte %s
@@ -144,6 +157,8 @@ def build(region="ntsc", title="Synth128"):
         "window_entry": 0x8000,
         "reset": sym["reset"], "nmi": sym["nmi"],
         "handler_a": sym["handler_a"],          # reached only via JMP (VEC)
+        "rts_target": sym["rts_target"],        # reached only by a hand-pushed RTS
+        "trick_rts": sym["trick_rts"],
         "ram_vector": 0x00A0,
         "computed_switch": sym["computed_switch"],   # the STA BANKSEL
         "bank_table": sym["bank_table"],

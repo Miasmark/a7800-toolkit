@@ -441,11 +441,22 @@ def _choice(params, name, default, choices):
     return v
 
 
+def _engine(p, default="sim"):
+    return _choice(p, "engine", default, ("sim", "mame"))
+
+
+def _frames(p, default_seconds):
+    """Frames for a simulator run, from a `seconds` parameter."""
+    fps = 50 if (CART.info or {}).get("region", "NTSC") == "PAL" else 60
+    return _int(p, "seconds", default_seconds, 5, 600) * fps
+
+
 def build_firstlook(p):
     live = _bool(p, "live", True)
     secs = _int(p, "seconds", 30, 5, 300)
+    engine = _choice(p, "engine", "auto", ("auto", "sim", "mame"))
     out = os.path.join(PROJECT, "firstlook")
-    cmd = _py("firstlook.py", ROM, "-o", out, "--seconds", secs)
+    cmd = _py("firstlook.py", ROM, "-o", out, "--seconds", secs, "--engine", engine)
     if not live:
         cmd.append("--no-live")
     return Job("firstlook", "first look" + ("" if live else " (static)"),
@@ -485,7 +496,11 @@ def build_newannot(p):
 def build_observe(p):
     secs = _int(p, "seconds", 30, 5, 600)
     out = os.path.join(PROJECT, "observe")
-    steps = [{"cmd": _probe("exectrace", out, secs, {"A7800_XT_BANKS": _banks()})}]
+    if _engine(p) == "sim":
+        steps = [{"cmd": _py("simprobe.py", ROM, "-o", out, "--frames", _frames(p, 30),
+                             "--drive")}]
+    else:
+        steps = [{"cmd": _probe("exectrace", out, secs, {"A7800_XT_BANKS": _banks()})}]
     _need_config(steps)
     steps.append({"cmd": _py("dyn.py", ROM, os.path.join(out, "exectrace.log"),
                              "-c", config_path())})
@@ -497,7 +512,10 @@ def build_observe(p):
 def build_addresses(p):
     secs = _int(p, "seconds", 40, 5, 600)
     out = os.path.join(PROJECT, "addresses")
-    steps = [{"cmd": _probe("addrorigin", out, secs, {"A7800_AO_BANKS": _banks()})}]
+    if _engine(p) == "sim":
+        steps = [{"cmd": _py("simorigins.py", ROM, "-o", out, "--frames", _frames(p, 10))}]
+    else:
+        steps = [{"cmd": _probe("addrorigin", out, secs, {"A7800_AO_BANKS": _banks()})}]
     _need_config(steps)
     steps.append({"cmd": _py("origins.py", os.path.join(out, "addrorigin.log"), ROM,
                              "-c", config_path())})
@@ -509,7 +527,11 @@ def build_addresses(p):
 def build_profile(p):
     secs = _int(p, "seconds", 30, 5, 600)
     out = os.path.join(PROJECT, "profile")
-    steps = [{"cmd": _probe("pcprof", out, secs, {"A7800_PC_BANKS": _banks()})}]
+    if _engine(p) == "sim":
+        steps = [{"cmd": _py("simprobe.py", ROM, "-o", out, "--frames", _frames(p, 20),
+                             "--drive", "--profile")}]
+    else:
+        steps = [{"cmd": _probe("pcprof", out, secs, {"A7800_PC_BANKS": _banks()})}]
     cmd = _py("pcmap.py", os.path.join(out, "pcprof.log"))
     if os.path.isfile(config_path()):
         cmd += ["-c", config_path()]
@@ -551,8 +573,15 @@ def build_music(p):
     env = {"A7800_AUDIO_FRAMES": secs * 60, "A7800_POKEY": "auto"}
     if drive:
         env["A7800_DRIVE"] = "1"
-    log = os.path.join(out, "a7800-audio.log")
-    steps = [{"cmd": _probe("audio", out, secs, env)}]
+    if _engine(p) == "sim":
+        log = os.path.join(out, "audio.log")
+        cmd = _py("simprobe.py", ROM, "-o", out, "--frames", _frames(p, 40))
+        if drive:
+            cmd.append("--drive")
+        steps = [{"cmd": cmd}]
+    else:
+        log = os.path.join(out, "a7800-audio.log")
+        steps = [{"cmd": _probe("audio", out, secs, env)}]
     pokey = bool(CART.pokeys())
     if pokey and to_tia:
         cmd = _py("pokey2tia.py", log, "-o", os.path.join(out, "tia"),
@@ -590,9 +619,12 @@ def _kinds():
     return [
         dict(kind="firstlook", label="First look", group="Look", mame=False,
              about="The one-command report: what it is, its music and screens, its "
-                   "graphics, which code runs. Without an emulator it does the static half.",
+                   "graphics, which code runs. Runs the cartridge in the simulator by "
+                   "default (no emulator needed), falling back to MAME if the simulator "
+                   "stalls and MAME is there.",
              build=build_firstlook,
-             params=[p("live", "run it in MAME", "bool", True),
+             params=[p("live", "run it (not just the static half)", "bool", True),
+                     p("engine", "run it in", "choice", "auto", choices=["auto", "sim", "mame"]),
                      p("seconds", "seconds per run", "int", 30, min=5, max=300)]),
         dict(kind="disasm", label="Disassemble", group="Annotate", mame=False,
              about="Write the listings (uses annotations.json if there is one) and "
@@ -602,24 +634,27 @@ def _kinds():
              about="Write a starter annotations.json: the file every judgement about "
                    "this ROM goes in.",
              build=build_newannot, params=[]),
-        dict(kind="observe", label="Observe code", group="Annotate", mame=True,
+        dict(kind="observe", label="Observe code", group="Annotate", mame=False,
              about="Run it and write down where indirect jumps went and which banks "
                    "were switched in: entry points the static tracer cannot find.",
              build=build_observe,
-             params=[p("seconds", "seconds", "int", 30, min=5, max=600)]),
-        dict(kind="addresses", label="Find address tables", group="Annotate", mame=True,
+             params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
+                     p("seconds", "seconds", "int", 30, min=5, max=600)]),
+        dict(kind="addresses", label="Find address tables", group="Annotate", mame=False,
              about="Follow every address the CPU uses back to the ROM bytes it came "
                    "from, and add the tables to annotations.json. Slow.",
              build=build_addresses,
-             params=[p("seconds", "seconds", "int", 40, min=5, max=600)]),
+             params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
+                     p("seconds", "seconds", "int", 10, min=5, max=600)]),
         dict(kind="lint", label="Check annotations", group="Annotate", mame=False,
              about="Catch the typos the disassembler would silently ignore.",
              build=build_lint, params=[]),
-        dict(kind="music", label="Capture music", group="Audio", mame=True,
+        dict(kind="music", label="Capture music", group="Audio", mame=False,
              about="Record the sound registers, render the song, and for a POKEY "
                    "game optionally turn it into two TIA voices.",
              build=build_music,
-             params=[p("seconds", "seconds", "int", 40, min=5, max=600),
+             params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
+                     p("seconds", "seconds", "int", 40, min=5, max=600),
                      p("drive", "press fire to get past the title", "bool", True),
                      p("to_tia", "convert POKEY to TIA", "bool", False),
                      p("mapping", "voices", "choice", "groups", choices=["groups", "loudest"]),
@@ -627,11 +662,13 @@ def _kinds():
                        choices=["loudest", "arp"]),
                      p("arp", "arpeggio frames", "int", 2, min=1, max=8),
                      p("fit", "fit the pitch to the TIA", "bool", True)]),
-        dict(kind="profile", label="Where the time goes", group="Measure", mame=True,
-             about="A sampling profile of the 6502, grouped under the routine "
-                   "names you have given it.",
+        dict(kind="profile", label="Where the time goes", group="Measure", mame=False,
+             about="Where the 6502 spends its cycles, grouped under the routine "
+                   "names you have given it. In the simulator the count is exact; "
+                   "in MAME it is a sample.",
              build=build_profile,
-             params=[p("seconds", "seconds", "int", 30, min=5, max=600)]),
+             params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
+                     p("seconds", "seconds", "int", 20, min=5, max=600)]),
         dict(kind="budget", label="Cycle budget", group="Measure", mame=True,
              about="Cycles the 6502 ran, the NMI's share, and what MARIA's DMA took.",
              build=build_budget,
@@ -664,7 +701,7 @@ def start_job(kind, params):
     spec = next((k for k in KINDS if k["kind"] == kind), None)
     if not spec:
         raise ValueError("no such job: %r" % kind)
-    if spec["mame"]:
+    if spec["mame"] or (params or {}).get("engine") == "mame":
         env = environment()
         if not env["ready"]:
             raise ValueError(env["problem"])
@@ -1016,8 +1053,8 @@ async function load(){
   $('what').textContent=INFO.rom+'  '+INFO.mapper+'  '+Math.round(INFO.size/1024)+'K  '+
     INFO.region+'  '+INFO.chip.toUpperCase()+(INFO.pokeys.length?' at '+INFO.pokeys.join(', '):'');
   const pill=$('envpill');
-  pill.textContent=ENV.ready?('MAME '+(ENV.mame_version||'')+' ready'):'MAME not ready';
-  pill.className='pill '+(ENV.ready?'ok':'bad');
+  pill.textContent=ENV.ready?('MAME '+(ENV.mame_version||'')+' ready'):'no MAME: simulator only';
+  pill.className='pill '+(ENV.ready?'ok':'');
   pill.title=ENV.ready?(ENV.mame+'\n'+ENV.rompath):ENV.problem;
   const nav=$('tabs');
   for(const [id,label] of TABS)
@@ -1046,8 +1083,9 @@ async function drawOverview(){
   t.append(row('project',ENV.project));
   box.append(el('h2',{text:'cartridge'}),t);
   for(const w of INFO.warnings) box.append(el('div',{class:'warn',text:w}));
-  if(!ENV.ready) box.append(el('div',{class:'tip'},el('b',{text:'No emulator. '}),ENV.problem,
-    ' The jobs that need MAME are greyed out in Run; the others work.'));
+  if(!ENV.ready) box.append(el('div',{class:'tip'},el('b',{text:'No emulator. '}),
+    'The simulator runs the cartridge for first look, observe code, find address tables, music and the profile, so most of this works without MAME. ',
+    'Cycle budget, display-interrupt timing and running arbitrary probes need it: '+ENV.problem));
   else box.append(el('div',{class:'tip'},el('b',{text:'Start here: '}),
     'Run → First look gives a one-page report on an unfamiliar cartridge. ',
     'Then Disassemble, and Observe code / Find address tables to teach the listing what the static tracer cannot see.'));
@@ -1147,6 +1185,8 @@ function card(k){
     c.append(p.type==='text'?el('div',{},el('div',{class:'muted',text:p.label}),inp):el('label',{},el('span',{text:p.label}),inp));
   }
   const need=k.mame&&!ENV.ready;
+  const engSel=inputs.engine&&inputs.engine[1];
+  if(engSel&&!ENV.ready) for(const o of engSel.options) if(o.value==='mame') o.textContent='mame (not found)';
   const go=el('button',{class:'go',text:'run',disabled:need?'disabled':false,onclick:async()=>{
     const body={kind:k.kind,params:{}};
     for(const n in inputs){ const [p,inp]=inputs[n];

@@ -220,6 +220,7 @@ def step_music(rom, mame, out, c, args, rep):
     os.makedirs(stem, exist_ok=True)
     log = os.path.join(stem, "capture.log")
     trk = os.path.join(stem, "song.trk")
+    song = None
     if mame.playback:
         info = capture.inspect(rom)
         env = {"A7800_AUDIO_LOG": log, "A7800_AUDIO_FRAMES": "999999"}
@@ -227,11 +228,17 @@ def step_music(rom, mame, out, c, args, rep):
             env["A7800_POKEY"] = ",".join("0x%04X" % b for b in info["pokeys"])
         mame.run("audio.lua", args.seconds, out, env)
         song = tracker.read_capture(log, info["region"])
-        io.open(trk, "w", encoding="utf-8").write(tracker.dump(song))
     else:
         r = capture.capture(rom, trk, args.seconds, None, 0, not args.no_drive,
                             args.mame, args.rompath, log, quiet=True)
         song = r["song"]
+    return describe_music(song, stem, trk, c, rep)
+
+
+def describe_music(song, stem, trk, c, rep):
+    """Write the song, render it, and say what it holds."""
+    import tracker
+    io.open(trk, "w", encoding="utf-8").write(tracker.dump(song))
     voiced = sum(1 for row in song.rows if any(x for x in row))
     lines = ["%d frames captured, %d with a change in the sound registers."
              % (len(song), voiced),
@@ -278,8 +285,12 @@ def step_screens(mame, out, args, rep):
 
 
 def parse_regs(path):
+    return parse_regs_text(io.open(path, encoding="utf-8").read())
+
+
+def parse_regs_text(text):
     d = {"regs": {}}
-    for ln in io.open(path, encoding="utf-8"):
+    for ln in text.splitlines():
         ln = ln.strip()
         m = re.match(r"frame (\d+)", ln)
         if m:
@@ -467,6 +478,11 @@ def step_graphics(rom, mame, out, c, args, rep):
         return ["The graphics run wrote no dump."]
     d = parse_regs(regs)
     scr = Screen(c, io.open(ram, "rb").read(), d)
+    return describe_graphics(c, gdir, scr, d, rep)
+
+
+def describe_graphics(c, gdir, scr, d, rep):
+    """The graphics section, from a dump already read into `scr` (a Screen)."""
     import mariapix
     objs = scr.objects()
     direct = [o for o in objs if not o[0]["indirect"] and o[0]["gfx"] >= 0x4000]
@@ -565,6 +581,10 @@ def step_sprites(mame, out, args, rep):
         return ["The run wrote no list."]
     refs = sorted(json.load(io.open(log, encoding="utf-8"))["refs"],
                   key=lambda r: r["addr"])
+    return describe_slots(refs, args.seconds, rep)
+
+
+def describe_slots(refs, seconds, rep):
     rep.facts["sprite_refs"] = len(refs)
     runs, cur = [], []
     for r in refs:
@@ -578,7 +598,7 @@ def step_sprites(mame, out, args, rep):
     lines = ["%d ROM addresses were drawn from in %d seconds (`graphics/"
              "liveslots.json`); %d of them in runs at a constant stride, "
              "which is what a sprite sheet looks like:" %
-             (len(refs), args.seconds, sum(len(r) for r in runs if len(r) > 2))]
+             (len(refs), seconds, sum(len(r) for r in runs if len(r) > 2))]
     for r in runs:
         if len(r) > 2:
             lines.append("- `$%04X`-`$%04X`: %d objects, %d bytes wide" % (
@@ -587,13 +607,18 @@ def step_sprites(mame, out, args, rep):
 
 
 def step_code(rom, mame, out, c, args, rep):
-    import dyn
     log = os.path.join(out, "code", "exectrace.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
     env = {"A7800_XT_LOG": log, "A7800_XT_BANKS": str(max(c.nbanks, 1))}
     mame.run("exectrace.lua", args.code_seconds, out, env)
     if not os.path.exists(log):
         return ["The run wrote no log."]
+    return merge_code(rom, out, c, log, rep)
+
+
+def merge_code(rom, out, c, log, rep):
+    """Turn an exectrace log into a starter annotations.json and say what it found."""
+    import dyn
     ann = os.path.join(out, "annotations.json")
     import init as initmod
     doc = initmod.build(c, rom)
@@ -610,6 +635,143 @@ def step_code(rom, mame, out, c, args, rep):
             "", "Next: `python tools/disasm.py %s -c %s -o src` then "
             "`python tools/verify.py %s -d src`." % (
                 '"%s"' % rom, '"%s"' % ann, '"%s"' % rom)]
+
+
+# ------------------------------------------------------- the simulator as the engine
+class SimEngine(object):
+    """The same five questions answered by sim.py: no emulator, no BIOS.
+
+    One run of the cartridge in the simulator serves every step, where MAME is started
+    once per probe: the music is the sound-chip writes, the screens are rebuilt from the
+    display list and RAM at three moments, the graphics section reads the RAM and MARIA
+    registers at `--graphics-at`, the sprite list is every graphics address the display
+    list pointed at, and the code is every instruction that ran. See simprobe.py for how
+    far to trust it: it is what `sim.py` scores against MAME, and a cartridge that waits
+    on hardware it does not model shows as `stalled` (it never reached a display list).
+    """
+
+    SETTLE = 40            # frames before the sprite sampler starts (boot noise)
+
+    def __init__(self, rom, c, args):
+        import simprobe
+        self.rom, self.c, self.args = rom, c, args
+        self.region = ((c.info or {}).get("region", "NTSC")).lower()
+        self.fps = 50 if self.region == "pal" else 60
+        self.frames = max(180, args.seconds * self.fps)
+        self.shots = sorted({max(30, int(self.frames * f)) for f in (0.15, 0.5, 0.9)})
+        self.gfx_at = min(args.graphics_at, self.frames)
+        self.refs = {}
+        self.col = None
+        self.bus = None
+        self.problem = None
+        self._simprobe = simprobe
+
+    def collect(self):
+        import sim
+        simprobe = self._simprobe
+        se = self
+
+        class Col(simprobe.Collector):
+            def frame_start(self, frame):
+                simprobe.Collector.frame_start(self, frame)
+                if frame >= se.SETTLE and frame % 15 == 0:
+                    se._sample(self)
+
+        self.col = Col(dump_frame=self.gfx_at, snap_frames=self.shots)
+        self.cart = self.c
+        self.bus = sim.run(self.c, self.frames, self.region, drive=not self.args.no_drive,
+                           observer=self.col)
+        self.col.finish()
+
+    @property
+    def stalled(self):
+        return self.col.frames_with_list < self.frames * 0.5
+
+    def _sample(self, col):
+        bus = col.bus
+        if bus.dpph is None or (bus.ctrl & 0x60) != 0x40:
+            return
+        d = parse_regs_text(self._simprobe.regs_text(bus.frame, bus, {}, []))
+        scr = Screen(self.c, self._simprobe.ram_bytes(bus), d)
+        try:
+            objs = scr.objects()
+        except Exception:                                    # noqa: BLE001
+            return
+        for e, _lines, _wm in objs:
+            if e["gfx"] >= 0x4000:
+                self.refs[e["gfx"]] = max(self.refs.get(e["gfx"], 0), e["width"])
+
+    # the steps, in the same shapes the MAME ones return
+    def music(self, out, rep):
+        import tracker
+        stem = os.path.join(out, "music")
+        os.makedirs(stem, exist_ok=True)
+        log = os.path.join(stem, "capture.log")
+        import sim
+        sim.write_log(self.bus, self.c, log, self.region)
+        song = tracker.read_capture(log, self.region)
+        return describe_music(song, stem, os.path.join(stem, "song.trk"), self.c, rep)
+
+    def screens(self, out, rep):
+        try:
+            from PIL import Image                           # noqa: F401
+        except ImportError:
+            return ["Pictures skipped: Pillow is not installed "
+                    "(`python -m pip install pillow`)."]
+        shots = os.path.join(out, "screens")
+        os.makedirs(shots, exist_ok=True)
+        names = []
+        for f in self.shots:
+            snap = self.col.snaps.get(f)
+            if not snap:
+                continue
+            d = parse_regs_text(snap["regs"])
+            if "dll" not in d or d["dll"] is None:
+                continue
+            scr = Screen(self.c, snap["ram"], d)
+            img, why = scr.image()
+            if img is None:
+                continue
+            dst = os.path.join(shots, "at-f%05d.png" % f)
+            img.resize((img.width * 2, img.height * 2), Image.NEAREST).save(dst)
+            names.append(os.path.relpath(dst, out))
+        rep.facts["screens"] = names
+        if not names:
+            return ["No screen could be rebuilt: the simulated run never pointed "
+                    "MARIA at a display list at those moments."]
+        return ["Rebuilt from the display list, the character sets and the graphics in "
+                "the ROM at frames %s of the simulated run (a reconstruction, not "
+                "a screenshot: no emulator ran):" % ", ".join(
+                    str(f) for f in self.shots), ""] + \
+               ["![%s](%s)" % (n, n.replace(os.sep, "/")) for n in names]
+
+    def graphics(self, out, rep):
+        snap = self.col.snaps.get(self.gfx_at)
+        gdir = os.path.join(out, "graphics")
+        os.makedirs(gdir, exist_ok=True)
+        if not snap:
+            return ["The simulated run wrote no dump."]
+        ram, regs = os.path.join(gdir, "ram.bin"), os.path.join(gdir, "regs.txt")
+        io.open(ram, "wb").write(snap["ram"])
+        io.open(regs, "w", encoding="utf-8").write(snap["regs"])
+        d = parse_regs_text(snap["regs"])
+        if d.get("dll") is None:
+            return ["The simulated run never pointed MARIA at a display list."]
+        return describe_graphics(self.c, gdir, Screen(self.c, snap["ram"], d), d, rep)
+
+    def sprites(self, out, rep):
+        gdir = os.path.join(out, "graphics")
+        os.makedirs(gdir, exist_ok=True)
+        refs = [{"addr": a, "width": w} for a, w in sorted(self.refs.items())]
+        io.open(os.path.join(gdir, "liveslots.json"), "w", encoding="utf-8").write(
+            json.dumps({"frames": self.frames, "refs": refs}))
+        return describe_slots(refs, self.frames // self.fps, rep)
+
+    def code(self, rom, out, rep):
+        log = os.path.join(out, "code", "exectrace.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        self._simprobe.write_exectrace(self.col, log)
+        return merge_code(rom, out, self.c, log, rep)
 
 
 # ---------------------------------------------------------------- main
@@ -634,6 +796,11 @@ def main(argv=None):
     ap.add_argument("--skip", action="append", default=[],
                     choices=["music", "screens", "graphics", "sprites", "code"],
                     help="leave a run out")
+    ap.add_argument("--engine", choices=["auto", "sim", "mame"], default="auto",
+                    help="what runs the cartridge: the simulator (no emulator needed), "
+                         "MAME, or auto: the simulator, falling back to MAME when the "
+                         "simulator stalls and MAME is there (default). --playback "
+                         "needs MAME.")
     ap.add_argument("--mame")
     ap.add_argument("--rompath")
     args = ap.parse_args(argv)
@@ -661,13 +828,54 @@ def main(argv=None):
     rep.add("What static analysis finds", static_assets(rom))
 
     steps = []
+    engine = args.engine
+    if args.playback and engine == "sim":
+        sys.exit("firstlook: --playback needs MAME (the simulator does not replay "
+                 "recordings); use --engine mame")
+    if args.playback:
+        engine = "mame"
     if not args.no_live:
-        mame = Mame(rom, args)
-        if mame.problem:
-            rep.notes.append("The live half did not run: %s." % mame.problem)
+        mame = None
+        if engine in ("mame", "auto"):
+            mame = Mame(rom, args)
+        sim_engine = None
+        if engine in ("sim", "auto"):
+            sim_engine = SimEngine(rom, c, args)
+            print("  simulating %d frames ..." % sim_engine.frames, end=" ", flush=True)
+            t = time.time()
+            sim_engine.collect()
+            print("%.0fs" % (time.time() - t))
+            if sim_engine.stalled:
+                if engine == "auto" and mame and not mame.problem:
+                    rep.notes.append(
+                        "The simulator stalled (a display list on %d of %d frames: the "
+                        "cartridge waits on hardware it does not model), so MAME ran "
+                        "instead." % (sim_engine.col.frames_with_list, sim_engine.frames))
+                    sim_engine = None
+                else:
+                    rep.notes.append(
+                        "The simulator stalled: a display list on only %d of %d frames, "
+                        "so the live sections below show an early stage of the "
+                        "cartridge, if anything. Try --engine mame." % (
+                            sim_engine.col.frames_with_list, sim_engine.frames))
+        if sim_engine is not None:
+            rep.facts["engine"] = "sim"
+            runs = [
+                ("music", "What it sounds like", lambda: sim_engine.music(out, rep)),
+                ("screens", "What it looks like", lambda: sim_engine.screens(out, rep)),
+                ("graphics", "The artwork on screen", lambda: sim_engine.graphics(out, rep)),
+                ("sprites", "Every graphics address it drew from",
+                 lambda: sim_engine.sprites(out, rep)),
+                ("code", "The code that ran", lambda: sim_engine.code(rom, out, rep)),
+            ]
+        elif mame is None or mame.problem:
+            runs = []
+            rep.notes.append("The live half did not run: %s." % (
+                mame.problem if mame else "no engine"))
         else:
             if mame.playback and not os.path.isfile(mame.playback):
                 sys.exit("firstlook: no such recording: %s" % mame.playback)
+            rep.facts["engine"] = "mame"
             runs = [
                 ("music", "What it sounds like",
                  lambda: step_music(rom, mame, out, c, args, rep)),
@@ -680,19 +888,19 @@ def main(argv=None):
                 ("code", "The code that ran",
                  lambda: step_code(rom, mame, out, c, args, rep)),
             ]
-            for key, heading, fn in runs:
-                if key in args.skip:
-                    continue
-                t = time.time()
-                print("  %-9s ..." % key, end=" ", flush=True)
-                try:
-                    body = fn()
-                    print("%.0fs" % (time.time() - t))
-                except Exception as e:                       # noqa: BLE001
-                    body = ["Did not complete: %s: %s" % (type(e).__name__, e)]
-                    print("failed (%s)" % e)
-                rep.add(heading, body)
-                steps.append(key)
+        for key, heading, fn in runs:
+            if key in args.skip:
+                continue
+            t = time.time()
+            print("  %-9s ..." % key, end=" ", flush=True)
+            try:
+                body = fn()
+                print("%.0fs" % (time.time() - t))
+            except Exception as e:                           # noqa: BLE001
+                body = ["Did not complete: %s: %s" % (type(e).__name__, e)]
+                print("failed (%s)" % e)
+            rep.add(heading, body)
+            steps.append(key)
     rep.notes.append(
         "What the live sections show is what ONE run did -- %s. Nothing here is "
         "a complete inventory." % (

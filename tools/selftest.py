@@ -936,6 +936,9 @@ def t_workbench_jobs():
         # the command lines
         job = WB.build_observe({"seconds": 12})
         tools = [os.path.basename(c["cmd"][1]) for c in job.steps]
+        assert tools == ["simprobe.py", "init.py", "dyn.py", "disasm.py"], tools   # no emulator
+        job = WB.build_observe({"seconds": 12, "engine": "mame"})
+        tools = [os.path.basename(c["cmd"][1]) for c in job.steps]
         assert tools == ["runprobe.py", "init.py", "dyn.py", "disasm.py"], tools
         assert job.steps[0]["cmd"][3] == "exectrace" and "A7800_XT_BANKS=8" in job.steps[0]["cmd"]
         assert job.steps[-1].get("soft"), "the listing refresh must not fail the job"
@@ -975,7 +978,7 @@ def t_workbench_jobs():
         real = WB.environment
         WB.environment = lambda: {"ready": False, "problem": "MAME was not found. selftest"}
         try:
-            WB.start_job("observe", {})
+            WB.start_job("observe", {"engine": "mame"})
         except ValueError as e:
             assert "MAME was not found" in str(e)
         else:
@@ -1020,7 +1023,21 @@ def t_workbench_jobs():
             assert code == 200 and r["findings"] == [], r
             code, j = _wb_call(url, "/api/job", {"kind": "lint", "params": {}})
             assert _wb_wait(url, j["id"])["status"] == "done"
+            # observe code with no emulator: the simulator runs it, dyn.py merges it
+            WB.environment = lambda: {"ready": False, "problem": "no MAME in this test"}
+            code, j = _wb_call(url, "/api/job", {"kind": "observe", "params": {"seconds": 5}})
+            assert code == 200, j
+            d = _wb_wait(url, j["id"])
+            assert d["status"] == "done", d["lines"][-6:]
+            code, a = _wb_call(url, "/api/annotations")
+            assert any("C0E5" in e for e in json.loads(a["text"])["entries"]), a["text"][:300]
+            # and the address tables, likewise
+            code, j = _wb_call(url, "/api/job", {"kind": "addresses", "params": {"seconds": 5}})
+            d = _wb_wait(url, j["id"])
+            assert d["status"] == "done", d["lines"][-6:]
+            assert any(o["path"] == "addresses/addrorigin.log" for o in d["outputs"]), d["outputs"]
         finally:
+            WB.environment = real
             stop()
     finally:
         shutil.rmtree(work, True)
@@ -1124,6 +1141,145 @@ def t_workbench_browser():
         WB.JOBS.clear()
     assert not errors, errors
     return "tabs, a job from its form, live results, listing search and annotation checks"
+
+
+def t_simprobe():
+    """simprobe.py reports what a run of the synthetic cartridge is known to do: the
+    instructions, the JMP (vec) and the hand-pushed RTS, the computed bank switch, the
+    table it reads as data (and not the immediates), and the dump firstlook reads."""
+    import simprobe
+    synth = _synth()
+    _data, facts = synth.build()
+    rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    out = tempfile.mkdtemp(prefix="selftest-simprobe-")
+    try:
+        r = simprobe.probe(rom, out, frames=120)
+        read = lambda n: io.open(os.path.join(out, n), encoding="utf-8").read()   # noqa: E731
+        xt = read("exectrace.log")
+        for sym in ("reset", "handler_a", "rts_target"):
+            assert "X f7:%04X" % facts[sym] in xt, sym
+        assert "J f7:C0E2 f7:%04X" % facts["handler_a"] in xt, xt
+        assert "J f7:%04X f7:%04X" % (facts["trick_rts"], facts["rts_target"]) in xt, \
+            "the hand-pushed RTS was not reported as a computed jump"
+        sw = "f7:%04X" % facts["computed_switch"]
+        for b in facts["executed_banks"]:
+            assert "S %s %d x" % (sw, b) in xt, (b, xt)
+        for b in facts["never_executed_banks"]:
+            assert "X b%d:" % b not in xt, b
+        # data reads: the tune table, and never an immediate operand
+        import asm
+        a = asm.Assembler()
+        a.assemble(synth.bank_source(3).splitlines())
+        dr = read("dataread.log")
+        # bank 3 is the third table entry: selected when FRAME & 3 == 2, so entries 2 and 6
+        for k in range(8):
+            assert ("D b3:%04X " % (a.sym["tune_f"] + k) in dr) == (k in (2, 6)), (k, dr)
+        import cart as cart_module
+        c = cart_module.Cart(rom)
+        for ln in dr.splitlines():
+            sp, _, ad = ln.split()[1].partition(":")
+            ad = int(ad, 16)
+            before = (sp, ad - 1)
+            assert not (c.byte(sp, ad - 1) == 0xA9 and "X %s:%04X" % before in xt), \
+                "an immediate operand was counted as a data read: " + ln
+        import firstlook
+        d = firstlook.parse_regs(os.path.join(out, "regs.txt"))
+        assert d["dll"] == 0x1800 and d["frame"] == 120 and d["writes"] is not None, d
+        assert len(open(os.path.join(out, "ram.bin"), "rb").read()) == 0x1000
+        assert r["frames_with_display_list"] > 100 and r["audio_writes"] > 20, r
+    finally:
+        shutil.rmtree(out, True)
+    return "instructions, JMP (vec), computed RTS, computed switch, table reads (no immediates), dump"
+
+
+def t_simorigins():
+    """simorigins.py (addrorigin.lua without MAME) finds the same facts on the synthetic
+    cartridge: the JMP (vec) halves and the hand-pushed return address, both immediates,
+    and agrees with what origins.py reads."""
+    import cart as cart_module
+    import origins
+    import simorigins
+    synth = _synth()
+    _d, facts = synth.build()
+    rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    out = tempfile.mkdtemp(prefix="selftest-simorg-")
+    try:
+        simorigins.trace(rom, out, frames=100)
+        uses, imms = origins.parse_log(io.open(os.path.join(out, "addrorigin.log"),
+                                               encoding="utf-8").read())
+        found = origins.analyse(uses, imms, cart_module.Cart(rom))
+        sc = cart_module.Cart(rom)
+        byte = lambda loc: sc.byte(*origins.split_loc(loc))         # noqa: E731
+        ha, rt = facts["handler_a"], facts["rts_target"] - 1
+        assert sorted(byte(l) for l, k in found["immediates"] if k == "jmpind") == \
+            sorted([ha & 0xFF, ha >> 8]), found["immediates"]
+        assert sorted(byte(l) for l, k in found["immediates"] if k == "rts") == \
+            sorted([rt & 0xFF, rt >> 8]), found["immediates"]
+        assert sorted(u[0] for u in uses) == ["jmpind", "rts"], uses
+        assert found["computed"] == [] and found["tables"] == [], found
+    finally:
+        shutil.rmtree(out, True)
+    return "JMP (vec) and hand-pushed RTS traced to their immediates, as the MAME probe does"
+
+
+def t_corpus():
+    """corpus.py grades the static tracer against a run: on the synthetic cartridge it
+    must find the code the tracer cannot reach, and say how each was entered."""
+    import corpus
+    rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    rec = corpus.measure(rom, frames=120)
+    assert rec["ok"], rec
+    rc = rec["recall"]
+    assert rc["reached"] < rc["executed"], "the tracer cannot have reached everything here"
+    assert rc["assisted_reached"] == rc["executed"], rc
+    how = rec["missed_how"]
+    assert how.get("jmp-ind") and how.get("rts"), how
+    assert rec["run"]["frames_with_display_list"] > 100
+    assert rec["data"]["in_static_code"] == 0, rec["data"]       # the tables are not code
+    assert rec["static"]["unresolved_switches"] == 1, rec["static"]
+    buf = io.StringIO()
+    old, sys.stdout = sys.stdout, buf
+    try:
+        corpus.report([rec, {"name": "bad.a78", "ok": False, "error": "UnknownMapper: x"}])
+    finally:
+        sys.stdout = old
+    assert "1 measured, 1 not" in buf.getvalue() and "jmp-ind" in buf.getvalue(), buf.getvalue()
+    return "recall %d/%d, assisted %d/%d, entered by %s" % (
+        rc["reached"], rc["executed"], rc["assisted_reached"], rc["executed"],
+        ", ".join("%s x%d" % kv for kv in sorted(how.items())))
+
+
+def t_firstlook_sim():
+    """A first look with no emulator: the simulator runs the cartridge and every live
+    section is filled in, including the screen rebuilt from its RAM."""
+    import firstlook
+    out = tempfile.mkdtemp(prefix="selftest-flsim-")
+    try:
+        rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+        old, sys.stdout = sys.stdout, io.StringIO()
+        try:
+            rc = firstlook.main([rom, "-o", out, "--seconds", "3", "--engine", "sim"])
+        finally:
+            sys.stdout = old
+        assert rc == 0
+        text = io.open(os.path.join(out, "report.md"), encoding="utf-8").read()
+        facts = json.load(io.open(os.path.join(out, "firstlook.json"), encoding="utf-8"))
+        assert facts["engine"] == "sim" and facts["steps"] == [
+            "music", "screens", "graphics", "sprites", "code"], facts["steps"]
+        for heading in ("What it sounds like", "What it looks like", "The code that ran"):
+            assert "## " + heading in text, heading
+        assert "0 after" in text or "reached by the disassembler" in text, text[-800:]
+        ann = json.load(io.open(os.path.join(out, "annotations.json"), encoding="utf-8"))
+        assert any("C0E5" in e for e in ann["entries"]), ann["entries"]   # handler_a, via JMP (vec)
+        try:
+            import PIL                                              # noqa: F401
+            assert os.path.exists(os.path.join(out, "graphics", "screen.png"))
+            assert glob.glob(os.path.join(out, "screens", "at-f*.png"))
+        except ImportError:
+            pass
+    finally:
+        shutil.rmtree(out, True)
+    return "music, screens, graphics, sprites and code, from the simulator alone"
 
 
 def t_readme():
@@ -1822,10 +1978,14 @@ def t_probes_mame(rom):
     # immediates, and the operand bytes in the ROM are the handler's address
     sc = cart.Cart(os.path.join(ROOT, "tests", "carts", "synth128.a78"))
     ha = facts["sym"]["handler_a"]
-    got = sorted(sc.byte(sp, a) for sp, a in
-                 (origins.split_loc(loc) for loc, _k in found["immediates"]))
+    byte = lambda loc: sc.byte(*origins.split_loc(loc))             # noqa: E731
+    got = sorted(byte(loc) for loc, k in found["immediates"] if k == "jmpind")
     assert got == sorted([ha & 0xFF, ha >> 8]), (found["immediates"], hex(ha))
-    assert [u[0] for u in uses] == ["jmpind"], uses
+    # ... and the hand-pushed return address: PHA / PHA / RTS built from two immediates
+    rt = facts["sym"]["rts_target"] - 1
+    got = sorted(byte(loc) for loc, k in found["immediates"] if k == "rts")
+    assert got == sorted([rt & 0xFF, rt >> 8]), (found["immediates"], hex(rt))
+    assert sorted(u[0] for u in uses) == ["jmpind", "rts"], uses
     subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "5", "-autoboot_script",
                             os.path.join(ROOT, "probes", "dlitimes.lua")],
                    cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1853,7 +2013,7 @@ def t_probes_mame(rom):
     import firstlook
     fl = os.path.join(work, "firstlook")
     assert firstlook.main([srom, "-o", fl, "--seconds", "8", "--code-seconds", "4",
-                           "--graphics-at", "120"]) == 0
+                           "--graphics-at", "120", "--engine", "mame"]) == 0
     text = io.open(os.path.join(fl, "report.md"), encoding="utf-8").read()
     ff = json.load(io.open(os.path.join(fl, "firstlook.json"), encoding="utf-8"))
     assert ff["music"]["changes"] > 5, ff.get("music")
@@ -3910,6 +4070,10 @@ def main():
     r.check("POKEY to TIA", t_pokey2tia)
     r.check("workbench jobs", t_workbench_jobs)
     r.check("workbench in a browser", t_workbench_browser)
+    r.check("simulator probe", t_simprobe)
+    r.check("simulated address origins", t_simorigins)
+    r.check("corpus measure", t_corpus)
+    r.check("first look, simulated", t_firstlook_sim)
     r.check("sim bus", t_sim_bus)
     r.check("sim window", t_sim_window)
     r.check("sim timing", t_sim_timing)

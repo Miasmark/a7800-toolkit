@@ -367,8 +367,8 @@ def parse_loc(s):
 
 # -------------------------------------------------------------------- config
 class Config:
-    def __init__(self, path=None):
-        d = {}
+    def __init__(self, path=None, data=None):
+        d = dict(data) if data else {}
         if path and os.path.exists(path):
             with open(path) as f:
                 d = json.load(f)
@@ -705,6 +705,76 @@ class Emitter:
 
 
 # ----------------------------------------------------------------------- main
+def analyse(cart, cfg):
+    """Trace a cartridge from its vectors and the config's entries.
+
+    Returns (analyzer, gfx, gfx_wide, vectors) where vectors is (nmi, reset, irq).
+    This is the whole of the analysis `main()` does before it writes anything, so
+    other tools (the corpus runner, the workbench) can ask "what does the static
+    tracer reach?" without writing a listing. Raises UnknownSpace as `main()` did.
+    """
+    an = Analyzer(cart, cfg)
+
+    gfx, gfx_wide = set(), set()
+    for b in cfg.blocks:
+        s, a = parse_loc(b["loc"])
+        e = parse_loc(b["end"])[1] if "end" in b else a + b.get("len", 1)
+        for x in range(a, e):
+            an.forced_data.add((s, x))
+        # "gfx": true draws the block's bits beside it instead of listing
+        # hex. "wide": true puts two bytes on a line, which is what a
+        # 16-pixel 7800 sprite is; the 2600 only ever needed one.
+        if b.get("gfx"):
+            gfx.add((s, a))
+            for x in range(a, e):
+                gfx.add((s, x))
+            if b.get("wide"):
+                gfx_wide.add((s, a))
+
+    # vectors live in whatever space owns $FFFA
+    v = cart.vectors()
+    nmi, res, irq = v["NMI"], v["RESET"], v["IRQ"]
+
+    entries = []
+    for name, v in (("RESET", res), ("NMI", nmi), ("IRQ", irq)):
+        sp = cart.space_of(v, None)
+        if sp:
+            entries.append((sp, v, None))
+            an.labels[(sp, v)] = name + "_" + ("%04X" % v)
+    entries += [(s, a, None) for (s, a) in cfg.entries]
+
+    an.run(entries)
+
+    # Handlers reached only through a RAM vector are invisible to a plain
+    # trace: nothing in ROM names them. Re-trace through each declared vector
+    # until no new handler turns up. "ram_vectors" in the config is a list of
+    # [lo, hi] pairs; MARIA's display-interrupt slot is the usual one, but it
+    # is per-game and there is no way to guess it.
+    dli = {}
+    for lo_a, hi_a in cfg.ram_vectors:
+      for _ in range(8):
+        new = []
+        for tgt, site in an.scan_ram_vectors(lo_a, hi_a):
+            sp = cart.space_of(tgt, None)
+            if sp and (sp, tgt) not in dli:
+                dli[(sp, tgt)] = site
+                new.append((sp, tgt, None))
+        if not new:
+            break
+        for sp, tgt, _b in new:
+            an.mark((sp, tgt), "sub")
+        an.run(new)
+    for loc in sorted(dli):
+        an.labels.setdefault(loc, "VEC_%04X" % loc[1])
+
+    an.name_all()
+    for name, v in (("NMI", nmi), ("RESET", res), ("IRQ", irq)):
+        sp = cart.space_of(v, None)
+        if sp:
+            an.labels[(sp, v)] = cfg.labels.get(fmt_loc((sp, v)), name + "_HANDLER")
+    return an, gfx, gfx_wide, (nmi, res, irq)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rom")
@@ -761,69 +831,11 @@ def main():
                                    report.errors[0][:90], args.config))
         except Exception:                                    # noqa: BLE001
             pass                    # never let the check get in the way of the work
-    an = Analyzer(cart, cfg)
-
-    gfx, gfx_wide = set(), set()
-    for b in cfg.blocks:
-        s, a = parse_loc(b["loc"])
-        e = parse_loc(b["end"])[1] if "end" in b else a + b.get("len", 1)
-        for x in range(a, e):
-            an.forced_data.add((s, x))
-        # "gfx": true draws the block's bits beside it instead of listing
-        # hex. "wide": true puts two bytes on a line, which is what a
-        # 16-pixel 7800 sprite is; the 2600 only ever needed one.
-        if b.get("gfx"):
-            gfx.add((s, a))
-            for x in range(a, e):
-                gfx.add((s, x))
-            if b.get("wide"):
-                gfx_wide.add((s, a))
-
-    # vectors live in whatever space owns $FFFA
-    v = cart.vectors()
-    nmi, res, irq = v["NMI"], v["RESET"], v["IRQ"]
-
-    entries = []
-    for name, v in (("RESET", res), ("NMI", nmi), ("IRQ", irq)):
-        sp = cart.space_of(v, None)
-        if sp:
-            entries.append((sp, v, None))
-            an.labels[(sp, v)] = name + "_" + ("%04X" % v)
-    entries += [(s, a, None) for (s, a) in cfg.entries]
-
     try:
-        an.run(entries)
+        an, gfx, gfx_wide, (nmi, res, irq) = analyse(cart, cfg)
     except cart_module.UnknownSpace as e:
         sys.stderr.write("%s\n" % e)
         return 2
-
-    # Handlers reached only through a RAM vector are invisible to a plain
-    # trace: nothing in ROM names them. Re-trace through each declared vector
-    # until no new handler turns up. "ram_vectors" in the config is a list of
-    # [lo, hi] pairs; MARIA's display-interrupt slot is the usual one, but it
-    # is per-game and there is no way to guess it.
-    dli = {}
-    for lo_a, hi_a in cfg.ram_vectors:
-      for _ in range(8):
-        new = []
-        for tgt, site in an.scan_ram_vectors(lo_a, hi_a):
-            sp = cart.space_of(tgt, None)
-            if sp and (sp, tgt) not in dli:
-                dli[(sp, tgt)] = site
-                new.append((sp, tgt, None))
-        if not new:
-            break
-        for sp, tgt, _b in new:
-            an.mark((sp, tgt), "sub")
-        an.run(new)
-    for loc in sorted(dli):
-        an.labels.setdefault(loc, "VEC_%04X" % loc[1])
-
-    an.name_all()
-    for name, v in (("NMI", nmi), ("RESET", res), ("IRQ", irq)):
-        sp = cart.space_of(v, None)
-        if sp:
-            an.labels[(sp, v)] = cfg.labels.get(fmt_loc((sp, v)), name + "_HANDLER")
 
     os.makedirs(args.outdir, exist_ok=True)
     em = Emitter(cart, an, cfg, cycles=args.cycles)
