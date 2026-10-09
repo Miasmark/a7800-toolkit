@@ -1533,9 +1533,16 @@ def t_simprobe():
         assert d["dll"] == 0x1800 and d["frame"] == 120 and d["writes"] is not None, d
         assert len(open(os.path.join(out, "ram.bin"), "rb").read()) == 0x1000
         assert r["frames_with_display_list"] > 100 and r["audio_writes"] > 20, r
+        # the display-interrupt timing in probes/dlitimes.lua's format, from the simulator
+        simprobe.probe(rom, out, frames=130, drive=True, interrupts=100)
+        dl = read("dlitimes.log")
+        nmis = [float(m) for m in re.findall(r"nmi\s+frame \d+\s+line ([\d.]+)", dl)]
+        assert "zone  0  line   0" in dl and len(nmis) >= 10, dl[:400]
+        assert all(abs(x - nmis[0]) < 1.5 for x in nmis), nmis      # the same line every frame
+        assert "vblank begins  line 242" in dl, dl[-200:]
     finally:
         shutil.rmtree(out, True)
-    return "instructions, JMP (vec), computed RTS, computed switch, table reads (no immediates), dump"
+    return "instructions, JMP (vec), computed RTS, computed switch, table reads (no immediates), dump, interrupt timing"
 
 
 def t_simorigins():
@@ -1754,6 +1761,103 @@ def t_exrom_layout():
     finally:
         shutil.rmtree(work, True)
     return "EXROM: f0 at $4000, last bank at $C000, window value v -> file bank v+1"
+
+
+def t_dispatch_tables():
+    """Table-driven `JMP (zp)` dispatch is followed: handlers named by an interleaved word
+    table and by split low/high tables are traced, the table stops at the first entry that is
+    not plausible code, and nothing is added when the flag is off."""
+    import asm
+    import disasm
+    src = """
+    .org $C000
+reset:
+    SEI
+    CLD
+    JSR disp2
+    LDX #$02
+    LDA wtab,X
+    STA $B0
+    LDA wtab+1,X
+    STA $B1
+    JMP ($00B0)
+disp2:
+    LDY #$01
+    LDA lo_tab,Y
+    STA $B2
+    LDA hi_tab,Y
+    STA $B3
+    JMP ($00B2)
+h0:
+    NOP
+    NOP
+    NOP
+    NOP
+    RTS
+h1:
+    INX
+    INX
+    INX
+    INX
+    RTS
+h2:
+    INY
+    INY
+    INY
+    INY
+    RTS
+h3:
+    DEX
+    DEX
+    DEX
+    DEX
+    RTS
+wtab:
+    .word h0
+    .word h1
+    .word h2
+    .byte $00,$00,$00,$00      ; the table ends: BRK is not code
+lo_tab:
+    .byte <h0, <h3
+hi_tab:
+    .byte >h0, >h3
+nmi:
+    RTI
+vectors_pad:
+    .res $FFFA-vectors_pad,$00
+    .word nmi
+    .word reset
+    .word nmi
+"""
+    data = asm.Assembler().assemble(src.splitlines())
+    a = asm.Assembler()
+    a.assemble(src.splitlines())
+    work = tempfile.mkdtemp(prefix="selftest-dispatch-")
+    try:
+        rom = os.path.join(work, "d.a78")
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = (0x4000).to_bytes(4, "big")
+        hdr[55] = 1
+        io.open(rom, "wb").write(bytes(hdr) + bytes(data))
+        cart = disasm.Cart(rom)
+        old = disasm.AUTO_DISPATCH
+        try:
+            disasm.AUTO_DISPATCH = False
+            off, *_ = disasm.analyse(cart, disasm.Config())
+            disasm.AUTO_DISPATCH = True
+            on, *_ = disasm.analyse(cart, disasm.Config())
+        finally:
+            disasm.AUTO_DISPATCH = old
+        sp = "rom"
+        for h in ("h0", "h1", "h2", "h3"):
+            assert (sp, a.sym[h]) not in off.code, "found without the rule: " + h
+            assert (sp, a.sym[h]) in on.code, "not followed: " + h
+        assert (sp, a.sym["wtab"] + 6) not in on.code, "the table's terminator was traced"
+    finally:
+        shutil.rmtree(work, True)
+    return "interleaved and split tables followed; the table stops at implausible code"
 
 
 def t_branchforce():
@@ -4733,6 +4837,7 @@ def main():
     r.check("bankset round trip", t_bankset_roundtrip)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
+    r.check("dispatch tables", t_dispatch_tables)
     r.check("branch forcing", t_branchforce)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)

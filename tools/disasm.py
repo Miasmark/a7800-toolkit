@@ -48,6 +48,7 @@ class Cart(cart.Cart):
 # ------------------------------------------------------------------ analysis
 CLOBBER_ON_JSR = True        # registers are unknown after a JSR (False: the old behaviour)
 AUTO_RAM_VECTORS = True      # every JMP (RAM) operand is a vector worth following
+AUTO_DISPATCH = True         # `LDA tbl,X / STA zp / LDA tbl2,X / STA zp+1 / JMP (zp)` tables
 
 
 class Analyzer:
@@ -343,6 +344,91 @@ class Analyzer:
                 back = min((abs(la2 - ha), la2) for la2, _v in los)
                 if back[1] == la:
                     found.append((lv | (hv << 8), (space, la)))
+        return found
+
+    # -- jump tables ---------------------------------------------------------
+    def _plausible(self, space, addr, n=4):
+        """Whether `n` documented instructions in a row start at `addr`, none of them BRK."""
+        try:
+            for _ in range(n):
+                op = self.cart.byte(space, addr)
+                mn, mode, illegal = m6502.OPCODES[op]
+                if illegal or mn in ("BRK", "JAM"):
+                    return False
+                addr += 1 + m6502.MODES[mode]
+        except Exception:                                    # noqa: BLE001
+            return False
+        return True
+
+    def _before(self, space, at):
+        """The traced instruction that ends exactly at `at`, or None."""
+        for back in (1, 2, 3):
+            p = (space, at - back)
+            ins = self.insn.get(p)
+            if ins and at - back + ins[3] == at:
+                return p
+        return None
+
+    def scan_dispatch(self, limit=96):
+        """Targets of table-driven `JMP (zp)` dispatch.
+
+        The shape is a pointer in zero page loaded from a table and jumped through:
+
+            LDA tbl_lo,X ; STA zp ; LDA tbl_hi,X ; STA zp+1 ; JMP (zp)
+
+        (the table may also be interleaved, `tbl` and `tbl+1`). The table is read from the
+        ROM, entry by entry, for as long as each entry points at plausible code (documented
+        opcodes, no BRK) in the ROM. Its extent is not known from the code, so it ends at the
+        first entry that is not plausible. Returns [(space, target, site)]."""
+        found = []
+        for (space, addr), (mn, mode, operand, n) in sorted(self.insn.items()):
+            if not (mn == "JMP" and mode == "ind" and operand is not None and operand < 0x100):
+                continue
+            ptr = operand
+            loaded = {}                             # zero-page address -> table it was loaded from
+            cur, steps = addr, 0
+            while steps < 16:
+                prev = self._before(space, cur)
+                if prev is None:
+                    break
+                pmn, pmode, pop, _pn = self.insn[prev]
+                if pmn in ("RTS", "RTI", "JMP", "JSR"):
+                    break
+                if pmn == "STA" and pmode == "zp" and pop in (ptr, ptr + 1):
+                    q, s2 = self._before(space, prev[1]), 0
+                    while q is not None and s2 < 6:
+                        qmn, qmode, qop, _qn = self.insn[q]
+                        if qmn == "LDA" and qmode in ("abx", "aby") and qop is not None:
+                            loaded[pop] = qop
+                            break
+                        q, s2 = self._before(space, q[1]), s2 + 1
+                cur, steps = prev[1], steps + 1
+            lo_src, hi_src = loaded.get(ptr), loaded.get(ptr + 1)
+            if lo_src is None or hi_src is None:
+                continue
+            lsp = self.target_space(space, lo_src, None)
+            hsp = self.target_space(space, hi_src, None)
+            if not lsp or not hsp:
+                continue
+            interleaved = hi_src == lo_src + 1
+            for i in range(limit):
+                try:
+                    if interleaved:
+                        lo = self.cart.byte(lsp, lo_src + 2 * i)
+                        hi = self.cart.byte(lsp, lo_src + 2 * i + 1)
+                    else:
+                        if (lo_src < hi_src <= lo_src + i) or (hi_src < lo_src <= hi_src + i):
+                            break                  # ran into the other half of a split table
+                        lo = self.cart.byte(lsp, lo_src + i)
+                        hi = self.cart.byte(hsp, hi_src + i)
+                except Exception:                                # noqa: BLE001
+                    break
+                tgt = lo | (hi << 8)
+                tspace = self.target_space(space, tgt, None)
+                if tgt < 0x4000 or not tspace or not self.cart.in_space(tspace, tgt) \
+                        or not self._plausible(tspace, tgt):
+                    break
+                found.append((tspace, tgt, (space, addr)))
         return found
 
     # -- naming --------------------------------------------------------------
@@ -802,6 +888,15 @@ def analyse(cart, cfg):
     for loc in sorted(dli):
         an.labels.setdefault(loc, "VEC_%04X" % loc[1])
 
+    if AUTO_DISPATCH:
+        for _ in range(4):
+            new = sorted({(sp, tgt, None) for sp, tgt, _site in an.scan_dispatch()
+                          if (sp, tgt) not in an.code})
+            if not new:
+                break
+            for sp, tgt, _b in new:
+                an.mark((sp, tgt), "sub")
+            an.run(new)
     an.name_all()
     for name, v in (("NMI", nmi), ("RESET", res), ("IRQ", irq)):
         sp = cart.space_of(v, None)

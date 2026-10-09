@@ -366,6 +366,13 @@ def pick_mapper(size, header=None, mapper=None, low=None, bankset=False):
     raise ValueError("unknown mapper %r" % mapper)
 
 
+def pokeys_for(cart_type):
+    """The POKEY addresses a header's cart-type bits declare, lowest first."""
+    return [base for bit, base in ((0x0400, 0x0440), (0x0040, 0x0450),
+                                   (0x8000, 0x0800), (0x0001, 0x4000))
+            if cart_type & bit]
+
+
 # -------------------------------------------------------------------- the cart
 class Cart(object):
     """A cartridge image, laid out.
@@ -426,10 +433,7 @@ class Cart(object):
         Nine images declare two: bit $0400 adds one at $0440 beside the $0450
         one, and every image that sets it says so in its own title.
         """
-        ct = (self.info or {}).get("cart_type", 0)
-        return [base for bit, base in ((0x0400, 0x0440), (0x0040, 0x0450),
-                                       (0x8000, 0x0800), (0x0001, 0x4000))
-                if ct & bit]
+        return pokeys_for((self.info or {}).get("cart_type", 0))
 
     def _check_activision(self):
         """An Activision image whose vectors come out wrong is laid out the other way.

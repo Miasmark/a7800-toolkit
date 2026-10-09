@@ -718,6 +718,12 @@ def build_budget(p):
 def build_interrupts(p):
     frame = _int(p, "frame", 600, 10, 100000)
     out = os.path.join(PROJECT, "interrupts")
+    if _engine(p) == "sim":
+        # the simulator's timing was measured against this very probe; no emulator needed
+        return Job("interrupts", "display interrupts (simulator)",
+                   [{"cmd": _py("simprobe.py", ROM, "-o", out, "--frames", frame + 25,
+                                "--drive", "--interrupts", frame)}],
+                   out, "which raster line each interrupt arrives on, from the simulator")
     env = {"A7800_DT_FRAME": frame, "A7800_DT_FROM": frame, "A7800_DT_END": frame + 20}
     return Job("interrupts", "display interrupts",
                [{"cmd": _probe("dlitimes", out, max(10, frame // 40 + 5), env)}],
@@ -887,11 +893,12 @@ def _kinds():
                      p("seconds", "seconds", "int", 30, min=5, max=900),
                      p("env", "settings, one per line", "text", "",
                        placeholder="A7800_CB_END=600")]),
-        dict(kind="interrupts", label="Display interrupts", group="Measure", mame=True,
+        dict(kind="interrupts", label="Display interrupts", group="Measure", mame=False,
              about="The raster line each display interrupt arrives on, beside the "
-                   "display list's zones.",
+                   "display list's zones. Runs in the simulator by default.",
              build=build_interrupts,
-             params=[p("frame", "frame", "int", 600, min=10, max=100000)]),
+             params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
+                     p("frame", "frame", "int", 600, min=10, max=100000)]),
     ]
 
 

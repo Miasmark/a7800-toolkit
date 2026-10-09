@@ -864,6 +864,19 @@ def main(argv=None):
                             sim_engine.col.frames_with_list, sim_engine.frames))
         if sim_engine is not None:
             rep.facts["engine"] = "sim"
+            rep.notes.append(
+                "The live sections were produced by the simulator (no emulator ran). It is a "
+                "TIA tool: the music of a cartridge with POKEY or YM2151 is NOT validated "
+                "(Commando agrees with MAME 18%%), and it models no paddles, lightgun or IRQ.%s "
+                "`--engine mame` runs MAME instead; `python tools/mamecheck.py` measures where "
+                "the two disagree." % (
+                    " THIS cartridge has POKEY: treat its music section as unreliable."
+                    if c.pokeys() else ""))
+            if getattr(sim_engine, "bus", None) is not None and \
+                    getattr(sim_engine.bus, "jammed", None) is not None:
+                rep.notes.append("The program ran a KIL opcode at $%04X and stopped itself "
+                                 "(an error trap), so the run ends there."
+                                 % sim_engine.bus.jammed)
             runs = [
                 ("music", "What it sounds like", lambda: sim_engine.music(out, rep)),
                 ("screens", "What it looks like", lambda: sim_engine.screens(out, rep)),

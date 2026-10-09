@@ -69,6 +69,8 @@ class Collector(sim.Observer):
         self.arrival = {}            # location -> how it was first reached
         self.pred = {}               # location -> the location fetched just before it, first time
         self.frame = 0
+        self.zone_frames = set()     # frames at which to record the zones
+        self.zone_snap = {}          # frame -> sim.Bus.zones() then
         self.callsite = {}           # stack pointer after a JSR -> the JSR's own location
         self.irq_sites = []          # the instruction each interrupt in progress interrupted
         self._site = None
@@ -114,6 +116,8 @@ class Collector(sim.Observer):
 
     def frame_start(self, frame):
         self.frame = frame
+        if frame in self.zone_frames:
+            self.zone_snap[frame] = self.bus.zones()     # the display list list, as MARIA walks it
         self._finish()
         if frame in self.snap_frames:
             self._cur = (frame, dict(self.bus.maria), [], self.bus.bank)
@@ -311,6 +315,31 @@ def regs_text(frame, bus, start, writes):
     return "\n".join(out) + "\n"
 
 
+def write_dlitimes(timing, zones, frame, last, path):
+    """probes/dlitimes.lua's output: the zones at `frame`, then every display interrupt from
+    `frame` to `last` and the frames' VBLANK starts, each with the line it came on. `timing`
+    is sim.run's log ((kind, frame, cycles into the frame) tuples); a line is the cycle count
+    over 113.5, counted from the first zone as the probe counts it."""
+    top = 0
+    out = ["# from the simulator (no emulator): lines count from the first zone"]
+    for i, (end, dli, _cost, height) in enumerate(zones):
+        out.append("zone %2d  line %3d  height %2d  dli %d" % (i, end - height, height,
+                                                              1 if dli else 0))
+        top = end
+    for kind, f, cyc in timing:
+        if not (frame <= f <= last):
+            continue
+        line = cyc / sim.CYCLES_PER_LINE
+        if kind == "nmi":
+            out.append("nmi   frame %d  line %.2f  (%d whole lines, %d cycles in)" % (
+                f, line, int(line), int(cyc - int(line) * sim.CYCLES_PER_LINE)))
+        else:
+            out.append("mstat frame %d  vblank begins  line %.2f" % (f, line))
+    with open(path, "w") as fh:
+        fh.write("\n".join(out) + "\n")
+    return top
+
+
 def write_dump(col, bus, ram_path, regs_path):
     """The dumpgfx.lua files for the dump frame."""
     snap = col.snaps[col.dump_frame]
@@ -334,7 +363,7 @@ def merge_into(col, other):
 
 
 def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=None,
-          low=None, profile=False, explore=False, force=False):
+          low=None, profile=False, explore=False, force=False, interrupts=None):
     """Run `rom` for `frames` frames and write the files; returns a summary dict.
 
     `explore` runs it twice more, sweeping the joystick and then working the console
@@ -347,17 +376,21 @@ def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=N
     col = bus = None
     for mode in modes:
         c = Collector(dump_frame=frames, profile=profile)
+        c.zone_frames = {interrupts} if interrupts else set()
+        timing = [] if interrupts and mode is modes[0] else None
         watcher = None
         if force:
             import branchforce
             watcher = branchforce.Watcher(c)
-        b = sim.run(cart, frames, region, drive=mode, steal=steal,
+        b = sim.run(cart, frames, region, drive=mode, steal=steal, log=timing,
                     start_state=start, observer=watcher or c)
         c.finish()
         c.forced = set()
         if force:
             kept, _dead, _n = branchforce.force(cart, c, watcher, drive=mode)
             c.forced = {l for l, v in kept.items() if v == "joined" and l not in c.x}
+        if timing is not None:
+            c.timing = timing
         if col is None:
             col, bus = c, b
         else:
@@ -368,6 +401,10 @@ def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=N
     write_dataread(col, os.path.join(out, "dataread.log"))
     write_dump(col, bus, os.path.join(out, "ram.bin"), os.path.join(out, "regs.txt"))
     sim.write_log(bus, cart, os.path.join(out, "audio.log"), region)
+    if interrupts:
+        write_dlitimes(getattr(col, "timing", []), col.zone_snap.get(interrupts, []),
+                       interrupts, min(frames, interrupts + 20),
+                       os.path.join(out, "dlitimes.log"))
     if profile:
         write_profile(col, os.path.join(out, "pcprof.log"))
     return {"frames": frames, "instructions": len(col.x), "data_bytes": len(col.d),
@@ -398,6 +435,10 @@ def main(argv=None):
                          "is written as F lines (a proposal, not an observation)")
     ap.add_argument("--handover", metavar="LOG",
                     help="start from a probes/handover.lua capture, not zeroed RAM")
+    ap.add_argument("--interrupts", type=int, metavar="FRAME",
+                    help="also write dlitimes.log: the display list's zones at FRAME and the "
+                         "line each display interrupt arrives on over the next 20 frames "
+                         "(what probes/dlitimes.lua writes)")
     ap.add_argument("--profile", action="store_true",
                     help="also write pcprof.log: cycles spent at each address, for pcmap.py")
     ap.add_argument("--no-dma-steal", dest="steal", action="store_false")
@@ -408,7 +449,8 @@ def main(argv=None):
         sys.exit("simprobe: no such file: %s" % args.rom)
     try:
         r = probe(args.rom, args.out, args.frames, args.drive, args.handover,
-                  args.steal, args.mapper, args.low, args.profile, args.explore, args.force)
+                  args.steal, args.mapper, args.low, args.profile, args.explore, args.force,
+                  args.interrupts)
     except (cart_module.UnknownMapper, cart_module.UnknownSpace, IOError) as e:
         sys.exit("simprobe: %s" % e)
     print("%d frames: %d distinct instructions, %d ROM bytes read as data, %d indirect "

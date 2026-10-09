@@ -124,8 +124,16 @@ def find_rompath(rom, explicit=None):
 
 def inspect(rom):
     """What the header says about this cartridge's sound."""
-    c = cartlib.Cart(rom)
-    bases = c.pokeys()
+    try:
+        c = cartlib.Cart(rom)
+        info, bases = c.info, c.pokeys()
+    except (cartlib.UnknownMapper, cartlib.UnknownSpace):
+        # an image the layout code refuses (512K flat, SOUPER) can still be handed to an
+        # emulator: all this needs from it is the header's region and sound chips
+        with open(rom, "rb") as f:
+            info = cartlib.read_header(f.read(256))
+        bases = cartlib.pokeys_for((info or {}).get("cart_type", 0))
+        c = type("HeaderOnly", (), {"info": info})()
     region = (c.info or {}).get("region", "NTSC").lower()
     return {"chip": ("pokey2" if len(bases) > 1 else
                      ("pokey" if bases else "tia")),
