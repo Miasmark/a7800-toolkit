@@ -25,6 +25,9 @@
 --                     SuperGame register). Writes there are logged as bank
 --                     switches; the value written, masked, is the bank.
 --   A7800_XT_BANKS    number of banks (default 8; the mask is this minus one)
+--   A7800_XT_FIRST   file bank the window's value 0 selects (default 0; EXROM SuperGame: 1)
+--   A7800_XT_WBANKS  values the window takes before wrapping (default: all banks; EXROM: banks - 1)
+--   A7800_XT_LOWBANK file bank fixed at $4000, if any (EXROM: 0), so it is not labelled as the last
 --   A7800_XT_WINDOW   hex "lo-hi" of the switched window (default 8000-BFFF)
 --
 -- Nothing is logged until the game locks INPTCTRL (a write to $01 with bit 0 set),

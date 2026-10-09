@@ -36,6 +36,9 @@
 --   A7800_AO_SELECT   bank-select window, hex "lo-hi" (default 8000-BFFF)
 --   A7800_AO_WINDOW   switched window, hex "lo-hi" (default 8000-BFFF)
 --   A7800_AO_BANKS    number of banks (default 8)
+--   A7800_AO_FIRST   file bank the window's value 0 selects (default 0; EXROM SuperGame: 1)
+--   A7800_AO_WBANKS  values the window takes before wrapping (default: all banks; EXROM: banks - 1)
+--   A7800_AO_LOWBANK file bank fixed at $4000, if any (EXROM: 0), so it is not labelled as the last
 --   A7800_AO_END      stop and write after this frame (default: at the end of the run)
 --
 -- LIMITS. Values are followed from the first instruction, so a pointer the game

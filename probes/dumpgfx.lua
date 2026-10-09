@@ -36,6 +36,9 @@
 --                        dump is written to the regs file as "bank N", so a
 --                        graphics address in a switched window can be attributed.
 --   A7800_GFX_BANKS      number of banks (default 8; the bank is the value & N-1).
+--   A7800_GFX_FIRST   file bank the window's value 0 selects (default 0; EXROM SuperGame: 1)
+--   A7800_GFX_WBANKS  values the window takes before wrapping (default: all banks; EXROM: banks - 1)
+--   A7800_GFX_LOWBANK file bank fixed at $4000, if any (EXROM: 0), so it is not labelled as the last
 --                        The regs file also lists, for the dump frame, the registers
 --                        at its start (`s $xx = $vv`) and every MARIA register write
 --                        in it (`w <NMIs so far> $xx = $vv`), so a reader can give

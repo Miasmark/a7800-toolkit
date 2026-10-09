@@ -21,6 +21,9 @@
 --   A7800_PC_FROM      first frame to count (default 0), A7800_PC_TO last (default end)
 --   A7800_PC_BANKSEL   "lo-hi" hex bank-select window (default 8000-BFFF)
 --   A7800_PC_BANKS     number of banks (default 8; 1 for an unbanked cartridge)
+--   A7800_PC_FIRST   file bank the window's value 0 selects (default 0; EXROM SuperGame: 1)
+--   A7800_PC_WBANKS  values the window takes before wrapping (default: all banks; EXROM: banks - 1)
+--   A7800_PC_LOWBANK file bank fixed at $4000, if any (EXROM: 0), so it is not labelled as the last
 --
 -- LIMITS. Only the visible frame is sampled: code that runs in vertical blank is
 -- not in the profile at all, and a zone that holds MARIA's DMA for long is
