@@ -22,10 +22,10 @@ like for like -- same emulator, no input, same length -- across five TIA
 cartridges that play music on their own:
 
     Ikari Warriors    agreement 99.4%   progress 100.0%   timing 1.00x
-    Midnight Mutants            94.3%             100.0%         1.00x
+    Midnight Mutants            97.6%             100.0%         1.00x
     Donkey Kong                 99.2%             100.0%         1.00x
     Dark Chambers               98.3%             100.0%         1.00x
-    Choplifter                  79.6%             100.0%         1.00x
+    Choplifter                  97.8%              96.7%         1.00x
 
 Measured against the Trebor's PROPack v8_17 ROMs and MAME 0.264 with the
 7800OpenBIOS, **over the same stretch of play**: 882 frames of the simulator, which
@@ -33,16 +33,17 @@ is what a 1,200-frame MAME capture covers, because the simulator counts from the
 cartridge's reset and MAME from power-on, 322 frames earlier with OpenBIOS. Scoring
 a longer simulator run against the capture counts everything it plays after the
 capture ended as disagreement: the same simulator scored Midnight Mutants 43.9%
-over 1,200 frames and 94.3% over 882.
+over 1,200 frames and 94.3% over 882 (97.6% now that MARIA's DMA is charged).
 
-Reference states reproduced, in order: Ikari 520 of 529, Midnight Mutants 83 of 83
-(the five extra states are a note that starts on the capture's last frame), Dark
-Chambers 173 of 173, Donkey Kong 119 of 120, Choplifter 148 of 180. The differences
-left in Ikari are one-frame envelope steps; Choplifter's 32 have not been traced.
+Reference states reproduced, in order: Ikari 521 of 529, Midnight Mutants 83 of 83
+(the two extra states are a note that starts on the capture's last frame), Dark
+Chambers 173 of 173, Donkey Kong 119 of 120, Choplifter 174 of 180. The differences
+left in Ikari are one-frame envelope steps; Choplifter's six, and the two states
+it stops short of, have not been traced.
 (The earlier figures for the middle three, 99.0, 89.0 and 78.4 per cent, came from
 runs whose lengths were not recorded and could not be reproduced.)
 
-Four of five reproduce a commercial game's music from its own code, with the frame
+All five reproduce a commercial game's music from its own code, with the frame
 clock exact in every one. That is what this was built to do.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
@@ -182,12 +183,22 @@ change moves which rows those are. `--compare` can be trusted to say "not
 trustworthy". It cannot be trusted to rank two near-misses, and it must not be
 used to tune.
 
-So `--dma-steal` stays off by default -- not because the default is more
-correct, it is less, but because turning it on would trade a published number
-for a worse one on the strength of a measure that cannot support the
-comparison. The flag is there, it is the better physics, and the honest
-position is that neither setting is close enough for the difference to mean
-anything yet.
+**It is now on by default**, because that finding was about Ballblazer, whose
+score cannot be read at all, and on the games whose score can be read it is the
+better setting. Measured over the same 882 frames against MAME (Trebor's PROPack
+ROMs, OpenBIOS), without and with the charge:
+
+    Choplifter         79.6%  ->  97.8%    (its rhythm passage runs 37 beats, not 5)
+    Midnight Mutants   94.3%  ->  97.6%
+    Ikari Warriors     99.4%  ->  99.4%
+    Donkey Kong        99.2%  ->  99.2%
+    Dark Chambers      98.3%  ->  98.3%
+
+None gets worse. Choplifter's passage is counted in loop iterations, not frames:
+with the 6502 given every cycle, the loop spins about a third more often per frame
+than on hardware (a third more RAM writes over the same frames) and ends early.
+`--no-dma-steal` restores the old behaviour. (That `--compare` cannot rank two
+near-misses still stands; these five are not near-misses.)
 
 ## What has been ruled out
 
@@ -837,7 +848,7 @@ def load_handover(path):
 
 
 def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
-        frame_nmi=False, steal=False, log=None, start_state=None):
+        frame_nmi=False, steal=True, log=None, start_state=None):
     """Execute the cartridge for `frames` frames, collecting audio writes.
 
     Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
@@ -1102,12 +1113,14 @@ def main():
                          "same length, or you are marking the simulation "
                          "against music it was never given time to reach, or "
                          "against someone playing.")
-    ap.add_argument("--dma-steal", action="store_true",
+    ap.add_argument("--dma-steal", dest="dma_steal", action="store_true",
+                    default=True,
                     help="charge the CPU for MARIA's DMA, per scanline, using "
-                         "the measured cost model including holey DMA. Better "
-                         "physics than the default; scores differently rather "
-                         "than better, because the score cannot discriminate "
-                         "at this distance. See the module docstring.")
+                         "the measured cost model including holey DMA (the "
+                         "default; see the module docstring)")
+    ap.add_argument("--no-dma-steal", dest="dma_steal", action="store_false",
+                    help="give the CPU every cycle, as before: it runs loops "
+                         "faster than hardware does")
     ap.add_argument("--frame-nmi", action="store_true",
                     help="raise one NMI a frame at end of visible instead of "
                          "following the display list. The old behaviour, kept "
