@@ -44,6 +44,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import parse_addr  # noqa: E402
 import cart as cart_module
 import m6502
 
@@ -551,7 +552,7 @@ def main():
     args = ap.parse_args()
 
     def h(v):
-        return int(v.lstrip("$"), 16) if v else None
+        return parse_addr(v) if v else None
 
     try:
         cart = cart_module.Cart(args.rom)

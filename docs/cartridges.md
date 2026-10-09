@@ -83,8 +83,19 @@ pinned by hand.
 
 Three things can sit at `$4000-$7FFF`, and the header says which: nothing,
 on-cart RAM (`$0004`), the second-to-last bank (`$0010`), or an extra ROM bank
-(`$0008`, the 144K arrangement). Getting this wrong is quiet -- the code still
-disassembles, it just disassembles the wrong bank.
+(`$0008`, the 144K arrangement and its 272K and 528K relatives). Getting this wrong is
+quiet -- the code still disassembles, it just disassembles the wrong bank.
+
+The `$0008` layout is **measured**, in MAME 0.264, on Alien Brigade (144K), Lunar
+Patrol (272K), Kinetescape and Drone Patrol (528K): `$4000` shows **file bank 0**, `$C000`
+shows the last bank, and a write of value *v* to the window shows **file bank *v* + 1**,
+so the window covers file banks 1 up to the last (`b1`..`b(n-1)`; `f0` and `f(n-1)` are
+the fixed ones, and `b(n-1)` is the same bytes as `f(n-1)`). The less certain half is the
+top of that range: values up to *n*-3 are what was checked against MAME, and the top value
+reaching the last bank (rather than wrapping to bank 1) follows from the window being
+*n*-1 banks wide. An earlier version of this layout put bank *n*-2 at `$4000` and
+numbered the window from 0; none of those images ran in the simulator, and all of them do
+now.
 
 The rule that the *last* bank is the one at `$C000` is not an assumption: across
 207 SuperGame images where the reset vector could be matched to real startup
@@ -135,11 +146,14 @@ Two prototypes in the library declare a POKEY at `$4000` *and* ROM there.
 
 ## Coverage
 
-Running `cart.py` over the 1,309-image library: 1,284 laid out, 25 refused
-(Bankset, Activision, SOUPER, and two images whose declared size cannot be
-mapped at all), no crashes. Three layouts were actively disputed by the reset
-probe -- two files whose names say "Overdump" and one prototype, which is the
-probe doing its job.
+*Historical figures.* Over the 1,309-image library, `cart.py` first laid out
+1,284 and refused 25 (Bankset, Activision, SOUPER, and two images whose declared
+size cannot be mapped at all), with no crashes. Activision, Bankset and 52K are
+now supported (next section), so only the "Still unsupported" list at the end of
+this file remains refused: four images in all. The larger library the README
+quotes has not been re-tallied here. Three layouts were actively disputed by the
+reset probe -- two files whose names say "Overdump" and one prototype, which is
+the probe doing its job.
 
 # Activision, Bankset, and 52K
 
@@ -197,6 +211,37 @@ RAM — applies per side as usual.
 This is worth knowing when hunting for artwork: on a bankset cartridge the
 graphics are not hiding in an unreached corner of the CPU's ROM. They are in
 the other half, at addresses the CPU never reads.
+
+### What the tools do with a bankset cartridge
+
+* **`disasm.py` and `build.py`** list the CPU's half as always and MARIA's half as
+  data, `m<space>.asm` beside the others (`mrom.asm`, `mb3.asm`, `mf7.asm`), so the
+  image rebuilds byte for byte. Nothing is traced in MARIA's half: the CPU never runs it.
+* **`sim.py`** runs the CPU's half, which is what executes. MARIA's reads of display
+  lists in ROM are not modelled (the sim only walks lists in RAM), bankset or not.
+* **`census.py`** reports both halves: MARIA's spaces are `m` + the CPU name. What MARIA
+  was seen fetching is marked in MARIA's half, not the CPU's, and no annotation
+  suggestions are made for MARIA's half.
+* **`firstlook.py`** rebuilds the screen from MARIA's half (`Cart.for_maria()`).
+* `gfx.py`, `spriteedit.py` and the workbench's sprite editor take `--side`.
+
+**Not established here, but the `a7800` fork can establish it.** Which bank of MARIA's half
+is in view for a given bank register write is assumed to be the same number as the CPU's,
+which is what "two parallel sets of banks at the same addresses" says. Nothing here has read
+the MARIA side back from a running machine. The 7800-devtools `a7800` fork runs bankset
+cartridges (docs/emulation.md), so it is the machine to ask; it is not installed in the
+environment this was written in, and **mainline MAME 0.264 cannot be asked**: it answers
+`Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images (the header
+values `$2000`, `$2812`, `$E002`, `$2012` all do), and the BIOS is left running its own
+built-in game. That game is KILOPARSEC -- the title screen seen "running" for
+`Bubble Bobble (v75a)` in an earlier check was OpenBIOS's, not the cartridge's, which is also why
+reads tapped from `$C000` matched no half of the file. `tools/mamecheck.py` now tells these apart
+(it compares the vectors MAME is executing with the cartridge's own) and prints MAME's
+message. Treat every statement about a bankset image that rests on mainline MAME 0.264 as void; the only evidence
+for the layout is the `a7800` fork's, for the CPU's half. A rebuilt screen of a bankset
+cartridge is a reconstruction under the same-bank-number assumption until it is checked on the
+fork (`capture.py` already recognises it and uses debugger watchpoints; `mamecheck.py` does
+not yet drive it).
 
 ## 52K
 

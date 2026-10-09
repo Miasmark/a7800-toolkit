@@ -10,8 +10,12 @@ graphics as
 
 so a character set is stored *line-planar*: page CHARBASE+0 holds line 0 of all
 256 characters, page CHARBASE+1 holds line 1, and so on.  Midnight Mutants runs
-with CTRL = $50 (read mode 00 = 160x2, one-byte characters), so each character
-is one byte = 4 pixels wide, and each byte holds four 2-bit pixels, MSB first.
+with CTRL = $50 (read mode 00 = 160x2). CTRL bit 4 is SET there, which makes each
+list entry select TWO consecutive bytes of graphics (docs/hardware.md; measured
+on MAME with probes/forcedl.lua), so a glyph on screen is the code's byte and the
+next one. This renderer draws every code as its own four-pixel cell -- each byte
+holds four 2-bit pixels, MSB first -- so such a glyph shows as two neighbouring
+cells, left half then right.
 This is the default mode -- it draws all 256 characters as a grid, right for
 reading a font or a character-mode sprite sheet.
 
@@ -46,6 +50,7 @@ import sys
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 from disasm import Cart
 
 GREY = [(20, 20, 24), (105, 105, 115), (175, 175, 185), (245, 245, 250)]
@@ -194,7 +199,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rom")
     ap.add_argument("--space", default="b1")
-    ap.add_argument("--base", default="0x8000")
+    ap.add_argument("--base", type=address, default=0x8000)
     ap.add_argument("--lines", type=int, default=8)
     ap.add_argument("--direct", type=int, metavar="WIDTH",
                     help="render one direct-mode object WIDTH bytes wide, "
@@ -243,22 +248,22 @@ def main():
 
     if args.linear:
         lines = args.lines if args.lines != 8 else args.linear
-        img = render_linear(cart, args.space, int(args.base, 0), args.linear,
+        img = render_linear(cart, args.space, args.base, args.linear,
                             lines, args.gw, args.count, pal, args.scale)
         if args.grid:
             img = grid(img, 16, (args.count + 15) // 16,
                        args.gw * 4 * args.scale, lines * args.scale)
     elif args.direct and args.sheet:
-        img = render_sheet(cart, args.space, int(args.base, 0), args.direct,
+        img = render_sheet(cart, args.space, args.base, args.direct,
                            args.lines, args.sheet, pal, args.scale,
                            descending=not args.ascending,
                            cols=args.sheet_cols)
     elif args.direct:
-        img = render_direct(cart, args.space, int(args.base, 0), args.direct,
+        img = render_direct(cart, args.space, args.base, args.direct,
                             args.lines, pal, args.scale,
                             descending=not args.ascending)
     else:
-        img = render_charset(cart, args.space, int(args.base, 0), args.lines,
+        img = render_charset(cart, args.space, args.base, args.lines,
                              pal, args.scale, descending=not args.ascending)
         if args.grid:
             img = grid(img, 16, 256 // 16, 4 * args.scale, args.lines * args.scale)

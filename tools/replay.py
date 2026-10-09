@@ -26,7 +26,6 @@ skipping the frame waits certainly does -- record a session on each build and
 compare the profiles rather than expecting the same fight twice.
 """
 import argparse
-import io
 import os
 import subprocess
 import sys
@@ -43,15 +42,16 @@ MAME_GUESSES = [
 
 
 def find_mame(explicit=None):
-    for p in ([explicit] if explicit else []) + MAME_GUESSES:
-        if p and os.path.exists(p):
-            return p
-    return None
+    # one finder for every tool: capture.py also reads A7800_MAME and PATH
+    import capture
+    return capture.find_mame(explicit)
 
 
 def replay(mame, rom, inp, log, seconds, rompath, loop=None, skip=None):
     inp = os.path.abspath(inp)
-    cmd = [mame, "a7800", "-cart", os.path.abspath(rom),
+    import capture
+    cmd = [mame, "a7800"] + capture.bios_args() + [
+           "-cart", os.path.abspath(rom),
            "-autoboot_script", PROBE,
            "-input_directory", os.path.dirname(inp),
            "-playback", os.path.basename(inp),
@@ -64,7 +64,8 @@ def replay(mame, rom, inp, log, seconds, rompath, loop=None, skip=None):
     env = dict(os.environ)
     env["A7800_PROF_LOG"] = os.path.abspath(log)
     if loop:
-        env["A7800_LOOP"] = str(int(loop.lstrip("$"), 16))
+        from addr import parse_addr
+        env["A7800_LOOP"] = str(parse_addr(loop))
     if skip:
         env["A7800_PROF_SKIP"] = str(skip)
     r = subprocess.run(cmd, capture_output=True, text=True, env=env,

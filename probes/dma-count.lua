@@ -1,3 +1,8 @@
+-- dma-count.lua -- read the result counter kept by the cartridge that
+-- probes/dma-costcart.py builds: how many CPU loop iterations survived one
+-- display shape. Samples $90/$91 (res_lo/res_hi) over frames 120-200, prints
+-- the median, then exits. Run it on that cartridge only.
+
 local M = (type(manager.machine)=="function") and manager:machine() or manager.machine
 local mem = M.devices[":maincpu"].spaces["program"]
 local F, samples = 0, {}

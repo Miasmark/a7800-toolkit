@@ -56,6 +56,7 @@ import sys
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 from disasm import Cart
 from palette import ntsc7800
 
@@ -121,7 +122,6 @@ def render_stack(cart, space, segments, colours, descending=True):
 
 def read_palette_regs(path, index):
     """Pull one palette's three colour bytes out of a dumpgfx_regs.txt."""
-    want = "$%02X" % (0x21 + index * 4)   # P{n}C1's register address
     lines_by_addr = {}
     for ln in open(path, encoding="utf-8"):
         ln = ln.strip()
@@ -156,7 +156,7 @@ def main():
                     help="bank/space name, for a mapped cartridge "
                          "(default: the cart's only space, or its first)")
     ap.add_argument("--side", choices=["sally", "maria"], default="sally")
-    ap.add_argument("--base", type=lambda v: int(v, 0),
+    ap.add_argument("--base", type=address,
                     help="graphics address of the object's lowest page")
     ap.add_argument("--width", type=int, help="bytes per line")
     ap.add_argument("--lines", type=int, help="scanlines")

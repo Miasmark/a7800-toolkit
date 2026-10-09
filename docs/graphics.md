@@ -46,18 +46,64 @@ where the lines really do ascend.
 
 ## Pixel formats
 
-`CTRL`'s read mode plus the display list entry's write mode select the format.
-The two that matter most:
+`CTRL`'s read mode (bits 1-0) plus the display list entry's write mode (bit 7 of
+a five-byte header's second byte) select the format. For read mode 0, the 160
+modes:
 
-* **160A/160B** -- two bits per pixel, four pixels per byte, MSB first. Each
-  2-bit value indexes into the entry's palette (value 0 is transparent /
-  background).
-* **320A and 320D** -- one bit per pixel, eight per byte, twice the horizontal
-  resolution and correspondingly fewer colours.
+The six modes are the combinations of two things: the *write mode* bit (bit 7 of
+a five-byte entry's second byte, or the set-up of the entry) and the *read mode*
+(CTRL bits 1-0). From the 7800 Software Guide, and agreeing with what was measured
+here for 160A, 160B and 320A:
+
+| mode | write mode | read mode (CTRL bits 1-0) |
+|---|---|---|
+| 160A | 0 | 0 |
+| 160B | 1 | 0 |
+| 320A | 0 | 3 |
+| 320B | 1 | 2 |
+| 320C | 1 | 3 |
+| 320D | 0 | 2 |
+
+Write mode is not initialised at power-up, so a game that never sets it draws
+whatever the last value was. In 320 modes objects can only be placed in 2-pixel
+steps; in 160B, palettes 0-3 and 4-7 combine for twelve usable colours; changing
+read mode in mid-line gives 320C or 320D.
+
+* **160A** (write mode 0) -- two bits per pixel, four pixels per byte, MSB first.
+  Each 2-bit value indexes into the entry's own palette: value 0 is transparent,
+  1-3 are that palette's three colours. Most artwork is this: three colours and
+  transparent ("3 + 1").
+* **160B** (write mode 1) -- two pixels per byte, and each pixel carries its own
+  palette bits: bits 7-6 are pixel 0's colour, 5-4 pixel 1's colour, 3-2 pixel 0's
+  palette-select, 1-0 pixel 1's. The palette used is `(entry palette & 4) |
+  select`, so one entry draws from four palettes -- the group the entry's palette
+  bit 2 picks. Colour 0 is transparent whatever the palette.
+* **320A** (read mode 3, write mode 0) -- one bit per pixel, eight per byte, MSB
+  first, twice the horizontal resolution. A set bit is the entry's palette
+  *colour 2* (not 1); a clear bit is transparent. Display-list positions stay in
+  160-pixel units, so a 320 pixel is half a position. Real HUD text uses it
+  (Triple Punch switches CTRL to read mode 3 from its display-list interrupt).
+  A zone whose display-list-list entry has the interrupt bit is drawn *after* its
+  handler has run, so the handler's CHARBASE, CTRL and palette writes apply to
+  that zone, not the one below it (Triple Punch's "1UP / HI SCORE" row is drawn
+  with the font the handler selects; reading it with the previous registers gave
+  noise).
+* **320B, 320C and 320D** -- read mode 2, and read mode 3 with write mode 1, were seen to draw something other than one bit per pixel (bits
+  are paired across the byte) and are *not* decoded; `mariapix.py` returns
+  nothing for them rather than guess.
 * **320B and 320C** reach four colours at 320 resolution by pairing bytes, so
   they are *not* the same shape as 320A. `gfx.py` and `spriteedit.py` read the
   1-bit form only; artwork in B or C comes out the right size and the wrong
   image.
+
+`tools/mariapix.py` decodes the two 160 modes, and `selftest.py` has MAME draw
+each one (`probes/forcedl.lua`) and checks the decoder against the picture. That
+check exists because this section used to say 160B was the same shape as 160A
+and `dlwalk.py` took the write-mode flag from bit 6: an entry whose byte is `$40`
+draws as 160A, `$C0` as 160B. (Every real header seen has bit 6 set; what it
+means is not established.) Character mode is unaffected by the write mode but
+not by `CTRL` bit 4: clear, each list entry selects one byte of graphics per
+scanline; set, two consecutive bytes (the code's and the next), eight pixels.
 
 The same bytes decode differently under each, so if artwork comes out as noise
 in one mode, try the other before concluding it is compressed.

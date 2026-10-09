@@ -13,17 +13,19 @@ time". Each job is one MAME run (a probe, usually a recording to play back,
 some environment) boiled down to one line, its verdict. --save writes the
 verdicts; --against compares and exits 1 if any changed.
 
-The job file (JSON):
+The job file (JSON). The probe and verdict scripts below named `your_*` are
+placeholders for a project's own; Pole Position II's real ones live in
+Miasmark/poleposition2-7800-disassembly (`tools/health.py`):
 
     {
       "vars": {"out": "build/regress", "frames": "12000"},
-      "vars_cmd": "python tools/symbols.py",     optional: prints KEY=VALUE lines
+      "vars_cmd": "python your_symbols.py",      optional: prints KEY=VALUE lines
       "cart": "{rom}",                           default for every job
       "jobs": [
         {"name": "health {r}", "for": {"r": ["run-02", "run-03"]},
-         "script": "probes/health.lua", "playback": "{r}.inp",
+         "script": "probes/your_health.lua", "playback": "{r}.inp",
          "env": {"FRAMES": "{frames}", "O": "{out}/health-{r}.csv"},
-         "verdict": "python tools/health.py {out}/health-{r}.csv"},
+         "verdict": "python your_health.py {out}/health-{r}.csv"},
         {"name": "wild {r}", "for": {"r": ["run-02"]},
          "script": "probes/wildfetch.lua", "playback": "{r}.inp",
          "env": {"A7800_WF_LOG": "{out}/wild-{r}.txt"},
@@ -91,7 +93,9 @@ def run_cmd(cmd):
 
 
 def mame_line(job, cfg):
-    cmd = [cfg["mame"], "a7800", "-rompath", cfg["bios"], "-cart", job["cart"],
+    bios = os.environ.get("A7800_BIOS")      # e.g. a7800pr for the open BIOS
+    cmd = [cfg["mame"], "a7800"] + (["-bios", bios] if bios else []) + [
+           "-rompath", cfg["bios"], "-cart", job["cart"],
            "-skip_gameinfo", "-keyboardprovider", "none",
            "-input_directory", cfg["input_dir"]]
     if job.get("playback"):

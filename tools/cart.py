@@ -132,6 +132,7 @@ class Mapper(object):
     switch = None            # where a write selects a bank, as (lo, hi) or None
     note = ""
     window_banks = None      # banks the window can show; None means all of them
+    first_window = 0         # the file bank the window's value 0 selects
 
     def __init__(self, nbanks):
         self.nbanks = nbanks
@@ -149,7 +150,7 @@ class Mapper(object):
             return None
         lo, hi = self.switch
         if lo <= addr <= hi:
-            return value % self.nwindow
+            return self.first_window + value % self.nwindow
         return None
 
 
@@ -214,11 +215,22 @@ class SuperGame(Mapper):
         # $C000, and a fixed ROM bank at $4000. Which bank lands low is inferred
         # from the 128K case rather than confirmed -- see probe_fixed_high() and
         # the docs to check it against a particular image.
-        self.inferred = (low == "rom")
+        # MEASURED in MAME 0.264 (Alien Brigade 144K, Lunar Patrol 272K, Kinetescape and
+        # Drone Patrol 528K, all flagged $0008): $4000 shows FILE bank 0, $C000 the last bank,
+        # and a write of value v to the window shows file bank v + 1 -- so the window is the
+        # banks between the two fixed ones. (The first version of this laid out bank n-2 at
+        # $4000 and numbered the window from 0; it was inferred, and it is why those images
+        # stalled in the simulator.)
+        self.inferred = False
+        if low == "rom":
+            self.first_window = 1
+            self.window_banks = max(nbanks - 1, 1)   # file banks 1..n-1; the last is also fixed at $C000
 
     def regions(self):
         r = []
-        if self.low in ("bank6", "rom"):
+        if self.low == "rom":
+            r.append((0x4000, 0x8000, "fixed", 0))
+        elif self.low == "bank6":
             r.append((0x4000, 0x8000, "fixed", self.nbanks - 2))
         elif self.low == "ram":
             r.append((0x4000, 0x8000, "ram", None))
@@ -280,7 +292,6 @@ class Activision(Mapper):
     name = "activision"
     switch = (0xFF80, 0xFF8F)
     window_banks = 8
-
     def regions(self):
         return [(0x4000, 0x6000, "fixed", (0x1A000, "h13")),
                 (0x6000, 0x8000, "fixed", (0x18000, "h12")),
@@ -355,6 +366,13 @@ def pick_mapper(size, header=None, mapper=None, low=None, bankset=False):
     raise ValueError("unknown mapper %r" % mapper)
 
 
+def pokeys_for(cart_type):
+    """The POKEY addresses a header's cart-type bits declare, lowest first."""
+    return [base for bit, base in ((0x0400, 0x0440), (0x0040, 0x0450),
+                                   (0x8000, 0x0800), (0x0001, 0x4000))
+            if cart_type & bit]
+
+
 # -------------------------------------------------------------------- the cart
 class Cart(object):
     """A cartridge image, laid out.
@@ -375,6 +393,7 @@ class Cart(object):
     def __init__(self, path, mapper=None, low=None, side="sally"):
         raw = open(path, "rb").read()
         self.path = path
+        self._mapper_arg, self._low_arg, self._maria = mapper, low, None
         self.header_bytes = None
         self.info = read_header(raw)
         if self.info is not None:
@@ -387,6 +406,9 @@ class Cart(object):
             half = len(raw) // 2
             raw = raw[:half] if side == "sally" else raw[half:]
         self.rom = raw
+        # where this object's bytes start in the image, header excluded: the
+        # MARIA half of a bankset cartridge sits after the CPU's half
+        self.file_base = (half if self.bankset and side == "maria" else 0)
         self.map = pick_mapper(len(raw), self.info, mapper, low,
                                bankset=self.bankset)
         self.nbanks = self.map.nbanks
@@ -414,36 +436,57 @@ class Cart(object):
         Nine images declare two: bit $0400 adds one at $0440 beside the $0450
         one, and every image that sets it says so in its own title.
         """
-        ct = (self.info or {}).get("cart_type", 0)
-        return [base for bit, base in ((0x0400, 0x0440), (0x0040, 0x0450),
-                                       (0x8000, 0x0800), (0x0001, 0x4000))
-                if ct & bit]
+        return pokeys_for((self.info or {}).get("cart_type", 0))
 
     def _check_activision(self):
-        """An Activision image whose vectors come out wrong is mis-ordered.
+        """An Activision image whose vectors come out wrong is laid out the other way.
 
         Verified against a7800: for a correct dump, $4000 is 8K block 13,
         $8000 is block 15 and $E000 is block 14, and the vectors read back
         sensibly. The "(OM)" dumps in circulation have blocks 14 and 15
-        swapped, so the vectors land in a block full of zeros -- and a7800
-        cannot boot them either, so this is the image being wrong rather than
-        the layout.
+        the other way round, so read the usual way the vectors land in a block
+        full of zeros. MAME 0.264 runs them (Rampage and Double Dragon, vectors
+        in cart code), so the layout is swapped for them -- when the vectors say
+        so -- rather than reported as a bad image.
         """
         if not isinstance(self.map, Activision):
             return
         rst = self.vectors().get("RESET", 0)
-        if 0x4000 <= rst <= 0xFFFF:
+        if 0x4000 <= rst < 0xFFFF:               # $FFFF is erased ROM, not an address
             return
         alt = self.rom[0x1FFFC] | (self.rom[0x1FFFD] << 8)
         extra = ""
-        if 0x4000 <= alt <= 0xFFFF:
-            extra = (" Blocks 14 and 15 look swapped: reading the vectors from "
-                     "block 15 instead gives RESET $%04X. The \"(OM)\" dumps "
-                     "are like this, and no emulator runs them." % alt)
+        if 0x4000 <= alt < 0xFFFF and len(self.rom) == 0x20000:
+            # MEASURED against the AM dump of the same game: every 8K block of an (OM) image
+            # is its AM block index XOR 1 -- all sixteen, not just 14 and 15 -- and the AM
+            # layout run on the permuted image behaves identically in the simulator. So read
+            # the image in AM order; `to_file_order` puts it back for a rebuild.
+            self.om_order = True
+            self.rom = self.to_file_order(self.rom)
+            self.warnings.append(
+                "this is an \"(OM)\" Activision dump: its 8K blocks are in the other order "
+                "(each index XOR 1), so it is read in the usual order (RESET $%04X). "
+                "MAME 0.264 runs the (OM) order and does not run the usual one."
+                % self.vectors().get("RESET", 0))
+            return
         self.warnings.append(
             "this Activision image's reset vector reads $%04X, which is not a "
             "usable address, so the fixed blocks are probably not in the order "
             "this mapper expects.%s" % (rst, extra))
+
+    om_order = False
+
+    def to_file_order(self, rom):
+        """The 8K blocks of an Activision image with each pair exchanged (an involution:
+        it converts between an (OM) file and the usual order, either way)."""
+        rom = bytes(rom)
+        if not self.om_order:
+            return rom
+        out = bytearray(len(rom))
+        for i in range(len(rom) // 0x2000):
+            j = i ^ 1
+            out[i * 0x2000:(i + 1) * 0x2000] = rom[j * 0x2000:(j + 1) * 0x2000]
+        return bytes(out)
 
     def _check_pokey(self):
         """A POKEY at $4000 and ROM at $4000 cannot both be right."""
@@ -467,7 +510,8 @@ class Cart(object):
             if kind == "fixed":
                 out.append(self._fixed_name(bank))
             elif kind == "window":
-                out.extend("b%d" % i for i in range(self.map.nwindow))
+                first = self.map.first_window
+                out.extend("b%d" % i for i in range(first, first + self.map.nwindow))
         return out
 
     def _fixed_name(self, arg):
@@ -542,6 +586,16 @@ class Cart(object):
             return addr - self.map.start
         return self._file_base(space) + (addr - self.base_of(space))
 
+    def file_offset(self, space, addr):
+        """Where `addr` lives in the image file, header excluded -- the position to write
+        to when an edit has to land in the file. `_offset` indexes `self.rom`, which is
+        the MARIA half of a bankset image on its own and the usual block order for an (OM)
+        Activision dump; this undoes both."""
+        o = self._offset(space, addr)
+        if self.om_order:
+            o = ((o // 0x2000) ^ 1) * 0x2000 + o % 0x2000
+        return self.file_base + o
+
     def byte(self, space, addr):
         return self.rom[self._offset(space, addr)]
 
@@ -554,6 +608,20 @@ class Cart(object):
 
     def in_space(self, space, addr):
         return self.base_of(space) <= addr < self.base_of(space) + self.size_of(space)
+
+    def probe_env(self, prefix="A7800_XT_"):
+        """What probes/exectrace.lua and dumpgfx.lua need to name a bank the way this class does:
+        how many banks, which file bank the window's value 0 selects, how many values it takes
+        before wrapping, and which file bank sits at $4000 (the EXROM layout is not the plain
+        SuperGame one: file bank 0 low, window value v showing file bank v+1)."""
+        env = {prefix + "BANKS": str(max(self.nbanks, 1))}
+        if self.map.name == "supergame":
+            env[prefix + "FIRST"] = str(self.map.first_window)
+            env[prefix + "WBANKS"] = str(self.map.nwindow)
+            for start, _end, kind, arg in self._region:
+                if kind == "fixed" and start == 0x4000:
+                    env[prefix + "LOWBANK"] = str(arg)
+        return env
 
     def vectors(self):
         """NMI/RESET/IRQ, read from whatever space owns $FFFA."""
@@ -595,6 +663,25 @@ class Cart(object):
         return {"ranked": best, "default": self.nbanks - 1,
                 "agrees": bool(best) and best[0]["bank"] == self.nbanks - 1}
 
+    # -- the two halves of a bankset cartridge ---------------------------------
+    def for_maria(self):
+        """The cartridge as MARIA sees it: the other half of a bankset cartridge, or
+        this very object when there is only one half. Display lists and graphics are
+        fetched from here, not from what the CPU executes."""
+        if not self.bankset or self.side == "maria":
+            return self
+        if getattr(self, "_maria", None) is None:
+            self._maria = Cart(self.path, mapper=self._mapper_arg, low=self._low_arg,
+                               side="maria")
+        return self._maria
+
+    def sides(self):
+        """This cartridge, or for a bankset one a `Sides` holding both halves, with
+        MARIA's spaces named `m` + the CPU name (`mb3`, `mf7`, `mrom`)."""
+        if not self.bankset or self.side == "maria":
+            return self
+        return Sides(self, self.for_maria())
+
     def file_bytes(self, rom=None):
         """The image as it sits on disk, header included if it had one."""
         return (self.header_bytes or b"") + bytes(self.rom if rom is None else rom)
@@ -626,8 +713,8 @@ class Cart(object):
                 else:
                     what = "bank %d, space %s" % (b, self._fixed_name(b))
             elif kind == "window":
-                n = self.map.nwindow
-                what = "banks 0-%d, spaces b0-b%d" % (n - 1, n - 1)
+                n, f0 = self.map.nwindow, self.map.first_window
+                what = "banks %d-%d, spaces b%d-b%d" % (f0, f0 + n - 1, f0, f0 + n - 1)
             else:
                 what = "on-cart RAM"
             lines.append("  $%04X-$%04X %s" % (start, end - 1, what))
@@ -667,3 +754,78 @@ def main():
 if __name__ == "__main__":
     import sys
     sys.exit(main())
+
+
+def canonical_spaces(cart):
+    """The spaces to report or list: each stretch of the file once, a fixed name winning
+    over the window that aliases it (a SuperGame's last bank is both). Works on a `Cart`
+    or a `Sides`, where MARIA's `mb3` counts as a window like `b3`."""
+    names = cart.spaces()
+    windowed = lambda sp: sp.lstrip("m").startswith("b")      # noqa: E731
+    order = [s for s in names if not windowed(s)] + [s for s in names if windowed(s)]
+    seen, out = set(), []
+    for sp in order:
+        key = (cart._file_base(sp), cart.size_of(sp))
+        if key not in seen:
+            seen.add(key)
+            out.append(sp)
+    return sorted(out, key=names.index)
+
+
+class Sides(object):
+    """Both halves of a bankset cartridge, addressed by one set of space names.
+
+    The CPU's half keeps its usual names (`f7`, `b3`, `rom`); MARIA's is the same
+    layout under `m` + the name (`mf7`, `mb3`, `mrom`). `rom` is the whole file body,
+    CPU half first, so a byte has one file offset whichever side it is on. Read-only,
+    and only what a tool that reports on the whole file needs.
+    """
+
+    def __init__(self, cpu, maria):
+        self.cpu, self.maria = cpu, maria
+        self.info, self.path = cpu.info, cpu.path
+        self.rom = bytes(cpu.rom) + bytes(maria.rom)
+        self._half = len(cpu.rom)
+        self.bankset = True
+
+    def _side(self, space):
+        return (self.maria, self._half) if space.startswith("m") else (self.cpu, 0)
+
+    @staticmethod
+    def _bare(space):
+        return space[1:] if space.startswith("m") else space
+
+    def spaces(self):
+        return self.cpu.spaces() + ["m" + s for s in self.maria.spaces()]
+
+    def base_of(self, space):
+        return self._side(space)[0].base_of(self._bare(space))
+
+    def size_of(self, space):
+        return self._side(space)[0].size_of(self._bare(space))
+
+    def _file_base(self, space):
+        c, off = self._side(space)
+        return off + c._file_base(self._bare(space))
+
+    def file_offset(self, space, addr):
+        c, off = self._side(space)
+        return off + c.file_offset(self._bare(space), addr)
+
+    def _offset(self, space, addr):
+        c, off = self._side(space)
+        return off + c._offset(self._bare(space), addr)
+
+    def byte(self, space, addr):
+        c, _off = self._side(space)
+        return c.byte(self._bare(space), addr)
+
+    def slice(self, space, addr, n):
+        c, _off = self._side(space)
+        return c.slice(self._bare(space), addr, n)
+
+    def space_of(self, addr, bank=None):
+        return self.cpu.space_of(addr, bank)
+
+    def is_maria(self, space):
+        return space.startswith("m")

@@ -45,6 +45,18 @@ class AsmError(Exception):
     pass
 
 
+def item_at(linemap, offset):
+    """(start offset, source line) of the item that emitted the byte at
+    `offset`, or None. A byte inside an instruction's operand belongs to the
+    instruction, so the start is where to begin reading it."""
+    best = None
+    for off, ln in linemap:
+        if off > offset:
+            break
+        best = (off, ln)
+    return best
+
+
 def strip_comment(line):
     i = line.find(";")
     return (line if i < 0 else line[:i]).rstrip()
@@ -217,7 +229,11 @@ class Assembler:
 
         # ---- pass 2: emit ----
         out = bytearray()
+        # (offset, source line) for each emitted item, so a byte that differs
+        # from the reference can be traced back to the line that produced it
+        self.linemap = []
         for ln, at, kind, a, b in layout:
+            self.linemap.append((at - self.org, ln))
             if len(out) != at - self.org:
                 raise AsmError("line %d: pc drift (expected $%04X, at $%04X)"
                                % (ln, at, self.org + len(out)))

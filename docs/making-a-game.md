@@ -67,8 +67,13 @@ as one row repeated, the page striding is.
 
 `SWCHA` (`$0280`) holds both joysticks -- player 1 in the high nibble, player 2
 in the low -- and **every bit is active low**: a clear bit means pushed. Player
-1 is bit 7 right, 6 left, 5 down, 4 up. The buttons are `INPT4` and `INPT1`,
-bit 7 clear while held. Testing any of these the obvious way round is the
+1 is bit 7 right, 6 left, 5 down, 4 up. The single-button controller's
+button is `INPT4` (player 1) or `INPT5` (player 2), bit 7 clear while held. A
+two-button controller needs `SWCHB`'s direction register set up first (the Guide:
+`LDA #$14 / STA $0283 / LDA #0 / STA $0282`); its buttons are then `INPT0-INPT3`, and
+the Guide says they read bit 7 *set* while held -- the opposite sense, not checked
+here. A game should detect a one-button stick from `INPT4/5` and not run in
+two-button mode, which the Guide warns can harm one. Testing any of these the obvious way round is the
 classic first input bug, and it fails silently: the game simply behaves as
 though the stick is held in the opposite direction constantly.
 
@@ -112,7 +117,7 @@ question about how much is on screen. `dmabudget.py` answers it:
 python tools/dmabudget.py --uniform 12,16,4,8 --afford
 ```
 
-NTSC gives you **29,868 CPU cycles per frame** (262 scanlines at 114.00), and
+NTSC gives you **29,850.5 CPU cycles per frame** (263 scanlines at 113.5), and
 drawing is charged per scanline, so a tall zone costs proportionally more than
 a short one and an empty zone is not free. The numbers are measured -- see
 `docs/hardware.md` for the table and the method.

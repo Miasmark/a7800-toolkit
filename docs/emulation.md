@@ -41,6 +41,8 @@ mame a7800  -cart game.a78 -autoboot_script probe.lua -video none -sound none -n
 mame a7800p -cart game.a78 ...
 ```
 
+`tools/runprobe.py game.a78 PROBE -o out -e KEY=VALUE` is that command with the machine name, the BIOS, the output folder and the environment worked out for you, and it reports which files the probe wrote (`--list` shows every probe). `tools/workbench.py` exposes the same thing as *Run any probe*.
+
 * `a7800` is NTSC, `a7800p` is PAL. Using the wrong one against a PAL image
   gives you a game that runs but times everything wrong.
 * `-str N` exits after N seconds of emulated time; combined with `-nothrottle`
@@ -219,6 +221,31 @@ machinery, which post-dates its fork point) plus the Lua binding for it. That is
 a core memory-system backport, not a small patch -- which is exactly why the
 watchpoint route is worth having.
 
+### Does MAME run the image at all? (`mamecheck.py`)
+
+Every comparison here assumes MAME can run the cartridge. Measured on a stratified 278-image
+sample of the 1,309-image library (MAME 0.264, each image run for 360 frames after the BIOS hands
+over; "live" is MARIA kept drawing from a display list; the question is also asked of the
+simulator, and MAME is checked against the cartridge's own vectors so a BIOS built-in game is
+not counted as the cartridge):
+
+| | images |
+|---|---|
+| both run it | 256 (92.8%) |
+| simulator only | 15 (5.4%) |
+| MAME only | 2 (0.7%) |
+| neither | 3 (1.1%) |
+| not compared (could not be laid out: SOUPER, the 512K flat SN Cart Demo) | 2 |
+
+*Simulator only* is MAME's gap, not the simulator's: the 14 bankset images ("Unsupported mapper"
+-- the OpenBIOS game runs instead), five Activision images in the usual (AM) block order (MAME
+runs the (OM) order and leaves the BIOS running on these), and one image whose header MAME
+rejects (SuperCart bit missing). On those MAME cannot be the reference; the `a7800` fork runs
+the bankset ones. *MAME only* is the simulator's gap: Bad Apple Demo (not drawn at all) and Turret
+Turmoil (a KIL at `$D4A7` stops the program at frame 55; undiagnosed). Display-interrupt
+timing disagrees on 15 images, mostly where one side has no live list. Rerun it on a new MAME
+before trusting any of this: `python tools/mamecheck.py /path/to/roms --sample 60 --cache c`.
+
 ### Neither emulates the second POKEY
 
 Both instantiate one chip for a dual-POKEY cartridge:
@@ -233,3 +260,96 @@ mapper, but the `$0440` chip is still not there. This is why the toolkit
 captures POKEY from the **CPU bus** instead of the device: it records what the
 game writes to both chips whether or not anything is listening, and
 `tracker.py` renders all eight voices from that. See `docs/audio.md`.
+
+## Running MAME with no Atari BIOS
+
+The probes need a booting 7800, and MAME's `a7800` needs a BIOS the toolkit
+cannot ship. 7800OpenBIOS (CC0, `docs/bios.md`) stands in. This is the whole
+setup, as run on Ubuntu 24.04 with MAME 0.264 -- older than the 0.287 the rest
+of these notes were measured on, and every probe in `probes/` ran on it:
+
+    sudo apt-get install mame dasm
+    git clone --depth 1 https://github.com/7800-devtools/7800OpenBIOS
+    (cd 7800OpenBIOS && dasm 7800openbios.asm -f3 -v0 -I. -o7800openbios.bin)
+    mkdir -p bios/a7800
+    cp 7800OpenBIOS/7800openbios.bin bios/a7800/c300558-001a.u7
+
+    export A7800_MAME=/usr/games/mame A7800_ROMPATH=$PWD/bios A7800_BIOS=a7800pr
+
+`A7800_BIOS` is passed to MAME as `-bios`; `capture.py`, `session.py`,
+`replay.py` and `regress.py` all honour it. MAME prints `c300558-001a.u7 WRONG
+CHECKSUMS` and runs it anyway. With those three variables set, `selftest.py`
+adds a check that runs the generic probes under MAME on the synthetic
+cartridge, whose answers are known (sprite row at `$D000`, frame counter at
+`$81`), and measures a recording it makes itself.
+
+Things this turned up that the notes above did not say:
+
+* **`-exit_after_playback`** is what stops MAME where a recording stops. Without
+  it the game carries on under live control after the last recorded input, and
+  `reclength.lua` runs on to its safety cap.
+* **`emu.register_stop` is deprecated** in current MAME ("use
+  emu.add_machine_stop_notifier"); the older a7800 fork may have only the
+  former, so probes try the notifier first and fall back.
+* **`-video soft` hangs** in a container with no display. Use `-video none`;
+  `snapstop.lua` takes its screenshot at machine stop and MAME writes it under
+  `~/.mame/snap/a7800/`.
+* **`whocalls.lua` needs the debugger**, which a headless run does not have.
+* **Read-modify-write instructions write twice** -- see `pcwrites.lua`.
+
+* **The debugger works headless**, which gives instruction traces and what
+  `whocalls.lua` needs, if Qt is told not to look for a display:
+
+      QT_QPA_PLATFORM=offscreen mame a7800 ... -video none -debug \
+          -debugscript trace.txt -seconds_to_run 12
+
+  with `trace out.log,0,noloop` then `go` in the script (`noloop` keeps a wait
+  loop to one line -- `docs/pitfalls.md` explains why a diff needs it). A
+  12-second Triple Punch run gives 3.9 million lines. The trace has no bank
+  number: a line in `$8000-$BFFF` does not say which bank ran.
+
+## Probe index
+
+Every file in `probes/`. All are parameterised by environment variables (each
+file's header lists them); none hard-codes a game's addresses. A probe written
+for one game's RAM map belongs in that game's repository, and the pattern it
+proved goes here once its addresses have become parameters.
+
+| probe | what it does |
+|---|---|
+| `watch.lua` | See what a running game does: write taps and logging. |
+| `audio.lua` | Log audio register writes for `tracker.py` (`A7800_POKEY=<base>` for cartridge POKEY). |
+| `a7800-frames.lua` | Frame markers for the `a7800` fork, alongside a debugger watchpoint log. |
+| `dumpdl.lua` | Find the display list list and dump RAM so `dlwalk.py` can decode it. |
+| `liveslots.lua` | Every ROM address the live display lists reference over a whole run, with the widest object seen -- confirms candidate sprite sheets on evidence. |
+| `dumpgfx.lua` | Dump a live game's graphics and MARIA register writes (`dumpgfx_regs.txt`) for `spritedump.py`. |
+| `rendersurvey.lua` | MARIA and CPU spend per frame; dumps RAM for `zonebill.py`. |
+| `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
+| `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
+| `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
+| `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |
+| `cyclebudget.lua` | Where a frame's CPU cycles go and how many MARIA took: executed cycles (with branch and page-crossing extras), the part inside the NMI, the TIA/RIOT slow-access penalty, `dma` as what is left of the frame, and executed cycles per named PC range. Compare `dma` with `dmabudget.py`'s model of the same display list. Measured first in the Karateka XE port; see its header for what it does not count. |
+| `dlitimes.lua` | On which raster line each display interrupt arrives, beside the display list list's zones (start line, height, DLI bit), and the lines at which MSTAT's VBLANK bit rises and falls. How the DLI timing and the 263-line frame were measured; MAME 0.264 has no `screen:vpos()`, so the beam position is worked out from `time_until_pos`. |
+| `addrorigin.lua` | Which ROM bytes are addresses: follows each value the CPU uses as a pointer (`(zp),Y`, `JMP (vector)`, RTS-as-jump, self-modified operands) back to the byte it was loaded from, through transfers, stores and pushes. Slow (a few seconds per emulated second). `tools/origins.py` turns the log into address tables and immediates; arithmetic keeps the accumulator's origin, so a pointer plus an offset traces to the pointer's byte. |
+| `rates.lua` | How often chosen instructions run, and the gap in frames between reads of a controller port. A game answers no faster than it asks. |
+| `pcprof.lua` | A sampling profiler with no timer: the program counter each time MARIA reads a display-list-list entry. `pcmap.py` names the routines. Visible frame only. |
+| `forcedl.lua` | Force a display-list entry, graphics and palettes into a running machine and screenshot it: the way to ask MARIA what a mode does. Used by selftest to check `mariapix.py`; needs a cartridge that already builds a display list, such as `tests/carts/synth128.a78`. |
+| `exectrace.lua` | Which code a run executes, with its bank, where each `JMP (ptr)` went and what each bank-switch store selected; `dyn.py` turns the log into annotations. Slow (a Lua tap on every ROM read: about 4 s per emulated second here) and checked on MAME 0.264 only. |
+| `romcoverage.lua` | Which cartridge bytes a run reads (feeds `modmap.py`). |
+| `handover.lua` | State at the moment a cartridge's reset code first runs (see `bios.md`). |
+| `threadprof.lua` | Profile a threaded-code (Forth) game while a person plays; read with `forth.py --profile`. Used by `replay.py`. |
+| `reclength.lua` | A recording's true length in frames. Run it first on any `.inp`. |
+| `ramsnap.lua` | Periodic snapshots of chosen RAM pages: events show as steps in one byte. |
+| `diffwrites.lua` | Which RAM addresses are written in a frame window. |
+| `pcwrites.lua` | Every RAM write in a window, tagged with the PC that did it -- finds computed-pointer targets. |
+| `whocalls.lua` | Log callers of an address via an execution breakpoint. |
+| `freeram.lua` | Which candidate bytes a game never writes, with a positive control. |
+| `inputreaders.lua` | Which routine reads INPT0-5 / SWCHA / SWCHB, and how often, per bank. |
+| `inputtrace.lua` | Log the raw joystick port and decoded stick direction. |
+| `peek.lua` | Read fixed addresses at chosen frames. |
+| `ramdump.lua` | Dump a RAM range to a file at machine stop. |
+| `snap.lua`, `snapat.lua`, `snaprange.lua`, `snapstop.lua`, `snapwhen.lua` | Screenshots at chosen frames, an exact frame, every Nth frame, machine stop, or when a RAM byte says so. |
+| `framecounter.lua` | Show the running frame number on screen. |
+| `spacelist.lua` | Print the CPU's address spaces and exit. |
+
+Recording sessions for these to replay is `tools/session.py`.

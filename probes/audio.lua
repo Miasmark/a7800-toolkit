@@ -24,6 +24,13 @@
 -- all hex. Frames where nothing changed are not logged; the tracker holds the
 -- last value, which is what the chip does too.
 --
+-- Env: A7800_AUDIO_LOG (output, default a7800-audio.log); A7800_AUDIO_FRAMES
+-- (stop after this many frames, default 3600); A7800_AUDIO_SKIP (do not log
+-- before this frame, default 0); A7800_POKEY (base address of a cartridge
+-- POKEY, see above); A7800_DRIVE=1 (tap buttons on a loop so a title screen
+-- gives way -- a blunt instrument; for real play, record a session and
+-- capture against -playback).
+--
 -- KEEP THE TAPS IN A GLOBAL. A tap stored in a local is collected as soon as
 -- the enclosing chunk finishes, and it stops firing without saying so -- which
 -- looks exactly like a game that writes no audio.

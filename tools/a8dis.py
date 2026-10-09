@@ -54,6 +54,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 import m6502
 import portscan
 
@@ -702,13 +703,13 @@ def main():
         description=__doc__.strip().split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image")
-    ap.add_argument("--at", help="disassemble from this address (hex)")
+    ap.add_argument("--at", type=address, help="disassemble from this address (hex)")
     ap.add_argument("--bank", default="0", help="bank live at $8000-$9FFF")
     ap.add_argument("--count", type=int, default=64)
     ap.add_argument("--scene", type=int, metavar="N",
                     help="run the loader for scene N (0-6) and trace the game "
                          "in the address space it builds")
-    ap.add_argument("--from", dest="entry", metavar="ADDR",
+    ap.add_argument("--from", dest="entry", metavar="ADDR", type=address,
                     help="extra entry point for the trace (hex)")
     ap.add_argument("--frame", action="store_true",
                     help="what the game does every vertical blank")
@@ -743,7 +744,7 @@ def main():
         entries = [(Scene.RESIDENT, 0x7760, "the game, after loading"),
                    (Scene.RESIDENT, 0x2F5A, "the overlay loader in RAM")]
     if args.entry:
-        entries.append((int(args.bank, 0), int(args.entry, 16), "asked for"))
+        entries.append((int(args.bank, 0), args.entry, "asked for"))
     t = walk(cart, entries)
 
     print("%s  (%d bytes of ROM%s)"
@@ -763,7 +764,7 @@ def main():
 
     if args.at:
         bank = int(args.bank, 0) if args.scene is None else Scene.RESIDENT
-        for ln in listing(cart, t, bank, int(args.at, 16), args.count):
+        for ln in listing(cart, t, bank, args.at, args.count):
             print(ln)
         print("")
         print("  lines marked * were decoded on request, not reached by the "

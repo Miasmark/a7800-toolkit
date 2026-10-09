@@ -14,8 +14,11 @@
   "_ram_vectors": "Pairs of RAM addresses [low, high] holding a jump vector the hardware or the game calls through. The display-interrupt slot is the classic one. Without this, handlers reached only through a RAM vector never get traced and stay as .byte forever.",
   "ram_vectors": [],
 
-  "_bankat": "Bank switches the tracer could not resolve, because the value written was not a tracked constant. Key is the location of the switch, value is the bank number it selects.",
+  "_bankat": "Assert which bank is in the $8000 window at a location, for a path the constant-tracker cannot follow (the value written was not a tracked constant). Key is the location, value is the bank number. To say what a bank-switch STORE selects, use banksw instead.",
   "bankat": {},
+
+  "_banksw": "Bank-switch STORES the tracer could not resolve, keyed by the location of the store. Value is what the store selects: the value written (as for a constant), a list of banks when the number comes from a table (the tracer forks and explores each), or \"keep\" for a store that restores the bank already selected (LDA cur_bank / STA $8000). The Bank switches listing from disasm names every site that needs one.",
+  "banksw": {},
 
   "_labels": "Names. Use them the moment you know what something is; renaming is free because regenerating is free.",
   "labels": {},
@@ -30,7 +33,7 @@
   "headers": {},
 
   "_blocks": "Byte ranges to force as data rather than code, and to describe. Each entry takes 'loc' plus either 'end' or 'len', and may carry a 'note'.",
-  "_blocks": [
+  "_blocks_gfx": [
     "A run that is data, not code. Add \"gfx\": true to draw each byte's bits",
     "beside it instead of listing hex -- reading sprite data as a picture is",
     "not the same work as reading it as numbers. \"wide\": true puts two bytes",

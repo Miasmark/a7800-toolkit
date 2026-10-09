@@ -15,8 +15,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from disasm import Cart, BANK_SIZE
-from asm import Assembler
+from disasm import Cart
+from asm import Assembler, AsmError
 
 
 def main():
@@ -30,30 +30,51 @@ def main():
     ap.add_argument("-o", "--out", default="build/rebuilt.a78")
     args = ap.parse_args()
 
+    if not os.path.isfile(args.rom):
+        sys.exit("build: no such reference cartridge: %s" % args.rom)
+    if not os.path.isdir(args.dir):
+        sys.exit("build: no such listing directory: %s" % args.dir)
     cart = Cart(args.rom, mapper=args.mapper, low=args.low)
-    banks = {}
+    # a bankset cartridge is two halves; MARIA's listings are m<space>.asm
+    mcart = cart.for_maria() if cart.bankset else None
+    banks, mbanks = {}, {}
     for name in sorted(os.listdir(args.dir)):
         if not name.endswith(".asm"):
             continue
         space = name[:-4]
-        b = cart.bank_of(space)
+        target, store = cart, banks
+        if mcart is not None and space.startswith("m"):
+            target, store, space = mcart, mbanks, space[1:]
+        b = target.bank_of(space)
         # prefer the listing whose .org matches where the bank really lives
-        if b in banks and space.startswith("b"):
+        if b in store and space.startswith("b"):
             continue
-        data = Assembler().assemble(
-            open(os.path.join(args.dir, name), encoding="utf-8").read().splitlines())
-        want = cart.size_of(space)
+        path = os.path.join(args.dir, name)
+        try:
+            data = Assembler().assemble(
+                open(path, encoding="utf-8").read().splitlines())
+        except AsmError as e:
+            sys.exit("build: %s: %s" % (path, e))
+        want = target.size_of(space)
         if len(data) != want:
-            print("  %s: %d bytes, expected %d" % (space, len(data), want))
+            print("  %s: %d bytes, expected %d" % (name[:-4], len(data), want))
             return 1
-        banks[b] = data
+        store[b] = data
 
     missing = [b for b in range(cart.nbanks) if b not in banks]
     if missing:
         print("missing listings for banks: %s" % missing)
         return 1
+    if mcart is not None:
+        missing = [b for b in range(mcart.nbanks) if b not in mbanks]
+        if missing:
+            print("missing listings for MARIA's banks: %s (run disasm.py again)" % missing)
+            return 1
 
     image = b"".join(banks[b] for b in range(cart.nbanks))
+    image = cart.to_file_order(image)         # an (OM) Activision file is stored in the other order
+    if mcart is not None:
+        image += b"".join(mbanks[b] for b in range(mcart.nbanks))
     out = (cart.header_bytes or b"") + image
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     open(args.out, "wb").write(out)

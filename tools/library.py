@@ -20,7 +20,6 @@ usual places next to this toolkit.
 """
 import argparse
 import fnmatch
-import io
 import os
 import sys
 import zipfile

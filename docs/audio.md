@@ -42,8 +42,11 @@ AUDC picks between plain dividers and polynomial counters (LFSRs).
 The four tone modes are the ones you can write a melody with. The frequency is
 
 ```
-clock / ((AUDF + 1) * divisor * 2)
+clock / ((AUDF + 1) * period)
 ```
+
+where the period, in divider ticks, is 2 for `$4`/`$5`, 6 for `$C`/`$D`, 31 for
+`$6`/`$A` and 93 for `$E`. The "÷" in the names is that whole period.
 
 with the clock 31,400 Hz on NTSC and 31,200 on PAL — so **the same song is in a
 different key on a PAL machine**, not merely slower.
@@ -54,6 +57,40 @@ output is then flat DC, and all that is left to hear is the volume moving,
 which sounds like tapping. That failure is quiet and easy to mistake for a
 data problem.
 
+## The TIA's waveforms, measured
+
+`python tools/mktone.py t.a78 --tia <audc> <audf>` builds a cartridge that
+sets one TIA channel and loops, so a recording (`mame a7800 -cart t.a78
+-wavwrite t.wav -video none -str 6`) holds only that setting. Every AUDC was
+measured that way at AUDF 3 and 9, the period found by autocorrelation and
+counted in divider ticks (31,399.5 / (AUDF + 1) per second):
+
+| AUDC | period (ticks) | shape |
+|---|---|---|
+| `$4`, `$5` | 2 | square |
+| `$C`, `$D` | 6 | square |
+| `$6`, `$A` | 31 | 18 high, 13 low (58%) |
+| `$E` | 93 | as `$6`, three times slower |
+| `$1` | 15 | 4-bit poly |
+| `$2`, `$3` | 465 | 4-bit poly, ÷31 |
+| `$7`, `$9` | 31 | 5-bit poly |
+| `$F` | 93 | 5-bit poly, ÷3 |
+| `$8` | 511 | 9-bit poly |
+| `$0`, `$B` | — | silent |
+
+**The model had `$C`, `$D`, `$6`, `$A`, `$E` and `$F` an octave low until
+2026-09-25.** It stepped the square wave every six ticks for "÷6" (a period
+of 12) and every 31 for "÷31" (62). The poly modes and `$4` were right. What
+that changed:
+
+- A hand-written song named its notes by the old model, so on those modes
+  the cartridge played an octave above what was written. Read with the
+  corrected model, the same names give the registers for the pitch written,
+  so the song now plays as written.
+- A capture (`tracker.py capture`) names each pitch from the registers the
+  game wrote, so on those modes the names came out an octave low. Captures
+  made before the fix should be made again from their logs.
+
 ## The TIA is not tuned to anything
 
 Its pitches fall where the divider puts them. `tracker.py notes` prints every
@@ -62,9 +99,9 @@ one with its distance from equal temperament:
 ```
 $ python tools/tracker.py notes
 AUDC $4  tone               491-15700 Hz   25 of 32 within 25 cents
-AUDC $C  tone, div 6         82- 2617 Hz   25 of 32 within 25 cents
-AUDC $6  tone, div 31        16-  506 Hz    7 of 32 within 25 cents
-AUDC $E  tone, div 93         5-  169 Hz    7 of 32 within 25 cents
+AUDC $C  tone, div 6        164- 5233 Hz   25 of 32 within 25 cents
+AUDC $6  tone, div 31        32- 1013 Hz   7 of 32 within 25 cents
+AUDC $E  tone, div 93        11-  338 Hz   7 of 32 within 25 cents
 ```
 
 Toward the top of a range the dividers are coarse and neighbouring semitones
@@ -830,6 +867,37 @@ The corollary is worth saying out loud: editing a shared pattern changes every
 song that names it. The pull tells you which, and the push repeats it in the
 write log.
 
+## Porting POKEY music to a TIA-only machine
+
+A POKEY game has four voices (eight with two chips) and the TIA has two, so
+`tools/pokey2tia.py` translates, with losses, and says what it lost:
+
+    A7800_POKEY=0x4000 mame a7800 -cart game.a78 -autoboot_script probes/audio.lua ...
+    python tools/pokey2tia.py a7800-audio.log -o port-sound --fit
+
+By default TIA channel 1 serves POKEY voices 1 and 2 and channel 2 serves voices
+3 and 4 (`--map groups --groups 1+2,3+4`), and where both voices of a group want
+the channel the louder wins (`--mash loudest`). That pairing is a guess about how a
+game lays out its voices; give `--groups` another if the bass and lead are
+elsewhere. On Triple Punch this sounded the cleanest of the settings tried.
+`--mash arp` keeps every voice by sharing the channel in turns, `--arp N` frames
+each: more lively, and a bit messier -- the fluttering is the price of the extra
+voice (`--arp 1` is the buzziest). `--map loudest` plays each frame's two
+loudest voices instead of fixed groups, with a held note keeping its channel.
+Only changes once a frame can be expressed.
+
+The TIA's pitches are few and fixed, so each tone lands on the nearest one (up to
+about a quarter tone away, more in the bass); `--offset CENTS` or `--fit` moves
+the whole tune to sit better. Anything not a pure tone becomes AUDC $8 noise at
+the nearest rate. The output is a tracker song (`tia.trk`), a 6502 player and
+data (`tia.asm`), and `tia.wav` beside `orig.wav` to compare by ear.
+
+Measured on Triple Punch's title music (thirty seconds, three voices at most):
+the loudest-two default dropped a voice in a third of the frames and was within a
+quarter tone for 64% of the tone frames (mean error 17 cents, `--fit` chose -5);
+`--mash arp` kept every voice and changed channel 554 times. Whether either
+*sounds* right is a listening judgement this has not made.
+
 ## Hearing what you pulled
 
 A pull carries the tables the notes lean on -- durations, waveforms and
@@ -1505,8 +1573,10 @@ player reads for waveforms, pitches and control values.
 
 **The format is what the bytes mean as music.** Which notes, in what order, for
 how long, how they are grouped into patterns and songs -- that is the player's
-own invention, and nothing in `formats/` describes Commando's. Finding a table
-tells you nothing about the structure that indexes it.
+own invention. (When this walkthrough was written nothing in `formats/`
+described Commando's; `formats/commando-pokey.json` has since been worked out
+and shows where it ends up.) Finding a table tells you nothing about the
+structure that indexes it.
 
 So: `audiotrace` gets you to the data. `songfmt` reads it, but only if someone
 has written the description. Between the two sits the actual reverse

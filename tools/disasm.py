@@ -46,6 +46,11 @@ class Cart(cart.Cart):
 
 
 # ------------------------------------------------------------------ analysis
+CLOBBER_ON_JSR = True        # registers are unknown after a JSR (False: the old behaviour)
+AUTO_RAM_VECTORS = True      # every JMP (RAM) operand is a vector worth following
+AUTO_DISPATCH = True         # `LDA tbl,X / STA zp / LDA tbl2,X / STA zp+1 / JMP (zp)` tables
+
+
 class Analyzer:
     def __init__(self, cart, cfg):
         self.cart = cart
@@ -61,6 +66,7 @@ class Analyzer:
         self.unresolved = []                 # sites we could not resolve
         self.forced_data = set()             # (space, addr) covered by a data block
         self.illegal_stops = set()           # traces abandoned on an illegal opcode
+        self.block_stops = set()             # traces that ran into a declared data block
         self._pending = []
 
     # -- helpers -------------------------------------------------------------
@@ -134,6 +140,8 @@ class Analyzer:
                 seen.add(key)
                 loc = (space, addr)
                 if loc in self.forced_data or not self.cart.in_space(space, addr):
+                    if loc in self.forced_data:
+                        self.block_stops.add(loc)
                     break
                 # manual override: assert which bank is really in the $8000
                 # window here, for paths the constant-tracker cannot follow
@@ -249,6 +257,10 @@ class Analyzer:
                 if mn == "JSR":
                     tspace = self.target_space(space, operand, bank)
                     self.add_entry(tspace, operand, bank, "sub", loc)
+                    # the subroutine may leave anything in A, X and Y: a bank number
+                    # loaded before the call is not known to be the one stored after it
+                    if CLOBBER_ON_JSR:
+                        a = x = y = None
                 elif mn == "JMP" and mode == "abs":
                     tspace = self.target_space(space, operand, bank)
                     self.add_entry(tspace, operand, bank, "sub", loc, (a, x, y))
@@ -321,10 +333,104 @@ class Analyzer:
                 for reg, clobbers in self._VEC_CLOBBERS.items():
                     if mn in clobbers:
                         last_imm[reg] = None
-            for la, lv in los:
-                for ha, hv in his:
-                    if abs(ha - la) <= window:
-                        found.append((lv | (hv << 8), (space, la)))
+            # pair low-byte and high-byte stores one to one, nearest first (ties by address):
+            # every low byte matched with every high byte within the window invents handlers
+            # (the low byte of one, the high byte of the next), and a run of installs one
+            # after another has every store equidistant from two others
+            cand = sorted((abs(ha - la), la, ha, lv, hv)
+                          for la, lv in los for ha, hv in his if abs(ha - la) <= window)
+            used_lo, used_hi = set(), set()
+            for _d, la, ha, lv, hv in cand:
+                if la in used_lo or ha in used_hi:
+                    continue
+                used_lo.add(la)
+                used_hi.add(ha)
+                found.append((lv | (hv << 8), (space, la)))
+        return found
+
+    # -- jump tables ---------------------------------------------------------
+    def _plausible(self, space, addr, n=4):
+        """Whether `n` documented instructions in a row start at `addr`, none of them BRK."""
+        try:
+            for _ in range(n):
+                op = self.cart.byte(space, addr)
+                mn, mode, illegal = m6502.OPCODES[op]
+                if illegal or mn in ("BRK", "JAM"):
+                    return False
+                addr += 1 + m6502.MODES[mode]
+        except Exception:                                    # noqa: BLE001
+            return False
+        return True
+
+    def _before(self, space, at):
+        """The traced instruction that ends exactly at `at`, or None."""
+        for back in (1, 2, 3):
+            p = (space, at - back)
+            ins = self.insn.get(p)
+            if ins and at - back + ins[3] == at:
+                return p
+        return None
+
+    def scan_dispatch(self, limit=96):
+        """Targets of table-driven `JMP (zp)` dispatch.
+
+        The shape is a pointer in zero page loaded from a table and jumped through:
+
+            LDA tbl_lo,X ; STA zp ; LDA tbl_hi,X ; STA zp+1 ; JMP (zp)
+
+        (the table may also be interleaved, `tbl` and `tbl+1`). The table is read from the
+        ROM, entry by entry, for as long as each entry points at plausible code (documented
+        opcodes, no BRK) in the ROM. Its extent is not known from the code, so it ends at the
+        first entry that is not plausible. Returns [(space, target, site)]."""
+        found = []
+        for (space, addr), (mn, mode, operand, n) in sorted(self.insn.items()):
+            if not (mn == "JMP" and mode == "ind" and operand is not None and operand < 0x100):
+                continue
+            ptr = operand
+            loaded = {}                             # zero-page address -> table it was loaded from
+            cur, steps = addr, 0
+            while steps < 16:
+                prev = self._before(space, cur)
+                if prev is None:
+                    break
+                pmn, pmode, pop, _pn = self.insn[prev]
+                if pmn in ("RTS", "RTI", "JMP", "JSR"):
+                    break
+                if pmn == "STA" and pmode == "zp" and pop in (ptr, ptr + 1):
+                    q, s2 = self._before(space, prev[1]), 0
+                    while q is not None and s2 < 6:
+                        qmn, qmode, qop, _qn = self.insn[q]
+                        if qmn == "LDA" and qmode in ("abx", "aby") and qop is not None:
+                            loaded[pop] = qop
+                            break
+                        q, s2 = self._before(space, q[1]), s2 + 1
+                cur, steps = prev[1], steps + 1
+            lo_src, hi_src = loaded.get(ptr), loaded.get(ptr + 1)
+            if lo_src is None or hi_src is None:
+                continue
+            lsp = self.target_space(space, lo_src, None)
+            hsp = self.target_space(space, hi_src, None)
+            if not lsp or not hsp:
+                continue
+            interleaved = hi_src == lo_src + 1
+            for i in range(limit):
+                try:
+                    if interleaved:
+                        lo = self.cart.byte(lsp, lo_src + 2 * i)
+                        hi = self.cart.byte(lsp, lo_src + 2 * i + 1)
+                    else:
+                        if (lo_src < hi_src <= lo_src + i) or (hi_src < lo_src <= hi_src + i):
+                            break                  # ran into the other half of a split table
+                        lo = self.cart.byte(lsp, lo_src + i)
+                        hi = self.cart.byte(hsp, hi_src + i)
+                except Exception:                                # noqa: BLE001
+                    break
+                tgt = lo | (hi << 8)
+                tspace = self.target_space(space, tgt, None)
+                if tgt < 0x4000 or not tspace or not self.cart.in_space(tspace, tgt) \
+                        or not self._plausible(tspace, tgt):
+                    break
+                found.append((tspace, tgt, (space, addr)))
         return found
 
     # -- naming --------------------------------------------------------------
@@ -367,10 +473,10 @@ def parse_loc(s):
 
 # -------------------------------------------------------------------- config
 class Config:
-    def __init__(self, path=None):
-        d = {}
+    def __init__(self, path=None, data=None):
+        d = dict(data) if data else {}
         if path and os.path.exists(path):
-            with open(path) as f:
+            with open(path, encoding="utf-8-sig") as f:        # a Notepad-saved file has a BOM
                 d = json.load(f)
         self.entries = [parse_loc(s) for s in d.get("entries", [])]
         self.labels = d.get("labels", {})
@@ -497,7 +603,7 @@ class Emitter:
         """Where this space begins in the image file, header included."""
         c = self.cart
         head = 128 if c.header_bytes else 0
-        return head + c._offset(space, c.base_of(space))
+        return head + getattr(self, "shift", 0) + c.file_offset(space, c.base_of(space))
 
     def emit_space(self, space, out):
         cart, an, cfg = self.cart, self.an, self.cfg
@@ -519,6 +625,9 @@ class Emitter:
                  % (self._file_start(space), self._file_start(space)
                     + cart.size_of(space) - 1))
         w.append(";   %d instructions reached by the tracer" % ncode)
+        if getattr(self, "shift", 0):
+            w.append(";   MARIA's half of a bankset cartridge: what MARIA fetches, which the CPU")
+            w.append(";   never reads. Listed as data so the image rebuilds exactly.")
         if space in cfg.notes:
             for line in cfg.notes[space].splitlines():
                 w.append(";   " + line)
@@ -691,6 +800,9 @@ class Emitter:
                 nm = self.ref_name((space, addr + i), v)
                 w.append("    .word %-20s ; %04X: %02X %02X"
                          % (nm, addr + i, data[i], data[i + 1]))
+            if len(data) % 2:               # an odd length leaves one byte over
+                w.append("    .byte $%02X                      ; %04X: odd byte left by the "
+                         "words block" % (data[-1], addr + len(data) - 1))
         else:
             # a label can land inside a data block (something references the
             # middle of a table); break the block so the label still gets a
@@ -705,6 +817,96 @@ class Emitter:
 
 
 # ----------------------------------------------------------------------- main
+def analyse(cart, cfg):
+    """Trace a cartridge from its vectors and the config's entries.
+
+    Returns (analyzer, gfx, gfx_wide, vectors) where vectors is (nmi, reset, irq).
+    This is the whole of the analysis `main()` does before it writes anything, so
+    other tools (the corpus runner, the workbench) can ask "what does the static
+    tracer reach?" without writing a listing. Raises UnknownSpace as `main()` did.
+    """
+    an = Analyzer(cart, cfg)
+
+    gfx, gfx_wide = set(), set()
+    for b in cfg.blocks:
+        s, a = parse_loc(b["loc"])
+        e = parse_loc(b["end"])[1] if "end" in b else a + b.get("len", 1)
+        for x in range(a, e):
+            an.forced_data.add((s, x))
+        # "gfx": true draws the block's bits beside it instead of listing
+        # hex. "wide": true puts two bytes on a line, which is what a
+        # 16-pixel 7800 sprite is; the 2600 only ever needed one.
+        if b.get("gfx"):
+            gfx.add((s, a))
+            for x in range(a, e):
+                gfx.add((s, x))
+            if b.get("wide"):
+                gfx_wide.add((s, a))
+
+    # vectors live in whatever space owns $FFFA
+    v = cart.vectors()
+    nmi, res, irq = v["NMI"], v["RESET"], v["IRQ"]
+
+    entries = []
+    for name, v in (("RESET", res), ("NMI", nmi), ("IRQ", irq)):
+        sp = cart.space_of(v, None)
+        if sp:
+            entries.append((sp, v, None))
+            an.labels[(sp, v)] = name + "_" + ("%04X" % v)
+    entries += [(s, a, None) for (s, a) in cfg.entries]
+
+    an.run(entries)
+
+    # Handlers reached only through a RAM vector are invisible to a plain
+    # trace: nothing in ROM names them. Re-trace through each declared vector
+    # until no new handler turns up. "ram_vectors" in the config is a list of
+    # [lo, hi] pairs; MARIA's display-interrupt slot is the usual one, but it
+    # is per-game and there is no way to guess it.
+    dli = {}
+    pairs = list(cfg.ram_vectors)
+    if AUTO_RAM_VECTORS:
+        # a `JMP (vec)` through RAM names the vector itself: the pair of bytes the game
+        # fills with a handler address. Following the immediate-load/store pairs that fill
+        # it needs no declaration.
+        seen_v = {tuple(p) for p in pairs}
+        for (_sp, _a), (mn, mode, operand, _n) in sorted(an.insn.items()):
+            if mn == "JMP" and mode == "ind" and operand is not None and operand < 0x4000:
+                if (operand, operand + 1) not in seen_v:
+                    seen_v.add((operand, operand + 1))
+                    pairs.append((operand, operand + 1))
+    for lo_a, hi_a in pairs:
+      for _ in range(8):
+        new = []
+        for tgt, site in an.scan_ram_vectors(lo_a, hi_a):
+            sp = cart.space_of(tgt, None)
+            if sp and (sp, tgt) not in dli:
+                dli[(sp, tgt)] = site
+                new.append((sp, tgt, None))
+        if not new:
+            break
+        for sp, tgt, _b in new:
+            an.mark((sp, tgt), "sub")
+        an.run(new)
+    for loc in sorted(dli):
+        an.labels.setdefault(loc, "VEC_%04X" % loc[1])
+
+    if AUTO_DISPATCH:
+        for _ in range(4):
+            new = sorted({(sp, tgt, None) for sp, tgt, _site in an.scan_dispatch()
+                          if (sp, tgt) not in an.code})
+            if not new:
+                break
+            for sp, tgt, _b in new:
+                an.mark((sp, tgt), "sub")
+            an.run(new)
+    an.name_all()
+    for name, v in (("NMI", nmi), ("RESET", res), ("IRQ", irq)):
+        sp = cart.space_of(v, None)
+        if sp:
+            an.labels[(sp, v)] = cfg.labels.get(fmt_loc((sp, v)), name + "_HANDLER")
+    return an, gfx, gfx_wide, (nmi, res, irq)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rom")
@@ -714,6 +916,8 @@ def main():
                     help="what sits at $4000-$7FFF, when the header is wrong")
     ap.add_argument("--mapper", choices=["linear", "supergame", "absolute"],
                     help="override the mapper the header declares")
+    ap.add_argument("--ignore-lint", action="store_true",
+                    help="disassemble even if annotations.py finds errors in the config")
     ap.add_argument("--cycles", action="store_true",
                     help="note each instruction's cycle count")
     ap.add_argument("--check-gaps", action="store_true",
@@ -745,82 +949,66 @@ def main():
     except (cart_module.UnknownMapper, cart_module.UnknownSpace) as e:
         sys.stderr.write("%s\n" % e)
         return 2
+    if args.config and not os.path.exists(args.config):
+        # silently ignoring a missing file gives a listing with none of the annotations
+        # the user thinks it has, and a plausible coverage number
+        sys.stderr.write("disasm: no such annotations file: %s (init.py writes one)\n"
+                         % args.config)
+        return 2
     cfg = Config(args.config)
-    an = Analyzer(cart, cfg)
-
-    gfx, gfx_wide = set(), set()
-    for b in cfg.blocks:
-        s, a = parse_loc(b["loc"])
-        e = parse_loc(b["end"])[1] if "end" in b else a + b.get("len", 1)
-        for x in range(a, e):
-            an.forced_data.add((s, x))
-        # "gfx": true draws the block's bits beside it instead of listing
-        # hex. "wide": true puts two bytes on a line, which is what a
-        # 16-pixel 7800 sprite is; the 2600 only ever needed one.
-        if b.get("gfx"):
-            gfx.add((s, a))
-            for x in range(a, e):
-                gfx.add((s, x))
-            if b.get("wide"):
-                gfx_wide.add((s, a))
-
-    # vectors live in whatever space owns $FFFA
-    v = cart.vectors()
-    nmi, res, irq = v["NMI"], v["RESET"], v["IRQ"]
-
-    entries = []
-    for name, v in (("RESET", res), ("NMI", nmi), ("IRQ", irq)):
-        sp = cart.space_of(v, None)
-        if sp:
-            entries.append((sp, v, None))
-            an.labels[(sp, v)] = name + "_" + ("%04X" % v)
-    entries += [(s, a, None) for (s, a) in cfg.entries]
-
+    if args.config and os.path.exists(args.config):
+        # a key this reads with .get() and does not know is dropped silently, so
+        # a typo looks like an empty file; say so instead of staying quiet
+        try:
+            import annotations
+            report, _doc = annotations.lint(
+                open(args.config, encoding="utf-8-sig").read(), args.config)
+            if report.errors:
+                sys.stderr.write(
+                    "%s has %d problem%s (%s). Run: python tools/annotations.py "
+                    "\"%s\"\n" % (args.config, len(report.errors),
+                                   "" if len(report.errors) == 1 else "s",
+                                   report.errors[0][:90], args.config))
+                if not args.ignore_lint:
+                    sys.stderr.write("Not disassembling: an annotation the tracer would "
+                                     "misread gives a plausible, wrong listing. Fix it, or "
+                                     "pass --ignore-lint.\n")
+                    return 2
+        except Exception:                                    # noqa: BLE001
+            pass                    # never let the check get in the way of the work
     try:
-        an.run(entries)
+        an, gfx, gfx_wide, (nmi, res, irq) = analyse(cart, cfg)
     except cart_module.UnknownSpace as e:
         sys.stderr.write("%s\n" % e)
         return 2
-
-    # Handlers reached only through a RAM vector are invisible to a plain
-    # trace: nothing in ROM names them. Re-trace through each declared vector
-    # until no new handler turns up. "ram_vectors" in the config is a list of
-    # [lo, hi] pairs; MARIA's display-interrupt slot is the usual one, but it
-    # is per-game and there is no way to guess it.
-    dli = {}
-    for lo_a, hi_a in cfg.ram_vectors:
-      for _ in range(8):
-        new = []
-        for tgt, site in an.scan_ram_vectors(lo_a, hi_a):
-            sp = cart.space_of(tgt, None)
-            if sp and (sp, tgt) not in dli:
-                dli[(sp, tgt)] = site
-                new.append((sp, tgt, None))
-        if not new:
-            break
-        for sp, tgt, _b in new:
-            an.mark((sp, tgt), "sub")
-        an.run(new)
-    for loc in sorted(dli):
-        an.labels.setdefault(loc, "VEC_%04X" % loc[1])
-
-    an.name_all()
-    for name, v in (("NMI", nmi), ("RESET", res), ("IRQ", irq)):
-        sp = cart.space_of(v, None)
-        if sp:
-            an.labels[(sp, v)] = cfg.labels.get(fmt_loc((sp, v)), name + "_HANDLER")
 
     os.makedirs(args.outdir, exist_ok=True)
     em = Emitter(cart, an, cfg, cycles=args.cycles)
     em.gfx, em.gfx_wide = gfx, gfx_wide
     spaces = cart.spaces()
+    # every stretch of the file gets a listing, traced or not, so that the image
+    # rebuilds and verify.py has something to say about all of it
+    listed = set(cart_module.canonical_spaces(cart))
     for space in spaces:
         n = sum(1 for (s, a) in an.code if s == space)
-        if space.startswith("b") and n == 0 and space not in cfg.notes:
+        if n == 0 and space not in listed and space not in cfg.notes:
             continue
         em.emit_space(space, os.path.join(args.outdir, "%s.asm" % space))
+    if cart.bankset:
+        # MARIA's half: nothing is traced in it, but the rebuilt image needs it
+        mc = cart.for_maria()
+        mcfg = Config()
+        mem = Emitter(mc, Analyzer(mc, mcfg), mcfg)
+        mem.shift = len(cart.rom)
+        for space in cart_module.canonical_spaces(mc):
+            mem.emit_space(space, os.path.join(args.outdir, "m%s.asm" % space))
 
     # ---- report ----
+    if an.block_stops:
+        print("note: %d trace%s ran into a declared data block and stopped there (first: %s); "
+              "if that block is really code, the code after it is not listed"
+              % (len(an.block_stops), "" if len(an.block_stops) == 1 else "s",
+                 ", ".join(fmt_loc(l) for l in sorted(an.block_stops)[:3])))
     print("vectors: NMI=$%04X RESET=$%04X IRQ=$%04X" % (nmi, res, irq))
     print("\ncoverage (bytes reached as code, per 16K space):")
     tot = 0
@@ -1083,4 +1271,4 @@ def coverage_status(an, cart, spaces):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -58,5 +58,17 @@ emu.register_frame_done(function()
     m:write(string.format("dpph=%02X dppl=%02X ctrl=%02X\n", dpph, dppl, ctrl)); m:close()
     M.video:snapshot()
   end
-  if f >= stop then log:close(); M:exit() end
+  if f >= stop then
+    log:close()
+    -- what the CPU sees at the vectors, so a caller can tell whether the CARTRIDGE is what
+    -- is running: a cartridge the BIOS rejects leaves the BIOS running its own game, with a
+    -- perfectly live display list (tools/mamecheck.py reads this)
+    local v = io.open(out .. "-vectors.txt", "w")
+    local t = {}
+    for a = 0xFFFA, 0xFFFF do t[#t + 1] = string.format("%02X", mem:read_u8(a)) end
+    v:write("vectors " .. table.concat(t, " ") .. "\n")
+    v:write(string.format("pc %04X\n", M.devices[":maincpu"].state["PC"].value))
+    v:close()
+    M:exit()
+  end
 end)

@@ -29,10 +29,26 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from addr import address
+except ImportError:                    # this tool copied on its own: the same rule
+    import argparse as _argparse
 
-# In a five-byte header, bit 6 of byte 1 is the write-mode bit and bit 5 marks
+    def address(text):
+        s = str(text).strip()
+        try:
+            return int(s[1:] if s[:1] == "$" else s[2:] if s[:2].lower() == "0x" else s, 16)
+        except ValueError:
+            raise _argparse.ArgumentTypeError(
+                "%r is not an address: write $C000, 0xC000 or C000" % text)
+
+# In a five-byte header, bit 7 of byte 1 is the write-mode bit and bit 5 marks
 # indirect (character) mode. Write mode does not name a graphics mode on its
 # own: it combines with CTRL's read-mode bits to pick one of 160A/160B/320A-D.
+# (Measured on MAME 0.264 with probes/forcedl.lua: a header byte of $40 draws
+# as plain 160A and $C0 as 160B, so the bit is 7. This file used to say 6.
+# Every header seen in real games also has bit 6 set; what bit 6 means, and why
+# a bare $80 is not read as a five-byte header, is not established.)
 WRITE_MODE = {0: "write mode 0", 1: "write mode 1"}
 
 
@@ -93,7 +109,7 @@ def decode_entry(src, addr):
             "width": width,
             "hpos": b4,
             "indirect": bool(b1 & 0x20),
-            "write_mode": (b1 >> 6) & 1,
+            "write_mode": (b1 >> 7) & 1,
             "raw": [b0, b1, b2, b3, b4],
         }, 5
 
@@ -226,10 +242,10 @@ def main():
     ap.add_argument("rom", nargs="?")
     ap.add_argument("--space", help="which cartridge space to read from")
     ap.add_argument("--raw", help="read a flat binary (a RAM dump) instead")
-    ap.add_argument("--at", type=lambda x: int(x, 0), default=0x1800,
+    ap.add_argument("--at", type=address, default=0x1800,
                     help="CPU address the --raw dump starts at")
-    ap.add_argument("--dl", type=lambda x: int(x, 0), help="a display list")
-    ap.add_argument("--dll", type=lambda x: int(x, 0), help="a display list list")
+    ap.add_argument("--dl", type=address, help="a display list")
+    ap.add_argument("--dll", type=address, help="a display list list")
     ap.add_argument("--zones", type=int, default=25, help="zones in the DLL")
     ap.add_argument("--follow", action="store_true",
                     help="also decode each display list the DLL points at")

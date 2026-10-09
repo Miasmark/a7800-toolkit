@@ -118,7 +118,6 @@ def pull(cart, fmt):
     tsp, taddr = parse_loc(songs_cfg["table"])
     stride = songs_cfg["stride"]
     banks = {int(k): v for k, v in songs_cfg.get("banks", {}).items()}
-    tk, pat_cfg, note_cfg = fmt["track"], fmt["pattern"], fmt["note"]
 
     durations = None
     if "durations" in fmt:
@@ -802,7 +801,7 @@ def apply_writes(raw, cart, writes):
     out = bytearray(raw)
     head = 128 if cart.header_bytes else 0
     for space, addr, data, _what in writes:
-        off = head + cart._offset(space, addr)
+        off = head + cart.file_offset(space, addr)
         out[off:off + len(data)] = data
     return bytes(out)
 
@@ -812,7 +811,7 @@ def declared_spans(cart, songs):
     head = 128 if cart.header_bytes else 0
     owned = set()
     for space, addr, n, _what in songs.get("spans", []):
-        base = head + cart._offset(space, addr)
+        base = head + cart.file_offset(space, addr)
         owned.update(range(base, base + n))
     return owned
 

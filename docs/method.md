@@ -13,11 +13,13 @@ the ROM it came from. If the comparison fails, the listing is wrong -- not
 "close", wrong -- and no annotation on top of it is worth anything.
 
 ```
+python tools/init.py game.a78 -o annotations.json     # once
 python tools/disasm.py game.a78 -c annotations.json -o src
 python tools/verify.py game.a78 -d src
+python tools/build.py game.a78 -d src                 # rebuilds the whole image
 ```
 
-Do this from the first hour, not once at the end. It costs seconds and it means
+(The workbench's **Check my work** job runs all four after every change.) Do this from the first hour, not once at the end. It costs seconds and it means
 that when you later mark a byte range as data, or rename a label, or split a
 table, you find out immediately whether you broke the reconstruction. Everything
 else in this document is a way of adding *meaning* to a listing that is already
@@ -44,6 +46,32 @@ then a scan whose every result has a button that opens it in the right editor
 with the space, base and format already filled in. That last part is what is
 tedious by hand and silent when you get it wrong.
 
+**Census** (Run, or `tools/census.py`) answers "what in this ROM and RAM does nothing, as far as anyone can tell?":
+it sorts every ROM byte by what the simulated run did with it and lists the dark areas -- the bytes nothing
+ran, read or drew and the tracer does not reach -- with a guess at what each is. Against what the simulator
+observed in four cartridges, the code-like guess labelled all of the executed runs of 12 bytes or more as
+code and 3% of what MARIA drew; it is a pointer, not a verdict. Runs add to each other, so the dark shrinks
+as you play. Exploring drives the stick, then also the console switches (Select, Reset, Pause, both
+difficulty switches) and the second buttons, as two runs that are unioned: switches open code behind
+them (Mat Mania went from 244 to 2133 instructions in 900 frames) but can also change where a game goes,
+so neither run contains the other. `--force` goes further and takes the untaken side of each branch in a
+sandbox (`tools/branchforce.py`); what that finds is marked as its own class, because a forced path may
+be one the game never reaches.
+After a census job the Results page lists what it suggests for the annotations -- entry points for dark
+code-like areas and for code branch forcing found, text and address-table blocks -- each with a tick box;
+"add ticked to annotations" writes them into `annotations.json` (once each) and the lint runs on the result.
+
+It is also where the later steps live. **Run** starts the toolkit's other tools on
+the cartridge -- the first-look report, the disassembly, *observe code* and *find
+address tables* (which run the game and write what they saw into `annotations.json`),
+the annotation checks, music capture with optional POKEY-to-TIA conversion, a
+sampling profile, a cycle budget, display-interrupt timing, and any probe with its
+settings -- and **Results** shows each job's command line, its output as it runs, and
+the files it wrote, with pictures and audio in place. **Listing** is the disassembly,
+searchable by name or address, and **Annotations** edits `annotations.json` and shows
+the checks on every save, so the loop (disassemble, read, annotate, run again) stays
+in one window. Everything it writes goes to `<rom>-workbench` beside the cartridge.
+
 It launches each editor as its own process on its own port, and stops them when
 it stops -- a child left holding a port looks exactly like a stale server on the
 next run, which is a genuinely confusing way to lose an afternoon.
@@ -56,8 +84,15 @@ disassembly to be right.
 ### 1. Survey before disassembling
 
 ```
+python tools/firstlook.py game.a78          # one report: what it is, what it holds, what it does
 python tools/survey.py game.a78 --strings
 ```
+
+`firstlook.py` runs the cartridge headless and collects music, screenshots, the
+live artwork and a trace of the code that ran, and writes a starter
+`annotations.json` with what the run observed (banks a computed switch chose,
+where an indirect jump went). Treat that file as observed, not proven: it is what
+one run did. Everything below still applies to it.
 
 You want four things before you write a single annotation: how the cart is
 banked, which banks are code and which are graphics, whether the text is

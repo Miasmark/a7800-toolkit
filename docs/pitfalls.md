@@ -855,6 +855,13 @@ negatives:
   interrupts by tapping the handler's entry address reports zero, which reads
   exactly like "no interrupts are being raised". Write taps on RAM and on
   MARIA registers are unaffected.
+  *Not true everywhere.* Re-checked on MAME 0.264, with the open BIOS: read taps on
+  opcode addresses in both the fixed bank and the switched `$8000` window counted
+  exactly what the debugger's trace did (an NMI handler 1,332 of 1,332 entries; a
+  window routine 23,976 of 23,976), and a once-a-frame instruction counted 238 in
+  240 frames. So the failure above belongs to a particular MAME build, mapper or
+  the a7800 fork. Do not trust either claim: tap one address whose executions you
+  can count from a trace, and compare, before building on it.
 * **A tap can stop firing when the driver remaps.** One installed over
   `$0000-$03FF` here went quiet at frame 81, and a trace that simply stops
   looks like a machine that has gone idle. It happened twice, at different
@@ -1033,3 +1040,102 @@ finished projects.
 exist (something increments this, something clears that) and check the listing
 actually contains each one. And treat a gap adjacent to an unconditional jump
 as suspect by default -- that is precisely where a tracer is blind.
+
+
+## An 8-bit HPOS wraps, so "large x" can be correct and "small x" can be the bug
+
+MARIA's horizontal position is eight bits against a 160-wide line, and it wraps
+at 255/0. That makes an x in `$A0..$FF` draw *correctly* as a negative
+position: the head lands past column 159 and is invisible, and only the part
+that runs past 255 comes back at column 0, which is where an object positioned
+off the left edge belongs. Code that scrolls objects leftward relies on this
+constantly.
+
+The failure is the object positioned so far left that its byte drops back into
+`$00..$9F`. An x of -117 is the byte `$8B` = 139, an ordinary on-screen column,
+and MARIA draws it there as a detached slab at the right-hand edge.
+
+**A clamp on x therefore fails**: it eats visible scenery on ordinary frames,
+because on ordinary frames the large values are the correct ones. The repairable
+case is the second one only. Park the object at a position whose span ends at
+255 -- an object N pixels wide at `256 - N` ends exactly at the boundary and
+wraps nothing -- and leave the legitimate wrap alone. Found in Pole Position
+II's road bands, where the symptom was a second run of road-coloured pixels on
+a scanline (count pixel runs per scanline to detect it).
+
+## A display-list probe that reads once a frame sees boot garbage and torn lists
+
+Walking the live display list from a once-per-frame Lua callback has two
+failure modes, and both produce confident nonsense.
+
+**Boot takes longer to settle than a round number suggests.** In Dig Dug DPPH
+sat at a bogus `$1F` (pointing at `$1F84`, the BIOS's list) from frame 16 until
+frame 165. A 120-frame grace period still produced garbage; a 200-frame gate
+did not. Read the per-frame history of DPPH/DPPL instead of guessing, and note
+that a genuine double buffer alternates DPPL every frame without being a bug.
+
+**The callback races the CPU.** Even after settling, a third of the references
+landed below the cartridge's ROM, because the callback read an entry the CPU
+was part-way through writing. They recurred across the recording, so it was not
+boot. Filter rather than trust: an address that cannot be real is disqualifying
+whatever produced it. `probes/liveslots.lua` does both (`A7800_SETTLE`,
+`A7800_ROMLO`).
+
+## Bank switching mid-zone pulls the graphics out from under MARIA
+
+On a bank-switched cartridge, MARIA fetches graphics through the same window
+the CPU switches. Paging a bank in while a zone is being drawn changes what
+MARIA reads for the rest of that zone. Midnight Mutants avoids it by spinning
+in foreground code on a flag a display-list interrupt sets (`BIT flag / BEQ`),
+and writing the bank register only once the raster has passed; it also keeps
+the current bank in RAM so interrupt handlers can restore it. A routine that
+switches banks without that wait works in a test and tears the picture in play.
+
+
+## A batch file's `%~dp0` ends in a backslash, and `"...\"` swallows the quote
+
+`%~dp0` is the folder the batch file lives in, *with a trailing backslash*. On a
+Windows command line a backslash before a double quote escapes the quote, so
+
+    mame.exe -input_directory "%~dp0" -record run-01.inp
+
+reaches the program as one argument that runs on to the end of the line, and
+every option after it is silently eaten. MAME did not complain; it simply never
+saw `-record`, and the recorder that was meant to save a session saved nothing.
+Three game repos' launchers carry the comment describing exactly this.
+
+Build paths without a trailing backslash (`%HERE:~0,-1%` strips it) or put a
+file name after the folder before the closing quote. `tools/session.py` avoids
+the whole class by passing arguments as a list rather than a command line, so
+the `.bat` files here only ever hand it a single quoted path. Two neighbours of
+the same trap: `wmic os get localdatetime`, once the usual locale-independent
+timestamp, is removed from recent Windows 11 -- stamp names from Python
+instead -- and a hard-coded `%LOCALAPPDATA%\Programs\MAME` or `..\bios` works
+on one machine only; let `A7800_MAME` and `A7800_ROMPATH` decide.
+
+
+## The write-mode bit was in the wrong place, and the way to find out was to ask MARIA
+
+`dlwalk.py` (and `docs/hardware.md`) took the write mode of a five-byte
+display-list header from bit 6 of its second byte. A cartridge using `$60`
+headers (character mode, plain 160A pixels) was therefore reported as "write
+mode 1", and the first tool built on that refused to draw its artwork -- then,
+when forced to, drew a tile sheet that looked like noise. Both were wrong in a
+way that read as a finding: "this is a pixel format the toolkit does not decode".
+
+It was an unsupported claim about hardware, and the hardware was in reach.
+`probes/forcedl.lua` writes a chosen display-list entry, graphics and palettes into
+a running machine and screenshots it. Header byte `$40` drew exactly the pixels
+160A predicts; `$C0` drew the 160B pattern, each pixel from the palette its own bits
+named. So the write mode is bit 7. What bit 6 does, and why a bare `$80` is read
+as a four-byte entry (palette 4, width 32) rather than a five-byte one, is not
+established -- say so rather than inventing a rule.
+
+Two things went wrong that are worth naming. The character set was rendered as
+a 256-glyph grid, which for a tile-based game is a sheet of fragments that looks
+like corruption; the check that mattered was rebuilding the *screen* from the
+display list and comparing it with a screenshot, where the title read at once. And
+CTRL bit 4 had been assumed one-byte characters, which halves every glyph's
+width; the same rebuild showed it. **Before reporting that a format is
+unsupported, reproduce what the machine draws with the format you assumed, and
+look.**

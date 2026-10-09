@@ -18,7 +18,9 @@ HOW THEY WERE MEASURED
     count is the DMA cost. The loop was calibrated by running it again with
     extra NOPs: the fitted cost came out at 14.020 cycles per iteration
     against 14.016 counted by hand, and the measured window at exactly 241.0
-    scanlines of 114.00 cycles.
+    scanlines of 114.00 cycles. (A later direct count found the frame is 263 lines of
+    113.5 -- 29,850.5 cycles -- which that calibration could not tell from 241 of 114
+    over its window; the costs below are differences and are not affected.)
 
 HOLEY DMA, and what it is worth
     A zone can tell MARIA to suppress graphics fetches from part of memory, so
@@ -83,8 +85,11 @@ DLI_COST  = 16.6     # one display interrupt: MARIA's signal plus the 6502's
                      # zones and on 12, which agreed at 16.9 and 16.3.
 
 REGIONS = {                      # lines/frame, CPU Hz, frames/sec
-    "ntsc": (262, 1789772.5, 59.9224),
-    "pal":  (312, 1773447.0, 49.8607),
+    # 263 x 113.5 = 29,850.5 cycles: measured on MAME (a cartridge that never turns
+    # MARIA on executes 29,850 cycles a frame) and the 7800 Software Guide's figure.
+    # PAL (313 lines, from the Guide) has not been measured.
+    "ntsc": (263, 1789772.5, 59.9579),
+    "pal":  (313, 1773447.0, 49.9204),
 }
 MAX_ZONE_LINES = 16              # the DLL offset field is 4 bits: lines-1 <= 15
 

@@ -39,6 +39,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from addr import address  # noqa: E402
 import m6502
 
 # Atari 8-bit hardware, by address. Read and write meanings differ on these
@@ -224,14 +225,14 @@ def main():
         description=__doc__.strip().split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image")
-    ap.add_argument("--base", default="0",
+    ap.add_argument("--base", type=address, default=0,
                     help="address the image loads at, for reporting sites")
     ap.add_argument("--sites", metavar="CHIP",
                     help="list every access to one chip, with addresses")
     args = ap.parse_args()
 
     blob = io.open(args.image, "rb").read()
-    hits = scan(blob, int(args.base, 0))
+    hits = scan(blob, args.base)
     print("%s  (%d bytes)" % (os.path.basename(args.image), len(blob)))
     print("")
     if args.sites:

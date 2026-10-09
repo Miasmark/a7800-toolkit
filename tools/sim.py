@@ -21,18 +21,30 @@ construction. The same goes for every other player in the library.
 like for like -- same emulator, no input, same length -- across five TIA
 cartridges that play music on their own:
 
-    Ikari Warriors    agreement 99.4%   progress  86.2%   timing 1.00x
-    Midnight Mutants            99.0%             100.0%         1.00x
-    Donkey Kong                 89.0%             100.0%         1.00x
-    Dark Chambers               78.4%             100.0%         1.00x
-    Choplifter                   0.8%               1.0%         0.04x
+    Ikari Warriors    agreement 99.4%   progress 100.0%   timing 1.00x
+    Midnight Mutants            97.6%             100.0%         1.00x
+    Donkey Kong                 99.2%             100.0%         1.00x
+    Dark Chambers               98.3%             100.0%         1.00x
+    Choplifter                  97.8%              96.7%         1.00x
 
-Four of five reproduce a commercial game's music from its own code, with the
-frame clock exact in every one. That is what this was built to do.
+Measured against the Trebor's PROPack v8_17 ROMs and MAME 0.264 with the
+7800OpenBIOS, **over the same stretch of play**: 882 frames of the simulator, which
+is what a 1,200-frame MAME capture covers, because the simulator counts from the
+cartridge's reset and MAME from power-on, 322 frames earlier with OpenBIOS. Scoring
+a longer simulator run against the capture counts everything it plays after the
+capture ended as disagreement: the same simulator scored Midnight Mutants 43.9%
+over 1,200 frames and 94.3% over 882 (97.6% now that MARIA's DMA is charged).
 
-The fifth is understood and is not a simulator defect: Choplifter's second
-voice is never triggered because its attract demo takes a different course
-here -- see below.
+Reference states reproduced, in order: Ikari 521 of 529, Midnight Mutants 83 of 83
+(the two extra states are a note that starts on the capture's last frame), Dark
+Chambers 173 of 173, Donkey Kong 119 of 120, Choplifter 174 of 180. The differences
+left in Ikari are one-frame envelope steps; Choplifter's six, and the two states
+it stops short of, have not been traced.
+(The earlier figures for the middle three, 99.0, 89.0 and 78.4 per cent, came from
+runs whose lengths were not recorded and could not be reproduced.)
+
+All five reproduce a commercial game's music from its own code, with the frame
+clock exact in every one. That is what this was built to do.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
 generates its music from POKEY's random register and cannot be scored by log
@@ -56,26 +68,21 @@ vertical blank starts. That filter silently dropped Donkey Kong's only
 interrupt, and the game span for ever. One bit, in one DLL entry, presenting
 as "makes no sound".
 
-### Choplifter, traced
+### Choplifter, traced -- and the real cause
 
-Its channel 0 matches the capture value for value, while `AUDC1` and `AUDF1`
-are never written at all. That looked like a missing write path. It is not.
+Its channel 0 matched the capture value for value, while `AUDC1` and `AUDF1`
+were never written at all. This was once put down to its attract demo taking a
+different course. **That was wrong.** Diffing every write to `$1920-$1928`
+against MAME's showed the two identical until the player at `$B29E` -- which is
+voice-generic -- ran `LDA ($95),Y` for voice 1 and read a zero where MAME read
+`$02`. The pointer's high byte lives at `$1928`, and `Bus.read` took any address
+whose low byte is `$28` for MSTAT, so it came back as the vertical-blank flag.
+The voice ended at once, every time.
 
-The player at `$B29E` is voice-generic -- `STA $15,X / STA $17,X / STA $19,X`
--- and the caller is unrolled per voice, each gated on its own counter:
-`$1923` for voice 0 at `$B326`, `$1926` for voice 1 at `$B346`, both skipped
-when the counter reads `$FF`. Sampled every 150 frames, the emulator's
-`$1926` holds `$AF`, `$0E`, `$01`; this simulator's reads `$FF` every single
-time.
-
-So nothing is failing to write. **Voice 1 is never asked to play.** The
-routine is correct and never invoked, because whatever triggers that sound
-never happens here -- which is what an attract-mode demo taking a different
-course would look like, and Choplifter runs one. That was suggested early and
-dismissed on the strength of the register columns; the columns showed which
-voice was silent, not why, and the why is consistent with the demo.
-
-Donkey Kong emits a single state and has not been traced.
+The same bug hid the last stretch of Ikari Warriors: its second tune read a
+table across an address ending in `$28`, the simulator wrote values no AUDC can
+hold (`$1F`) and then fell silent for the rest of the run. With MSTAT answering
+only at `$28` and `$128`, both play through.
 
 **Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
 generates its music from POKEY's random register and cannot be scored by log
@@ -107,7 +114,7 @@ cartridge, **the first 427,399 instructions are identical**. That is about 124
 frames.
 
 MARIA's display interrupts are implemented -- the DLL the game builds in RAM
-is walked each frame and an NMI raised at the end of every zone whose entry has
+is walked each frame and an NMI raised at the start of every zone whose entry has
 bit 7 set -- and the walk agrees with MAME byte for byte. They demonstrably
 fire: early in Ballblazer this raises 16 a frame, and the game's counter at
 `$40` counts down exactly once per frame, as its author intended.
@@ -176,12 +183,22 @@ change moves which rows those are. `--compare` can be trusted to say "not
 trustworthy". It cannot be trusted to rank two near-misses, and it must not be
 used to tune.
 
-So `--dma-steal` stays off by default -- not because the default is more
-correct, it is less, but because turning it on would trade a published number
-for a worse one on the strength of a measure that cannot support the
-comparison. The flag is there, it is the better physics, and the honest
-position is that neither setting is close enough for the difference to mean
-anything yet.
+**It is now on by default**, because that finding was about Ballblazer, whose
+score cannot be read at all, and on the games whose score can be read it is the
+better setting. Measured over the same 882 frames against MAME (Trebor's PROPack
+ROMs, OpenBIOS), without and with the charge:
+
+    Choplifter         79.6%  ->  97.8%    (its rhythm passage runs 37 beats, not 5)
+    Midnight Mutants   94.3%  ->  97.6%
+    Ikari Warriors     99.4%  ->  99.4%
+    Donkey Kong        99.2%  ->  99.2%
+    Dark Chambers      98.3%  ->  98.3%
+
+None gets worse. Choplifter's passage is counted in loop iterations, not frames:
+with the 6502 given every cycle, the loop spins about a third more often per frame
+than on hardware (a third more RAM writes over the same frames) and ends early.
+`--no-dma-steal` restores the old behaviour. (That `--compare` cannot rank two
+near-misses still stands; these five are not near-misses.)
 
 ## What has been ruled out
 
@@ -201,7 +218,11 @@ Each of these was a confident diagnosis at some point, and each was wrong.
 * **VBLANK phase.** The first divergence in the trace is a VBLANK wait, but it
   re-synchronises 1,160 instructions later, and sweeping the flag's phase
   across a whole frame changes the score by nothing.
-* **The RIOT timer.** Neither game ever reads `INTIM`.
+* **The RIOT timer.** Neither of those two games ever read `INTIM`. The simulator now
+  models the interval timer ($0284-$0287 reads, $0294-$0297 writes), WSYNC (the CPU waits
+  for the next scanline), RAM on the cartridge, the 52K image's low ROM and NMOS decimal-mode
+  flags -- each checked against a synthetic cartridge (`selftest.py: t_sim_machine`),
+  not against MAME.
 * ~~**POKEY reads.**~~ Recorded here as ruled out, on the grounds that
   "Ballblazer never reads it". That was wrong: it was measured over 300
   frames, and the music engine that reads `$400A` does not start until frame
@@ -279,6 +300,34 @@ def fold(a):
     return a
 
 
+def explore_switches(frame):
+    """SWCHB while exploring with `drive="switches"` (the joystick sweep of
+    `drive="explore"` plus these): the console switches move, so code behind them runs.
+
+    Active low, as on the console. The two difficulty switches (bits 7 and 6) step
+    through all four combinations, a new one every 300 frames. Select (bit 1) is held
+    for ten frames out of every 240 and Reset/Start (bit 0) for ten out of every 480,
+    at different phases so each is seen alone and neither starts the run. Pause
+    (bit 3) is pressed twice, thirty frames apart, once every 600 frames: most games
+    toggle on the press, so the pair pauses and then resumes, and a game that
+    pauses is not left stopped for the rest of the run."""
+    v = 0x0B | (((frame // 300) & 3) << 6)
+    if 100 <= frame % 240 < 110:
+        v &= ~0x02
+    if 200 <= frame % 480 < 210:
+        v &= ~0x01
+    t = frame % 600
+    if 400 <= t < 404 or 430 <= t < 434:
+        v &= ~0x08
+    return v & 0xFF
+
+
+def explore_second_button(frame, which):
+    """INPT0-3 while exploring: bit 7 set (pressed) for eight frames in every ninety,
+    each input at its own phase. 0 otherwise."""
+    return 0x80 if (frame + 23 * which) % 90 < 8 else 0x00
+
+
 class Bus(object):
     """The 7800's memory map, as much of it as sound needs.
 
@@ -291,6 +340,11 @@ class Bus(object):
         self.cart = cart
         self.ram = bytearray(0x10000)
         self.bank = cart.nbanks - 1 if cart.nbanks > 1 else 0
+        # MAME shows the window's FIRST bank at power-on (a SuperGame's reset code can live
+        # there); the last bank is the fixed one at $C000
+        mapper = getattr(cart, "map", None)
+        if getattr(mapper, "name", "") == "supergame":
+            self.bank = getattr(mapper, "first_window", 0)
         self.audio = {}                 # address -> last value written
         self.writes = []                # (frame, address, value)
         self.frame = 0
@@ -302,11 +356,51 @@ class Bus(object):
         self.poly = 0x1FFFF             # POKEY's 17-bit polynomial counter
         self.poly_at = 0                # ... and the cycle it was last advanced
         self.drive = drive
+        self.obs = None                 # an observer, or None
+        self.maria = {}                 # MARIA register -> last value written
         self.cpu_cycles = lambda: 0     # set by CPU.__init__
+        # where cartridge ROM starts (a 52K image reaches down to $3000) and which ranges are
+        # RAM on the cartridge: reads and writes there are memory, not ROM
+        regions = getattr(cart, "_region", [])
+        starts = [r[0] for r in regions if r[2] != "ram"]
+        self.rom_low = min([0x4000] + starts)
+        self.cart_ram = [(r[0], r[1]) for r in regions if r[2] == "ram"]
+        self.wsync = False              # a write to WSYNC is waiting to stall the CPU
+        self.jammed = None              # set to the address of a KIL the program ran
+        self.timer = None               # the RIOT interval timer: (set at cycle, value, interval)
+        self.timer_flag_cleared = False
         self.pokeys = set()
         for base in cart.pokeys():
             for r in range(16):
                 self.pokeys.add(base + r)
+
+    RIOT_BIAS = 1       # cycles from the write that starts the timer to the first count (fitted)
+
+    def riot(self, a):
+        """INTIM ($0284/$0286) and TIMINT ($0285/$0287) as the 6532 answers them (the numbers
+        are MAME's, checked against tests/golden/riot-mame.bin):
+
+        the timer reads N - ceil(e / interval) until it reaches zero, expiring at e = N *
+        interval; then it counts down once per CYCLE from $FF and TIMINT bit 7 is set. Reading
+        INTIM clears TIMINT, and if the timer had expired it goes back to the programmed rate
+        from the value it had just reached."""
+        if self.timer is None:
+            return 0x00
+        t0, val, interval, bias = self.timer
+        e = int(self.cpu_cycles() - t0) + bias
+        expired = e >= val * interval
+        if not expired:
+            value = val - -(-e // interval)
+        else:
+            value = (0xFF - (e - val * interval) + (1 if interval == 1 else 0)) & 0xFF
+        if a in (0x0285, 0x0287):
+            return 0x80 if (expired and not self.timer_flag_cleared) else 0x00
+        # an INTIM read: clears the flag if it is set, and an expired timer goes back to
+        # counting at the programmed rate from where it has got to
+        if expired:
+            self.timer = (self.cpu_cycles(), value, interval, bias)
+            self.timer_flag_cleared = True
+        return value
 
     def random(self, cycles):
         """POKEY's RANDOM register: the top bits of a 17-bit LFSR.
@@ -321,8 +415,9 @@ class Bus(object):
         The polynomial is x^17 + x^12 + 1, clocked at the CPU rate, so it is
         advanced by however many cycles have passed since it was last asked.
         """
-        step = cycles - self.poly_at
-        self.poly_at = cycles
+        # the cycle count is fractional once MARIA's DMA has taken its share of a line
+        step = int(cycles - self.poly_at)
+        self.poly_at += step
         p = self.poly
         for _ in range(min(step, 4096)):
             p = ((p >> 1) | (((p ^ (p >> 5)) & 1) << 16)) & 0x1FFFF
@@ -337,7 +432,7 @@ class Bus(object):
             if reg == 0x0A:                       # RANDOM
                 return self.random(self.cpu_cycles())
             return 0xFF
-        if a >= 0x4000:
+        if a >= self.rom_low:
             sp = self.cart.space_of(a, self.bank)
             if sp is not None:
                 try:
@@ -345,11 +440,18 @@ class Bus(object):
                 except Exception:                            # noqa: BLE001
                     return 0xFF
             return self.ram[a]
-        if (a & 0xFF) == 0x28 and 0x20 <= (a & 0xFF) <= 0x3F:
-            # MSTAT: bit 7 set during vertical blank
+        if (a & 0xFF) == 0x28 and a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
+            # MSTAT: bit 7 set during vertical blank. (This used to test only the low
+            # byte, so RAM at $1928, $1A28, $2028 ... read back as MSTAT: Choplifter keeps
+            # the high byte of voice 1's note pointer at $1928, read it as zero, and never
+            # played its second voice.)
             return 0x80 if self.vblank else 0x00
         if a in (0x0008, 0x0009, 0x000A, 0x000B):
-            return 0x00                  # INPT0-3: no paddles
+            # INPT0-3: no paddles -- or, exploring, the second buttons of two-button
+            # sticks, pressed (bit 7 set) in short turns so a game that has them uses them.
+            if self.drive == "switches":
+                return explore_second_button(self.frame, a - 0x0008)
+            return 0x00
         if a in (0x000C, 0x000D):
             # INPT4/5: fire buttons, active low.
             #
@@ -364,14 +466,26 @@ class Bus(object):
                 return 0x80
             return 0x00 if (self.frame % 70) < 10 else 0x80
         if a == 0x0280:
-            # SWCHA: joystick directions, also active low. All ones is centred.
+            # SWCHA: joystick directions, also active low. All ones is centred --
+            # unless exploring: then the stick sweeps right, left, down, up and rests,
+            # twenty frames each, so a game that needs a push to do anything does it.
+            if self.drive in ("explore", "switches"):
+                step = (self.frame // 20) % 5
+                return (0xFF, 0x7F, 0xBF, 0xDF, 0xEF)[step] if step else 0xFF
             return 0xFF
+        if 0x0280 <= a < 0x0300 and (a & 0x04):
+            # RIOT INTIM and TIMINT. The timer counts down once per interval from the value
+            # written; when it passes zero it flags (TIMINT bit 7) and counts down every
+            # cycle. A game that waits on it with BIT $0285 / BPL used to wait for ever.
+            return self.riot(0x0285 if (a & 1) else 0x0284)    # INTIM / TIMINT, mirrored
         if a == 0x0282:
             # SWCHB: the console switches, and they are **active low** -- a set
             # bit means "not pressed". Returning zeros here reads as reset and
             # select both held down, and a game that waits for them to be
             # released waits forever. Midnight Mutants spins on exactly that.
-            #   bit 0 reset, bit 1 select, bit 3 colour/BW
+            #   bit 0 reset, bit 1 select, bit 3 pause, bits 6/7 difficulty
+            if self.drive == "switches":
+                return explore_switches(self.frame)
             return 0x0B
         return self.ram[fold(a)]
 
@@ -383,18 +497,37 @@ class Bus(object):
             b = self.cart.map.bank_from_write(a, v)
             if b is not None:
                 self.bank = b
+                if self.obs is not None:
+                    self.obs.bank_switch(a, v, b)
                 return
-        if a >= 0x4000:
+        if a >= self.rom_low:
             if a in self.pokeys:
                 self.audio[a] = v
                 self.writes.append((self.frame, a, v))
                 return
+            for lo, hi in self.cart_ram:
+                if lo <= a < hi:
+                    self.ram[a] = v      # RAM on the cartridge
+                    return
             return                       # ROM: writes go nowhere
+        if 0x0280 <= a < 0x0300 and (a & 0x14) == 0x14:
+            # the RIOT's interval timer: TIM1T / TIM8T / TIM64T / T1024T, mirrored through
+            # the RIOT's whole range ($029C-$029F are the interrupt-enabled forms)
+            interval = (1, 8, 64, 1024)[a & 3]
+            self.timer = (self.cpu_cycles(), v, interval, 2 if interval == 1 else self.RIOT_BIAS)
+            self.timer_flag_cleared = False
+            return
         low = a & 0xFF
+        if low == 0x24 and a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
+            self.wsync = True            # the CPU waits for the end of the scanline
         if a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
             # MARIA's display-list pointer. Write-only on hardware, so nothing
             # can read it back -- the sim has to catch it on the way past or
             # it never learns where the display list is.
+            if 0x20 <= low <= 0x3F:
+                self.maria[low] = v
+                if self.obs is not None:
+                    self.obs.maria_write(low, v)
             if low == 0x2C:
                 self.dpph = v
             elif low == 0x30:
@@ -409,6 +542,8 @@ class Bus(object):
             self.audio[a] = v
             self.writes.append((self.frame, a, v))
             return
+        if self.obs is not None:
+            self.obs.data_write(a, v)
         self.ram[fold(a)] = v
 
 
@@ -434,17 +569,17 @@ class Bus(object):
         per_line = self.DMA_LINE
         i = 0
         for _ in range(32):
-            b1 = self.ram[fold((dl + i + 1) & 0xFFFF)]
+            b1 = self.mem((dl + i + 1) & 0xFFFF)
             if b1 == 0:
                 break
-            lo = self.ram[fold((dl + i) & 0xFFFF)]
+            lo = self.mem((dl + i) & 0xFFFF)
             if (b1 & 0x1F) == 0:                      # five-byte entry
-                hi = self.ram[fold((dl + i + 2) & 0xFFFF)]
-                w = 32 - (self.ram[fold((dl + i + 3) & 0xFFFF)] & 0x1F)
+                hi = self.mem((dl + i + 2) & 0xFFFF)
+                w = 32 - (self.mem((dl + i + 3) & 0xFFFF) & 0x1F)
                 five, chars = True, bool(b1 & 0x20)
                 i += 5
             else:
-                hi = self.ram[fold((dl + i + 2) & 0xFFFF)]
+                hi = self.mem((dl + i + 2) & 0xFFFF)
                 w = 32 - (b1 & 0x1F)
                 five, chars = False, False
                 i += 4
@@ -463,14 +598,22 @@ class Bus(object):
         return (lines * per_line + self.DMA_ZONE
                 + (self.DMA_DLI if (flags & 0x80) else 0))
 
+    def mem(self, a):
+        """A byte as MARIA reads it: RAM (through its mirrors), or the cartridge."""
+        f = fold(a & 0xFFFF)
+        if 0x1800 <= f <= 0x27FF:
+            return self.ram[f]
+        return self.read(a)
+
     def zones(self):
-        """Walk the DLL the game built in RAM -> [(line_after_zone, dli), ...].
+        """Walk the DLL the game built in RAM -> [(line_after_zone, dli, cost, height), ...].
 
         Three bytes per zone: byte 0 is flags and the offset (scanlines minus
         one) in bits 3-0, then the display list address high and low. Bit 7 is
-        the display interrupt, which is the only interrupt MARIA raises -- and
-        it fires at the END of its zone, which is what makes the line count
-        matter rather than just the flag.
+        the display interrupt, which is the only interrupt MARIA raises. It is taken
+        on the last line of the zone BEFORE the flagged one, so that its handler
+        runs ahead of the flagged zone's first line (docs/hardware.md); the line
+        count matters, not just the flag.
 
         Returns [] until the game has actually pointed MARIA somewhere, and
         gives up on a list that runs past the screen or past MAX_ZONES: during
@@ -486,17 +629,19 @@ class Bus(object):
         if (self.ctrl & 0x60) != 0x40:
             return []
         addr = ((self.dpph << 8) | self.dppl) & 0xFFFF
-        if addr < 0x1800 or addr > 0x27FF:      # 7800 RAM; anything else is
-            return []                           # a half-written pointer
+        # the list list is in RAM (or its zero-page and stack views) or in the cartridge's
+        # ROM -- several games keep a fixed screen there; anything else is a half-written pointer
+        if not (0x1800 <= fold(addr) <= 0x27FF or addr >= self.rom_low):
+            return []
         out, line = [], 0
         for z in range(self.MAX_ZONES):
-            b0 = self.ram[fold((addr + z * 3) & 0xFFFF)]
-            hi = self.ram[fold((addr + z * 3 + 1) & 0xFFFF)]
-            lo = self.ram[fold((addr + z * 3 + 2) & 0xFFFF)]
+            b0 = self.mem((addr + z * 3) & 0xFFFF)
+            hi = self.mem((addr + z * 3 + 1) & 0xFFFF)
+            lo = self.mem((addr + z * 3 + 2) & 0xFFFF)
             n = (b0 & 0x0F) + 1
             line += n
             out.append((line, bool(b0 & 0x80),
-                        self.zone_cost((hi << 8) | lo, n, b0)))
+                        self.zone_cost((hi << 8) | lo, n, b0), n))
             if line >= self.MAX_LINES:
                 break
         return out
@@ -518,6 +663,8 @@ class CPU(object):
         self.p = U | I
         self.pc = self.word(0xFFFC)
         self.cycles = 0
+        self.jammed = None              # the address of a KIL/JAM opcode the program ran
+        self.obs = None                 # an observer (see Observer), or None
 
     def word(self, a):
         return self.bus.read(a) | (self.bus.read(a + 1) << 8)
@@ -575,10 +722,14 @@ class CPU(object):
         if mode == "izx":
             self.pc += 1
             z = (b.read(pc) + self.x) & 0xFF
+            if self.obs is not None:
+                self.obs.pointer(z)
             return b.read(z) | (b.read((z + 1) & 0xFF) << 8), 0
         if mode == "izy":
             self.pc += 1
             z = b.read(pc)
+            if self.obs is not None:
+                self.obs.pointer(z)
             base = b.read(z) | (b.read((z + 1) & 0xFF) << 8)
             a = (base + self.y) & 0xFFFF
             return a, 1 if (a ^ base) & 0xFF00 else 0
@@ -602,19 +753,26 @@ class CPU(object):
 
     def adc(self, v):
         if self.p & D:
-            # BCD. Rare in players but not unheard of, and silently wrong
-            # arithmetic is exactly the kind of bug that hides.
-            lo = (self.a & 0x0F) + (v & 0x0F) + (self.p & C)
-            hi = (self.a >> 4) + (v >> 4) + (1 if lo > 9 else 0)
-            if lo > 9:
-                lo += 6
-            r = ((hi << 4) | (lo & 0x0F)) & 0xFF
-            if hi > 9:
-                hi += 6
-                r = ((hi << 4) | (lo & 0x0F)) & 0xFF
-            self.p = (self.p & ~C) | (1 if hi > 15 else 0)
-            self.setzn(r)
-            self.a = r
+            # NMOS decimal ADC (the 6502 as it is documented in "6502.org: Decimal Mode"): the
+            # low nibble is adjusted first; N and V come from that intermediate sum, Z from
+            # the plain binary sum, and only the carry and the result from the final adjust.
+            a, c_in = self.a, self.p & C
+            lo = (a & 0x0F) + (v & 0x0F) + c_in
+            if lo >= 0x0A:
+                lo = ((lo + 0x06) & 0x0F) + 0x10
+            mid = (a & 0xF0) + (v & 0xF0) + lo
+            self.p &= ~(N | V | Z | C)
+            if mid & 0x80:
+                self.p |= N
+            if (~(a ^ v) & (a ^ mid)) & 0x80:
+                self.p |= V
+            if ((a + v + c_in) & 0xFF) == 0:
+                self.p |= Z
+            if mid >= 0xA0:
+                mid += 0x60
+            if mid >= 0x100:
+                self.p |= C
+            self.a = mid & 0xFF
             return
         t = self.a + v + (self.p & C)
         self.p = (self.p & ~(C | V)) | (1 if t > 0xFF else 0)
@@ -624,6 +782,7 @@ class CPU(object):
 
     def sbc(self, v):
         if self.p & D:
+            a0 = self.a
             lo = (self.a & 0x0F) - (v & 0x0F) - (1 - (self.p & C))
             hi = (self.a >> 4) - (v >> 4)
             if lo & 0x10:
@@ -634,23 +793,43 @@ class CPU(object):
             t = self.a - v - (1 - (self.p & C))
             self.p = (self.p & ~C) | (0 if t & 0x100 else 1)
             self.a = self.setzn(((hi & 0x0F) << 4) | (lo & 0x0F))
+            # NMOS: N, V and Z of a decimal subtract are the binary subtract's
+            self.p = (self.p & ~(N | V | Z)) | (N if t & 0x80 else 0) \
+                | (Z if (t & 0xFF) == 0 else 0) \
+                | (V if ((a0 ^ v) & (a0 ^ t) & 0x80) else 0)
             return
         self.adc(v ^ 0xFF)
 
     def step(self):
         b = self.bus
-        op = b.read(self.pc)
+        obs = self.obs
+        pc0 = self.pc
+        op = b.read(pc0)
         entry = m6502.OPCODES.get(op)
         self.pc = (self.pc + 1) & 0xFFFF
+        if obs is not None:
+            obs.fetch(pc0, op)
         if entry is None:
             self.cycles += 2
             return
         mn, mode = entry[0], entry[1]
+        if mn == "JAM":
+            # KIL halts a real 6502 for good (only a reset frees it). Games plant them as
+            # error traps; running on past one invents behaviour the machine never had.
+            self.jammed = pc0
+            self.pc = pc0
+            self.cycles += 2
+            return
         cyc = m6502.CYCLES[op]
         a, extra = self.addr(mode)
 
-        def rd():
-            return b.read(a)
+        if obs is None or mode == "imm":
+            def rd():
+                return b.read(a)
+        else:
+            def rd():
+                obs.data_read(a)
+                return b.read(a)
 
         if mn == "LDA":
             self.a = self.setzn(rd())
@@ -733,14 +912,21 @@ class CPU(object):
             self.p = (self.p & ~(Z | N | V)) | (Z if not (self.a & v) else 0) \
                 | (v & (N | V))
         elif mn == "JMP":
+            if obs is not None and mode == "ind":
+                obs.jump_indirect(pc0, a)
             self.pc = a
         elif mn == "JSR":
             r = (self.pc - 1) & 0xFFFF
             self.push((r >> 8) & 0xFF)
             self.push(r & 0xFF)
             self.pc = a
+            if obs is not None:
+                obs.call(pc0, a, r + 1, self.s)
         elif mn == "RTS":
+            sp = self.s
             self.pc = (self.pop() | (self.pop() << 8)) + 1 & 0xFFFF
+            if obs is not None:
+                obs.ret(pc0, self.pc, sp)
         elif mn == "RTI":
             self.p = (self.pop() | U) & ~B
             self.pc = self.pop() | (self.pop() << 8)
@@ -780,22 +966,103 @@ class CPU(object):
         self.cycles += cyc
 
 
-# Measured, not quoted: a counting cartridge run under MAME put the NTSC
-# scanline at exactly 114.00 CPU cycles and the non-VBLANK window at exactly
-# 241.0 of the 262 lines. See docs/hardware.md, "What MARIA costs", and
-# probes/dma-costcart.py for the instrument. PAL is derived the same way from
-# its own clock and line count, and has NOT been measured.
-CYCLES_PER_LINE = 114.0
-LINES = {"ntsc": 262, "pal": 312}
+# Measured on MAME 0.264 (probes/dlitimes.lua, probes/cyclebudget.lua), and the
+# 7800 Software Guide says the same: the NTSC frame is 263 lines of 113.5 CPU cycles
+# (454 cycles of the 7.16 MHz clock), 29,850.5 cycles. MSTAT's VBLANK bit rises at
+# raster 258 and falls at raster 16, 21 lines, and MARIA's zone 0 starts at raster 16.
+# This simulator's frame starts where VBLANK falls, so a zone that starts L lines into
+# the display starts L lines into the frame, and VBLANK rises 242 lines in.
+# (It used to have 262 lines of 114.00, from an early count that could not tell the
+# two apart, and fired each display interrupt at the END of its zone; MAME fires it
+# at the START of the flagged zone -- see docs/hardware.md. PAL is from the Guide,
+# 313 lines, and has NOT been measured.)
+CYCLES_PER_LINE = 113.5
+LINES = {"ntsc": 263, "pal": 313}
 VBLANK_LINES = {"ntsc": 21, "pal": 21}
+# The handler's first instruction runs 22-26 cycles into the line of the flagged
+# zone (measured); 7 of those are the interrupt sequence, so the interrupt is
+# taken about this far into the line.
+DLI_LAG = 15
+
+
+class Observer(object):
+    """What a run can be watched with. Subclass and override what you need.
+
+    The hooks are called from inside the CPU loop, so they should be cheap. Addresses
+    are CPU addresses; the bank that was mapped at the time is `self.bus.bank`.
+    """
+
+    def attach(self, bus, cpu):
+        self.bus, self.cpu = bus, cpu
+
+    def frame_start(self, frame):
+        pass
+
+    def fetch(self, pc, opcode):
+        """An instruction is about to run at `pc`."""
+
+    def data_read(self, addr):
+        """An instruction read `addr` as data (not an operand byte, not a fetch)."""
+
+    def jump_indirect(self, pc, target):
+        """`JMP (vector)` at `pc` went to `target`."""
+
+    def call(self, pc, target, ret, sp):
+        """`JSR` at `pc` to `target`; it will return to `ret` (stack pointer now `sp`)."""
+
+    def ret(self, pc, target, sp):
+        """`RTS` at `pc` went to `target`; `sp` was the stack pointer before the pops."""
+
+    def bank_switch(self, addr, value, bank):
+        """A store of `value` to `addr` selected `bank`."""
+
+    def nmi(self):
+        """A display-list interrupt is being taken."""
+
+    def maria_write(self, reg, value):
+        """A write to MARIA register `reg` ($20-$3F)."""
+
+    def data_write(self, addr, value):
+        """A store to RAM (including the stack) at `addr`."""
+
+    def pointer(self, zp):
+        """A `(zp),Y` or `(zp,X)` operand is about to read its pointer from `zp`."""
+
+
+def load_handover(path):
+    """The machine as a BIOS left it, from probes/handover.lua's log and its .ram.
+
+    Returns {"regs": {a, x, y, s, p}, "ram": {address: byte}} for the cartridge's
+    first instruction. Starting from this instead of from zeroed RAM and a bare
+    CPU is what the real BIOS hands a game: OpenBIOS clears $2000-$27FF but
+    leaves $FF in $40-$48 and parts of the stack and zero page, and a game that
+    reads before it writes (Forth systems do) can tell.
+    """
+    import re
+    text = open(path).read()
+    m = re.search(r"A=([0-9A-F]{2}) X=([0-9A-F]{2}) Y=([0-9A-F]{2}) SP=([0-9A-F]{2}) P=([0-9A-F]{2})", text)
+    if not m:
+        raise ValueError("%s is not a handover.lua log" % path)
+    a, x, y, sp, pp = [int(v, 16) for v in m.groups()]
+    data = open(path + ".ram", "rb").read()
+    if len(data) != 0x1C0 + 0x1000:
+        raise ValueError("%s.ram should be $40-$1FF and $1800-$27FF, %d bytes; "
+                         "this one is %d" % (path, 0x1C0 + 0x1000, len(data)))
+    ram = {}
+    for i, b in enumerate(data[:0x1C0]):
+        ram[0x40 + i] = b
+    for i, b in enumerate(data[0x1C0:]):
+        ram[0x1800 + i] = b
+    return {"regs": {"a": a, "x": x, "y": y, "s": sp, "p": pp}, "ram": ram}
 
 
 def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
-        frame_nmi=False, steal=False):
+        frame_nmi=False, steal=True, log=None, start_state=None, observer=None):
     """Execute the cartridge for `frames` frames, collecting audio writes.
 
     Interrupts follow the hardware: on the 7800 the ONLY thing that raises NMI
-    is MARIA's display interrupt, fired at the end of any zone whose DLL entry
+    is MARIA's display interrupt, taken as the flagged zone begins (the end of the
+    zone before it) for every zone whose DLL entry
     has bit 7 set. There is no separate vertical-blank interrupt. A game that
     wants one puts a DLI on its last zone -- Asteroids does exactly that, with
     one DLI in seventeen zones -- while a game doing per-zone work raises many
@@ -805,16 +1072,39 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
     end of the visible screen, which is right for a game like Asteroids by
     accident and wrong for everything that hangs work off zone boundaries.
     `frame_nmi=True` restores that behaviour for comparison.
+
+    `observer`, if given, is told what the CPU does (see Observer): every fetch, data
+    read, indirect jump, JSR/RTS, bank switch, interrupt and frame -- what the MAME
+    probes in probes/ record, without MAME.
+
+    `log`, if a list, receives ("nmi" or "vblank", frame, cycles into the
+    frame) for every display interrupt and vertical-blank start, which is what
+    the timing is checked against MAME with (probes/dlitimes.lua).
     """
     bus = Bus(cart, drive=drive)
     cpu = CPU(bus)
+    if observer is not None:
+        cpu.obs = bus.obs = observer
+        observer.attach(bus, cpu)
+    if start_state:
+        for addr, b in start_state["ram"].items():
+            bus.ram[fold(addr)] = b
+        r = start_state["regs"]
+        cpu.a, cpu.x, cpu.y, cpu.s = r["a"], r["x"], r["y"], r["s"]
+        cpu.p = (r["p"] | U) & ~B & 0xFF
     lines = LINES[region]
     vb_line = lines - VBLANK_LINES[region]
-    per = int(lines * CYCLES_PER_LINE)
+    frame_cycles = lines * CYCLES_PER_LINE
+    start = cpu.cycles
 
     for f in range(frames):
         bus.frame = f + 1
-        base = cpu.cycles
+        if observer is not None:
+            observer.frame_start(f + 1)
+        # frames are scheduled from the start, not from wherever the last one
+        # happened to end: an instruction that straddles the boundary does not
+        # lengthen the next frame
+        base = start + f * frame_cycles
         bus.vblank = False
 
         # The display list is rebuilt in RAM every frame by most games, so the
@@ -822,7 +1112,7 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         events = []
         zones = bus.zones()
         if nmi:
-            for line_end, dli, _cost in zones:
+            for line_end, dli, _cost, height in zones:
                 # Every zone with the bit set raises its interrupt. An earlier
                 # version fired only zones ending before the VBLANK line, which
                 # was an invention -- MARIA walks the list and does not consult
@@ -832,8 +1122,9 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
                 # interrupt, a counter at $74 never decremented, and the game
                 # spinning at $E24A for ever while looking like a cartridge
                 # that simply makes no sound.
-                if dli and line_end < lines:
-                    events.append((base + int(line_end * CYCLES_PER_LINE), "dli"))
+                first = line_end - height          # the flagged zone's first line
+                if dli and first < lines:
+                    events.append((base + first * CYCLES_PER_LINE + DLI_LAG, "dli"))
         # MARIA halts the 6502 while it draws, and it does so a scanline at a
         # time. Charging a whole zone's worth in one lump at the zone boundary
         # is not the same thing: it hands the CPU a burst of uninterrupted time
@@ -841,33 +1132,46 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
         # miss its own deadlines and write a garbage display-list pointer. So
         # the cost is spread across the zone's scanlines, where it belongs.
         if steal:
-            start = 0
-            for line_end, _dli, cost in zones:
-                n = max(1, line_end - start)
-                per = cost / float(n)
-                for ln in range(start + 1, line_end + 1):
+            top = 0
+            for line_end, _dli, cost, _height in zones:
+                n = max(1, line_end - top)
+                line_cost = cost / float(n)
+                for ln in range(top + 1, line_end + 1):
                     if ln <= vb_line:
-                        events.append((base + int(ln * CYCLES_PER_LINE),
-                                       ("steal", per)))
-                start = line_end
-        events.append((base + int(vb_line * CYCLES_PER_LINE), "vblank"))
+                        events.append((base + ln * CYCLES_PER_LINE,
+                                       ("steal", line_cost)))
+                top = line_end
+        events.append((base + vb_line * CYCLES_PER_LINE, "vblank"))
         if frame_nmi and nmi:
-            events.append((base + int(vb_line * CYCLES_PER_LINE), "dli"))
+            events.append((base + vb_line * CYCLES_PER_LINE, "dli"))
         events.sort(key=lambda e: e[0])
 
-        target = base + per
+        target = base + frame_cycles
         i = 0
         while cpu.cycles < target:
             while i < len(events) and cpu.cycles >= events[i][0]:
                 kind = events[i][1]
                 if kind == "vblank":
                     bus.vblank = True
+                    if log is not None:
+                        log.append(("vblank", f + 1, cpu.cycles - base))
                 elif isinstance(kind, tuple):
                     cpu.cycles += kind[1]          # MARIA takes these
                 else:
+                    if log is not None:
+                        log.append(("nmi", f + 1, cpu.cycles - base))
+                    if observer is not None:
+                        observer.nmi()
                     cpu.nmi()
                 i += 1
             cpu.step()
+            if cpu.jammed is not None:
+                bus.jammed = cpu.jammed          # the program has stopped itself
+            if bus.wsync:
+                # WSYNC: the CPU is halted until the start of the next scanline
+                bus.wsync = False
+                n = int((cpu.cycles - base) // CYCLES_PER_LINE) + 1
+                cpu.cycles = max(cpu.cycles, base + n * CYCLES_PER_LINE)
     return bus
 
 
@@ -954,6 +1258,25 @@ def compare(sim_rows, ref_rows):
             "sim_states": len(sim), "ref_states": len(ref)}
 
 
+def window_hint(ref_rows, sim_rows, frames, slack=30):
+    """How many frames of simulation cover what the reference does, if it ran longer.
+
+    The simulator counts frames from the cartridge's reset and an emulator from
+    power-on, so the same moment has a larger frame number in the capture; the
+    difference is read off the first thing each played. A simulation that runs on
+    past the end of the capture has its extra states scored as disagreement: the
+    same run scored Midnight Mutants 43.9% over 1,200 frames and 94.3% over 882.
+    Returns None when the two already span the same stretch (within `slack`).
+    """
+    if len(ref_rows) < 2 or len(sim_rows) < 2:
+        return None
+    offset = ref_rows[1][0] - sim_rows[1][0]
+    covered = ref_rows[-1][0] - offset
+    if frames > covered + slack and covered > 0:
+        return covered + slack
+    return None
+
+
 def write_log(bus, cart, path, region="ntsc"):
     """The same per-frame format probes/audio.lua produces."""
     bases = cart.pokeys()
@@ -1009,7 +1332,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--frames", type=int)
     ap.add_argument("--drive", action="store_true",
-                    help="hold fire, for a game that waits at a title screen")
+                    help="tap fire now and then, for a game that waits at a title screen")
     ap.add_argument("--compare", metavar="REF.log",
                     help="compare against a known-good capture from "
                          "capture.py or probes/audio.lua. Compare LIKE FOR "
@@ -1017,18 +1340,24 @@ def main():
                          "same length, or you are marking the simulation "
                          "against music it was never given time to reach, or "
                          "against someone playing.")
-    ap.add_argument("--dma-steal", action="store_true",
+    ap.add_argument("--dma-steal", dest="dma_steal", action="store_true",
+                    default=True,
                     help="charge the CPU for MARIA's DMA, per scanline, using "
-                         "the measured cost model including holey DMA. Better "
-                         "physics than the default; scores differently rather "
-                         "than better, because the score cannot discriminate "
-                         "at this distance. See the module docstring.")
+                         "the measured cost model including holey DMA (the "
+                         "default; see the module docstring)")
+    ap.add_argument("--no-dma-steal", dest="dma_steal", action="store_false",
+                    help="give the CPU every cycle, as before: it runs loops "
+                         "faster than hardware does")
     ap.add_argument("--frame-nmi", action="store_true",
                     help="raise one NMI a frame at end of visible instead of "
                          "following the display list. The old behaviour, kept "
                          "for comparison.")
     ap.add_argument("--no-nmi", action="store_true",
                     help="do not call the NMI handler each frame")
+    ap.add_argument("--handover", metavar="LOG",
+                    help="start from the machine as the BIOS left it: a log "
+                         "from probes/handover.lua (with its .ram beside it), "
+                         "instead of zeroed RAM and a bare CPU")
     ap.add_argument("--verify", metavar="LOG",
                     help="an emulator capture of the same game, to check "
                          "this against")
@@ -1042,16 +1371,31 @@ def main():
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     frames = args.frames or int(args.seconds * (50 if region == "pal" else 60))
 
+    start_state = None
+    if args.handover:
+        try:
+            start_state = load_handover(args.handover)
+        except (IOError, ValueError) as e:
+            sys.stderr.write("sim: %s\n" % e)
+            return 2
     bus = run(cart, frames, region, drive=args.drive, nmi=not args.no_nmi,
-              frame_nmi=args.frame_nmi, steal=args.dma_steal)
+              frame_nmi=args.frame_nmi, steal=args.dma_steal,
+              start_state=start_state)
     out = args.out or (os.path.splitext(args.rom)[0] + "-sim.log")
     n = write_log(bus, cart, out, region)
     print("%s -- %d frames simulated, %d audio writes, %d changed rows"
           % (os.path.basename(out), frames, len(bus.writes), n))
 
     if args.compare:
-        r = compare(read_log(out), read_log(args.compare))
+        sim_rows, ref_rows = read_log(out), read_log(args.compare)
+        r = compare(sim_rows, ref_rows)
         print("compared with %s" % os.path.basename(args.compare))
+        cover = window_hint(ref_rows, sim_rows, frames)
+        if cover:
+            print("  NOTE: the simulation ran %d frames but the capture ends about "
+                  "%d frames in\n  (the capture counts from power-on, this from "
+                  "reset): what it plays after that\n  is scored as disagreement. "
+                  "Try --frames %d." % (frames, cover - 30, cover))
         print("  reference %d states, simulated %d"
               % (r["ref_states"], r["sim_states"]))
         print("  agreement  %5.1f%%  of what it played is the reference's, "

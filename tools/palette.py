@@ -91,7 +91,8 @@ def ntsc7800(byte, gamma=0.80, chroma=0.75):
 # the whole ROM -- b3:$81C9 during the intro and b0:$A581 when the Grampa screen
 # opens -- and nothing reloads them when an area is entered, so the world keeps
 # whichever ran last. The values below are sampled from play and remain useful
-# for sprites; item icons now read the blocks directly (see tools/rooms.py).
+# for sprites; item icons now read the blocks directly (see tools/rooms.py in the
+# midnight-mutants-toolkit repo).
 PLAY_PALETTE = {
     # pumpkin-head zombie: dark rind, orange body, lit orange
     2: [(38, 28, 20), (198, 106, 38), (240, 152, 62)],

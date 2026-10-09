@@ -3,6 +3,12 @@
 -- caller that no static scan can (an indirect/computed jump).
 --
 -- Env: A7800_WC_ADDR (hex, no $), A7800_WC_LOG, A7800_WC_MAX (default 8)
+--
+-- Needs the debugger. Run headless (-video none) on MAME 0.264 it prints "no
+-- debugger interface available on this cpu device" and logs nothing -- that is
+-- not "nobody called it". Use a MAME with the debugger enabled, or the a7800
+-- fork; probes/pcwrites.lua answers the neighbouring question (who WRITES an
+-- address) without one.
 
 local MACHINE = (type(manager.machine) == "function")
                 and manager:machine() or manager.machine

@@ -1,0 +1,5 @@
+[flake8]
+# Only the errors that are bugs: unused/undefined names and syntax errors.
+# Style is left to the code around it.
+select = F,E9
+exclude = .git,__pycache__

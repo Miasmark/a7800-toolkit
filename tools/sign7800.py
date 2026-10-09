@@ -327,6 +327,7 @@ def main(argv):
         return 2
 
     rc = 0
+    resigned = False
     for path in paths:
         rom, hdr = _load(path)
         name = os.path.basename(path)
@@ -353,6 +354,11 @@ def main(argv):
         out = signed(rom)
         io.open(path, "wb").write(hdr + out)
         print("%-46s signed" % name)
+        resigned = True
+    if resigned:
+        print("note: signing moves where the game starts, so a recording (.inp) "
+              "made on the unsigned image will not line up -- record again "
+              "(docs/pitfalls.md).")
     return rc
 
 

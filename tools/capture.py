@@ -54,6 +54,57 @@ def find_mame(explicit=None):
     return None
 
 
+def bios_args():
+    """`-bios NAME` when A7800_BIOS is set, else nothing.
+
+    MAME's a7800 has a second NTSC BIOS slot, `a7800pr`, which is where an
+    open BIOS goes when Atari's is not to hand (docs/bios.md, "Running
+    OpenBIOS in MAME").
+    """
+    name = os.environ.get("A7800_BIOS")
+    return ["-bios", name] if name else []
+
+
+def machine_setup(machine, rompath):
+    """(the -bios arguments, the rompath) for a machine. The PAL machine has no -bios
+    a7800pr, so with the open BIOS selected it gets pal_overlay's folder instead."""
+    bios = bios_args()
+    if machine == "a7800p" and bios and rompath:
+        return [], pal_overlay(rompath)
+    return bios, rompath
+
+
+_OVERLAYS = {}
+
+
+def pal_overlay(rompath):
+    """A rompath that lets MAME's PAL machine (a7800p) boot with the open BIOS.
+
+    `-bios a7800pr` exists only on the NTSC machine, so asking for it on a7800p is "invalid
+    BIOS" and then "c300558-001b.u7 NOT FOUND". The workaround is to hand a7800p the same
+    open BIOS under the file name it looks for. This builds a small folder holding the
+    NTSC machine's files plus that copy, and returns it; the real rompath is not touched.
+    Returns `rompath` unchanged if there is no BIOS file to copy."""
+    import glob
+    import shutil
+    import tempfile
+    if rompath in _OVERLAYS:
+        return _OVERLAYS[rompath]
+    src = sorted(glob.glob(os.path.join(rompath, "a7800", "*.u7")))
+    if not src:
+        return rompath
+    d = tempfile.mkdtemp(prefix="a7800-pal-")
+    os.makedirs(os.path.join(d, "a7800"))
+    os.makedirs(os.path.join(d, "a7800p"))
+    for f in src:
+        shutil.copy(f, os.path.join(d, "a7800", os.path.basename(f)))
+    shutil.copy(src[0], os.path.join(d, "a7800p", "c300558-001b.u7"))
+    _OVERLAYS[rompath] = d
+    import atexit
+    atexit.register(shutil.rmtree, d, True)
+    return d
+
+
 def find_rompath(rom, explicit=None):
     """Where the 7800 BIOS images live.
 
@@ -75,8 +126,16 @@ def find_rompath(rom, explicit=None):
 
 def inspect(rom):
     """What the header says about this cartridge's sound."""
-    c = cartlib.Cart(rom)
-    bases = c.pokeys()
+    try:
+        c = cartlib.Cart(rom)
+        info, bases = c.info, c.pokeys()
+    except (cartlib.UnknownMapper, cartlib.UnknownSpace):
+        # an image the layout code refuses (512K flat, SOUPER) can still be handed to an
+        # emulator: all this needs from it is the header's region and sound chips
+        with open(rom, "rb") as f:
+            info = cartlib.read_header(f.read(256))
+        bases = cartlib.pokeys_for((info or {}).get("cart_type", 0))
+        c = type("HeaderOnly", (), {"info": info})()
     region = (c.info or {}).get("region", "NTSC").lower()
     return {"chip": ("pokey2" if len(bases) > 1 else
                      ("pokey" if bases else "tia")),
@@ -268,13 +327,15 @@ def capture(rom, out=None, seconds=40, frames=None, skip=0, drive=True,
             f.write(watch_script(info))
         if os.path.exists(errlog):
             os.remove(errlog)
-        cmd = [exe, info["machine"], "-rompath", roms, "-cart",
+        bios, roms = machine_setup(info["machine"], roms)
+        cmd = [exe, info["machine"]] + bios + ["-rompath", roms, "-cart",
                os.path.abspath(rom), "-debug", "-debugscript", wp,
                "-autoboot_script", FRAME_PROBE, "-autoboot_delay", "1", "-log",
                "-sound", "none", "-video", "none", "-nothrottle",
                "-seconds_to_run", str(int(seconds) + 8)]
     else:
-        cmd = [exe, info["machine"], "-rompath", roms, "-cart",
+        bios, roms = machine_setup(info["machine"], roms)
+        cmd = [exe, info["machine"]] + bios + ["-rompath", roms, "-cart",
                os.path.abspath(rom), "-autoboot_script", PROBE,
                "-sound", "none", "-video", "none", "-nothrottle",
                "-seconds_to_run", str(int(seconds) + 5)]

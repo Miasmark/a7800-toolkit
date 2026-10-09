@@ -6,7 +6,7 @@ byte-identical disassembly of a 128K commercial game, and grew through several
 more.
 
 Nothing here is specific to those games. The cartridge model was tested against
-**2,664 retail and homebrew images** and lays out all but four of them — including Activision's 8K-granular mapper and bankset cartridges, whose two halves are read separately with `side=`; the
+**1,309 retail and homebrew images** (Trebor's 7800 ROM PROPack v8_17, the library the rest of these docs count) and lays out all but two of them (it refuses SOUPER, which has its own mapper and extra hardware, and a 512K linear demo), Activision's 8K-granular mapper and bankset cartridges, whose two halves are read separately with `side=`; the
 disassembler reproduces the hand-verified 128K disassembly byte for byte while
 also handling unbanked 4K-48K ROMs.
 
@@ -20,6 +20,7 @@ corrected a register bit this toolkit had recorded backwards — see
 ## Start here
 
 ```
+python tools/firstlook.py game.a78             # what is this, in one report
 python tools/workbench.py game.a78             # open everything at once
 ```
 
@@ -29,9 +30,17 @@ editor. Everything below is the same work done a piece at a time.
 
 ```
 python tools/survey.py game.a78 --strings      # what am I even looking at
+python tools/init.py game.a78 -o annotations.json   # the file the disassembler reads
 python tools/disasm.py game.a78 -c annotations.json -o src
 python tools/verify.py game.a78 -d src         # must pass, from day one
+python tools/build.py game.a78 -d src          # and the image must rebuild identically
 ```
+
+(`disasm.py -c` on a file that does not exist is an error: `init.py` writes it.
+The workbench does all of this from one page, in `<rom>-workbench/`: **Check my
+work** runs the disassembly, the annotation checks, the round trip and the rebuild as
+one job. Pictures need Pillow, `python -m pip install pillow`; everything else is
+plain Python 3.)
 
 To hear a cartridge's music instead of reading its code:
 
@@ -61,7 +70,16 @@ emulator section is worth reading before you write any probe.
 
 | | |
 |---|---|
-| `workbench.py` | One place to open a cartridge: what the header says, what a scan finds, and a button on each result that launches the right editor with the space, base and format already filled in. A launcher, not another tool. |
+| `firstlook.py` | **One command, one report, on a cartridge nobody has told the toolkit anything about.** Reads the header and identifies the music player (against `formats/`, or by fingerprint), then runs five short headless runs -- in the simulator by default, so no emulator or BIOS is needed (`--engine mame` for MAME) -- music (to `.log`, `.trk` and `.wav`), screenshots, the live display list with its artwork rendered, every graphics address drawn from, and which code ran in which bank (merged by `dyn.py` into a starter `annotations.json`) -- and writes `report.md`. Static analysis found 2 graphics blocks and 1 audio table in a 128K banked POKEY cartridge; the same cartridge's one-minute first look found 36 sheets of graphics, 30 seconds of music, and 332 executed instructions the tracer had missed. It says plainly what one run cannot show, refuses to render pixel formats it cannot decode, and works without MAME (static half only) or Pillow (no pictures). `--playback` runs every probe over a recording instead. |
+| `workbench.py` | **One place to work on a cartridge.** Overview (the header, what a scan finds, a button on each result that launches the right editor with the space, base and format filled in), **Run** (first look, disassemble, observe code, find address tables, census with suggestions you tick into the annotations, start annotations, check annotations, **check my work** -- disassemble, lint, verify and rebuild in one job -- capture music with optional POKEY-to-TIA, sampling profile, cycle budget, display-interrupt timing, and any probe with its settings), **Results** (each job's command lines, live output, and its files -- pictures and audio play in place), **Listing** (the disassembly, searchable by name or address) and **Annotations** (edit `annotations.json` and see the checks as you save). Jobs write to `<rom>-workbench` beside the cartridge; the ones that need MAME are greyed out, with the reason, when it or the BIOS is missing. A launcher, not another tool: each job is the command line you would have typed, shown beside its result. |
+| `simprobe.py` | **Watch a cartridge run in the simulator and write what the MAME probes would have:** `exectrace.log` (instructions executed, indirect jumps, computed returns -- an `RTS` whose address was pushed by hand -- and bank switches, in `exectrace.lua`'s format, so `dyn.py` and the workbench read it), `dataread.log` (ROM bytes the CPU read as data), the MARIA registers and RAM (`dumpgfx.lua`'s files) and the sound log. No emulator, no BIOS. See `corpus.py` for how far to trust it. `--explore` also runs with the stick swept and the console switches worked and unions the runs; `--force` adds code only a forced branch reached (`branchforce.py`) as `F` lines; code that ran from RAM is written as `R` lines with the ROM bytes it was copied from; a jump from a RAM trampoline is recorded. `--interrupts FRAME` writes `dlitimes.log` (the zones and the line each display interrupt arrives on, in `probes/dlitimes.lua`'s format); the workbench's Display interrupts job uses it by default. A program that runs a KIL opcode stops there, and the report says so. |
+| `census.py` | **An automatic ROM and RAM census, from a simulated run.** Sorts every byte of the cartridge by what the machine did with it -- executed, read as data, fetched by MARIA's DMA (the display lists are walked), code the tracer reaches but the run did not exercise, untouched data block, fill, or **DARK**: nothing ran, read or drew it and the tracer does not reach it, each dark area described by what its bytes look like (text, address table, plausible code, graphics-like). RAM the same way: written, read, read before written, pointers, counters, flags, free ranges, stack depth. `--explore` sweeps the joystick, and unions in a second run that works the console switches (difficulty, Select, Reset, Pause) and second buttons; `--merge` unions runs so coverage only grows. Writes `census.md`, `census.json` and a coverage map per bank. On the synthetic cartridge the dark areas are exactly the text bank and the two untouched banks it was built with. "Unreachable" means "not found by this run or the tracer", and the report says so. |
+| `branchforce.py` | **Find code a run never reached by taking the branches the game did not take.** Watches a simulated run, keeps a copy of the machine at every conditional branch whose other side has not run, then restarts each copy down the other side, in a sandbox, with the real registers and RAM. A path that reaches code the run executed (`joined`) or runs its budget without trouble (`ran on`) is kept; one that executes an undefined or illegal opcode, BRK, JAM, an address that is not ROM or RAM, or a byte the run read as data is **dead**, and everything it ran since the fork is thrown away. The static tracer already follows both sides of every branch, so what this adds is concrete values: a hand-pushed `RTS`, a jump table or a bank switch on the untaken side is followed to where it goes. `--truth N` grades the kept code against a longer run; a control starts paths at bytes the run read as data with that one veto switched off, so it can fail: 2-4% of those paths still rejoin real code (on Asteroids and Food Fight that would keep 4-7 instructions against several hundred forced; Galaga's controls keep ~280-550 as `ran on`, which is why only `joined` paths are counted). `census.py --force` marks what it finds as its own class. A forced path may be one the game never reaches -- the registers do not agree with the branch -- so it is reported apart from what executed. |
+| `mamecheck.py` | **Which cartridges MAME runs, which the simulator runs, and where they disagree.** Runs each image (a folder, or `--sample N` of it) in MAME with `probes/rendersurvey.lua` and in the simulator, and asks both the same question: after the BIOS hands over, is MARIA kept drawing from a display list? Reports *both*, *sim only* (MAME cannot be the reference for that image: a mapper or flag it does not implement), *mame only* (a gap in the simulator) and *neither*, with the failures grouped by mapper. Cached by file hash, so a run over the whole library can be stopped and resumed. |
+| `localserver.py` | Not a command: the request rules the four local web servers (`workbench.py`, `spriteedit.py`, `trackeredit.py`, `explore.py`) share. None has a password and all can write files, so each answers only its own page: a Host that is not this machine's address (DNS rebinding), a foreign Origin (a cross-site form or `fetch`), a POST that is not `application/json`, an oversized body, or a save path outside the cartridge's folder, the working folder and the workbench project are refused. |
+| `simorigins.py` | `addrorigin.lua` without MAME: follows every address the CPU uses back to the ROM bytes it was built from, in the simulator, and writes the same log for `origins.py` (address tables, immediates). On Triple Punch it finds the same tables the MAME probe does, and more, because a simulated run is longer. Slow (Python decodes every instruction). |
+| `corpus.py` | **Measure the toolkit against a whole library.** Runs the static tracer and the simulator on every cartridge in a folder and grades each against the other: executed instructions the tracer missed (and how execution first reached them: RAM code, indirect jump, `RTS` trick, interrupt, unresolved bank), data the CPU read from inside what was printed as code, and how many cartridges the simulator got going on. Cached by content. The yardstick for changes to the disassembler and the simulator. |
+| `runprobe.py` | Run one of the Lua probes on a cartridge, headless, with MAME and the BIOS found for you and its `A7800_*` settings given as `-e KEY=VALUE`; says what files it wrote and when it wrote none. `--list` shows the probes. The typing every recipe in `docs/emulation.md` repeats, in one place. |
 | `cart.py` | The `.a78` header and the mappers. Header flags checked against the image library, not against published bit lists — they disagree, and the cartridges win. |
 | `library.py` | Search a ROM collection **inside its zip**, without extracting 22MB to find one file. Lays out matches, extracts them, or surveys one. |
 | `init.py` | Starts a game: reads the header, takes the vectors as entry points, writes the annotations file and reports what the disassembler reached with it. Refuses to overwrite an existing one. |
@@ -83,27 +101,31 @@ emulator section is worth reading before you write any probe.
 | `audiotrace.py` | Finds a cartridge's music *in the ROM*: locates every audio-register write, traces back to the tables feeding it, and reports them. |
 | `songfmt.py` | Pulls a game's songs out of the ROM as editable data and pushes edited songs back in place, driven by a JSON description of the player's format. Refuses any write that would grow a pattern or touch a byte the format did not declare. `render` turns a pulled song into a tracker file, and `--verify` checks it against a capture frame by frame. |
 | `assets.py` | Finds the artwork and the music *as data*: traces MARIA and audio register writes back to what feeds them, follows a captured display list to the graphics it names, and writes annotation blocks plus a manifest the asset tools consume. Bank-ambiguous finds are reported as candidates, not findings. |
-| `sim.py` | **A TIA tool, and it works.** A 6502 core that runs a cartridge's own code and traps its audio writes, so a player is its own authority on its format. It follows MARIA's display interrupts and agrees with MAME instruction for instruction over the first 427,399 instructions after a cartridge takes control. Scored against like-for-like captures it reproduces **four of five** TIA cartridges -- Ikari Warriors 99.4%, Midnight Mutants 99.0%, Donkey Kong 89.0%, Dark Chambers 78.4% -- with the frame clock exact in each. The fifth diverges because its attract demo does. The POKEY path is NOT validated; see the module docstring. |
-
-
-
-
+| `sim.py` | **A TIA tool, and it works.** A 6502 core that runs a cartridge's own code and traps its audio writes, so a player is its own authority on its format. It follows MARIA's display interrupts and agrees with MAME instruction for instruction over the first 427,399 instructions after a cartridge takes control. Scored against like-for-like MAME 0.264 captures (the same stretch of play) it reproduces all five TIA cartridges' music -- Ikari Warriors, Midnight Mutants (97.6%), Dark Chambers, Donkey Kong and Choplifter, with the frame clock exact in each; `sim.py`'s header has the per-game figures and what is not yet traced. These need commercial ROMs, so they cannot be re-run from the repository. It is **not** a MAME stand-in everywhere: it does not model cartridge RAM beyond what `Bus` maps, IRQs, lightguns or paddles, and `mamecheck.py` measures where it and MAME disagree. The POKEY path is NOT validated; see the module docstring. |
 | `capture.py` | Cartridge to song in one step: reads the header for the sound chip — both of them, on the eighteen images that carry two POKEYs — runs MAME with the probe, converts the log. Recognises the `a7800` fork and switches to debugger watchpoints, which is the only route that works there. |
 | `midi.py` | Reads a Standard MIDI File: tracks, names, note ranges, polyphony and timing. Handles running status and tempo changes, which is where naive parsers quietly lose notes. |
 | `trackeredit.py` | The tracker itself: a grid in the browser where you type notes, hear them and save. Imports a MIDI track straight into one voice, leaving the rest of the song alone. Backed by the same renderer that exports, so there is only one sound model. |
 | `tracker.py` | Sound, for the TIA and for cartridge POKEY: a note table showing what each chip can and cannot play, a text song format, WAV rendering, capture from a running game, MIDI import, and 6502 export with a player. |
 | `selftest.py` | Runs the toolkit against itself. Most checks need no cartridge; `--rom`, `--format` and `--log` add the round trips and the frame-by-frame check against hardware. The doc checks are in here too, because what slipped through last time was not a crash but a stale number. |
-| `mktone.py` | Builds a cartridge that holds one POKEY setting forever — a controlled single-tone oracle for checking the sound model against a real emulator, since comparing against a game's own audio measures the comparison more than the model. |
+| `mktone.py` | Builds a cartridge that holds one POKEY setting (or, with `--tia`, one TIA channel's AUDC/AUDF) forever — a controlled single-tone oracle for checking the sound model against a real emulator, since comparing against a game's own audio measures the comparison more than the model. |
+| `pokey2tia.py` | Turns a POKEY game's music (a `probes/audio.lua` log) into TIA music for a port: two voices out of up to eight. By default POKEY voices 1+2 feed TIA channel 1 and 3+4 channel 2, and the louder of two voices wanting a channel wins (`--groups` changes the pairing); `--mash arp` keeps every voice by sharing a channel in turns (livelier, messier, `--arp N` sets the speed); `--map loudest` plays each frame's loudest two instead; `--offset`/`--fit` move the tune onto the TIA's sparse pitches; noise goes to AUDC 8. Writes `tia.trk` (editable in the tracker), `tia.asm` (data and player), `tia.wav` beside `orig.wav`, and a report of what was lost. Generalised from the converter in the Karateka XE port. |
 | `bps.py` | BPS patches. Build them headerless. |
 | `mksite.py` | Packs generated pages into self-contained HTML. |
 | `a8dis.py` | Trace an Atari 8-bit cartridge by following its code rather than sweeping it, and reconstruct the RAM it builds. Karateka's XEGS cartridge is a disk that happens to be silicon: a 22-instruction loader copies whole 8K banks into RAM and jumps there, so a trace of the ROM reaches 75 bytes and leaves. `--overlays` shows which banks each scene loads, `--scene N` rebuilds that address space and traces the real game inside it, and `--frame` prints what the game does every vertical blank -- which is the comparison that matters against the 7800 version. |
 | `atx.py` | Read an ATX floppy image -- the format protected Atari 8-bit disks circulate in, which keeps each sector's angular position and error flags so copy protection survives. Takes the good copy of each sector, exports a plain ATR other tools read, shows the boot record, and extracts files when the disk has a directory -- saying so plainly when it does not, which for a self-booting game is the usual answer. |
 | `forth.py` | Decompile an indirect-threaded Forth image out of a cartridge. Some 7800 games are not 6502 programs -- Karateka is a Forth program with an interpreter underneath, which is why a tracing disassembler reaches 173 instructions in a 48K ROM and stops. This finds the interpreter by shape (the loop every primitive returns to, the routines that save and restore the thread pointer, the word that eats the following cell) and walks the thread: `--at` decompiles a definition, `--callers` says who names a word, `--map` summarises. It recovers structure, not names -- a shipped Forth has no dictionary. |
-| `patchset.py` | A bundle of patches you can pick from, checked a section at a time. A BPS is a delta between two whole files with a CRC of each, which is the wrong shape for "here are nine independent fixes, take the ones you want": nine fixes are 512 combinations, a whole-file CRC refuses a dump whose header differs, and two patches touching the same bytes apply cleanly and silently produce a ROM that is neither. Nothing standard covers this -- VCDIFF's windows are chosen by the compressor, NINJA and BPM bundle patches for several *files*, PPF validates one hardcoded block. So a patch set names **sections** (a byte range plus the CRC32 of its pre-image, so applying checks 168 bytes rather than 49152), **knobs** (two options turning the same one are alternatives and asking for both is refused rather than resolved by file order), and **floats** (code with no fixed home: the bundle says how much room it needs and where to look, the patcher finds a run of free bytes, and every call site learns the address it chose). Headers are handled by identifying the body rather than the file, so headered and bare dumps take the same bundle -- and because sections stand alone, a ROM already patched elsewhere is still a valid target for whatever nobody has touched. `bundle_from_images` builds a bundle from each option's finished cartridge -- sections, shared spans, anchors, growth -- and refuses to write one that does not reproduce them; the same inputs give the same file. |
+| `patchset.py` | A bundle of patches you can pick from, checked a section at a time. `lint` checks a bundle's manifest -- every pair of options, not only the ones asked for. A BPS is a delta between two whole files with a CRC of each, which is the wrong shape for "here are nine independent fixes, take the ones you want": nine fixes are 512 combinations, a whole-file CRC refuses a dump whose header differs, and two patches touching the same bytes apply cleanly and silently produce a ROM that is neither. Nothing standard covers this -- VCDIFF's windows are chosen by the compressor, NINJA and BPM bundle patches for several *files*, PPF validates one hardcoded block. So a patch set names **sections** (a byte range plus the CRC32 of its pre-image, so applying checks 168 bytes rather than 49152), **knobs** (two options turning the same one are alternatives and asking for both is refused rather than resolved by file order), and **floats** (code with no fixed home: the bundle says how much room it needs and where to look, the patcher finds a run of free bytes, and every call site learns the address it chose). Headers are handled by identifying the body rather than the file, so headered and bare dumps take the same bundle -- and because sections stand alone, a ROM already patched elsewhere is still a valid target for whatever nobody has touched. `bundle_from_images` builds a bundle from each option's finished cartridge -- sections, shared spans, anchors, growth -- and refuses to write one that does not reproduce them; the same inputs give the same file. |
 | `modmap.py` | What a mod is made of, byte by byte: original bytes kept (read in play or not, from `probes/romcoverage.lua` maps), overwritten, new, and still empty, with your own labels for the new parts and an optional PNG map. It aligns bodies at `$FFFF`, so a mod that grew the cartridge lines up. |
 | `portkit.py` | Ship a conversion as a recipe rather than as a copy. A BPS patch is a delta between two files, which breaks the moment the output draws on a second source: a 7800 build using Atari 8-bit artwork would carry every one of those bytes inside the "patch". So this ships coordinates instead -- which images are needed (by SHA-256), which extents to take from them (hashed individually), what original work goes with them, and the hash the finished cartridge must have. Everyone supplies their own copies and gets a byte-identical result. It refuses a recipe that carries embedded data, so the guarantee is enforced rather than promised. |
 | `portscan.py` | What it would take to move Atari 8-bit code to the 7800, counted rather than guessed. Both machines run a 6502, which is the least useful fact about the job; the work is everything the code says to the hardware. Sorts every hardware access into what carries over (POKEY is POKEY, at a different address), what has an equivalent needing a rewrite (joysticks), and what has none at all (player/missile graphics, hardware collision detection, ANTIC's display lists). |
 | `replay.py` | Replay a recorded session and measure what the game did. MAME reproduces a recording exactly -- two replays give byte-identical profiles -- so a before-and-after number means something, which a scripted run cannot deliver: scripted input reaches a title screen and stops. Reports dispatches a frame, how often the controls are read, and which definitions the time went to. `--compare` replays the same session against a second build, honest only where the change does not alter the game's speed. |
+| `lualint.py` | Lint MAME Lua probes for the mistakes that fail silently: a tap held only in a chunk-level `local` (collected within a few hundred frames, after which the probe prints plausible numbers from a dead tap), a missing header, an environment variable the header does not name. A regex pass with three rules -- a report means *look here*, silence means only that these traps are absent. Cannot run MAME; it is what reviews a probe on a machine that has none. `selftest.py` runs it over `probes/`. |
+| `dyn.py` | Turns what a run *observed* into annotations. `probes/exectrace.lua` watches the real machine -- MAME, any mapper it can run -- and logs which code executed in which bank, where each `JMP (ptr)` went, and what each computed bank-switch store selected. This writes those into the annotations file (jump targets as `entries`, the banks a switch chose as a `banksw` list, which is what makes the tracer explore all of them), re-runs the disassembler, and reports how much more it reached. Everything it adds is marked observed-not-proven under `_dynamic`, nothing already in the file is replaced, and it is idempotent. `init.py --dynamic LOG` does it at the start. With `--dataread` (from `simprobe.py`) it also cuts out bytes the run read as data that the listing prints as instructions -- as `blocks`, only where nothing in them ever executed, nothing retained JSRs/JMPs/branches into them, no neighbouring byte was both read and executed (a copy or checksum loop walking over code reads everything, and BonQ's whole ROM is read that way, so it gets none), and every instruction the listing reached is still reached. ROM that was copied to RAM and run there becomes an entry at its ROM address, not a block. Code only a forced branch reached is listed under `_dynamic` as `forced_proposals` and is NOT made an entry (measured against longer runs, about a quarter of what forcing joins back is real code); `--adopt-forced` makes them entries, listed as `forced_entries`, and the workbench does so when its branch-forcing box is ticked. |
+| `origins.py` | Which bytes of a cartridge are **addresses**, from a run of `probes/addrorigin.lua`, which follows every address the CPU uses back to the bytes it was built from. Reports address tables in the ROM (words, or low and high bytes apart, with the entries the run used and where they led), addresses written into code as immediates (`LDA #<routine`: what has to change if it moves), and pointers built in RAM from nothing it could trace; `-c` adds the tables to `annotations.json` as blocks. Observed, not proven: only entries the run used. Idea and first version from the Karateka XE port, where it drove relocating a game's pointers. |
+| `mariapix.py` | MARIA's pixel formats as pure functions: bytes in, (palette, colour) pairs out. 160A is four pixels a byte from the entry's own palette (three colours and transparent); 160B is two pixels a byte, each with its own palette bits, so one entry draws from four palettes. Character mode reads one byte per scanline or, with CTRL bit 4 set, two. Measured against MAME rather than taken from a document -- `selftest.py` has MAME draw each format (via `probes/forcedl.lua`) and checks the prediction -- because the write-mode bit had been recorded in the wrong place. No 320 modes. |
+| `annotations.py` | Check an annotations file the way `disasm.py` reads it, before it quietly ignores half of it: a typo'd key (`label` for `labels`, with the nearest real one suggested), a key repeated in the JSON, a name given to two places or to a hardware register, a bad location or block, a bank-switch pin that is not a bank. With `--rom`, also entries that sit inside a data block you declared (a block wins, so the code is never traced), locations outside the image, and labels that point into the middle of an instruction. A block that starts inside another is a warning: the disassembler never reaches its start, so its name and note vanish. Checked against the 11 real annotation files in the sibling game repositories: all pass; Ball Blazer's one overlap is real, documented in its own note, and reported as the warning it is. |
+| `pcmap.py` | Name the routines a profile spent its time in. `probes/pcprof.lua` samples the program counter each time MARIA starts a zone -- about thirty evenly spaced samples a frame, no timer needed -- and this groups them under the nearest label below each address, using your annotations' names, a disassembly listing's, or a symbols file. A ranking, not a cost: the labels decide where a routine ends, and only the visible frame is sampled. |
+| `session.py` | Record and play back a MAME input session for any cartridge (`record`, `play`, `list`), saved beside it in `recordings/` and never overwritten. A recording replays exactly, so two replays give identical profiles; it is what `probes/reclength.lua`, `replay.py` and `regress.py` run over. `Record a session.bat` and `Play a recording.bat` are the drag-and-drop forms. |
 | `regress.py` | Asks every build the same questions: a JSON list of MAME probe jobs (probe, recording, environment, expanded over lists of values), each reduced to one verdict line, run in parallel, saved as a baseline and compared against it. Built from Pole Position II's regression set, which it reproduces verdict for verdict. |
 | `sign7800.py` | Cartridge signatures. An NTSC 7800 hashes the cartridge and checks a signature over that hash at `$FF80`-`$FFF7`; a cartridge that fails is not refused, it is started in **2600 mode**, which looks like a black screen rather than an error. PAL consoles do not check and no emulator does, so a patched ROM works everywhere it gets tested and nowhere it gets played. Verifies, and signs -- the scheme is Rabin with public exponent 2, so a signature is a square root of the hash mod `n`, found by stepping the hash's one don't-care byte until a root exists. A port of Bruce Tomlin's `sign7800.c`, checked against stock dumps of two different games. Every build path here signs; the patch-set has to do it at apply time, since the signature covers the whole image and every combination of options has a different one. |
 | `spritedump.py` | Renders one direct-mode MARIA display-list object -- a real sprite at a known base/width/height/palette, optionally stacked from several zone-sized segments -- rather than a fixed 256-entry character sheet. Reads the palette straight out of a `dumpgfx.lua` register dump so the colours are the ones the game actually used. |
@@ -152,6 +174,8 @@ sign.**
 
 ### On Windows
 
+`Record a session.bat` / `Play a recording.bat` — drag a `.a78` onto either to record a MAME session beside the cartridge, or to list and replay one.
+
 `Open workbench.bat` — drag a cartridge onto it to open the workbench: the
 header, the mapper, a scan for artwork and music, and a button on each result
 that opens it in the right editor. Start here with something unfamiliar.
@@ -171,9 +195,10 @@ the cartridge header so nothing needs choosing.
 `probes/dma-count.lua` and `probes/dma-costcart.py` — MAME scripts
 for watching writes, capturing a live display list, and logging every audio
 register write (TIA, or cartridge POKEY via `A7800_POKEY=<base>`) so
-`tracker.py` can turn a running game's music into an editable song. All three
-carry the garbage-collection warning inline, because a dead tap does not
-announce itself.
+`tracker.py` can turn a running game's music into an editable song. The Lua
+probes among them carry the garbage-collection warning inline, because a dead
+tap does not announce itself. Every other probe is listed, one line each, in
+[`docs/emulation.md`](docs/emulation.md#probe-index).
 
 `probes/wildfetch.lua` stops at the first instruction fetched from where no
 code should be (a bad jump, a bad return) and writes the registers and the
@@ -201,7 +226,7 @@ which is how the two BIOSes in `docs/bios.md` were compared.
 | [`bios.md`](docs/bios.md) | What Atari's NTSC BIOS does before a cartridge runs (self-test, signature, the state it hands over), and how 7800OpenBIOS differs. |
 | [`audio.md`](docs/audio.md) | The TIA's two voices, POKEY's four, why one chip is out of tune and the other is not, the tracker, and pulling songs out of a ROM and pushing them back. |
 
-`a7800.py` and `m6502.py` are libraries, not commands: the machine's constants
+`a7800.py`, `m6502.py` and `addr.py` are libraries, not commands: the machine's constants
 and the 6502 opcode and cycle tables. Everything else runs from the shell.
 
 ### Templates
@@ -211,12 +236,34 @@ All human judgement goes here; generated listings stay disposable.
 
 `templates/format.json` — a player-format description for `songfmt.py`, with
 every key explained: where a game keeps its songs, what the bits of a note mean,
-and which envelope engine to run. `formats/` holds two filled in for real
-engines and verified at 100% against hardware: `mm-tia.json` (53 images) and
-`aa-pokey.json` (58 images across 27 titles), plus `rmt.json`, which
-identifies the 84 cartridges carrying a Raster Music Tracker module without
-pretending it can play one. Between them, 23% of every cartridge in the library
-with a recognisable player or module.
+and which envelope engine to run. `formats/` holds the filled-in descriptions: `mm-tia.json` (53 images) and
+`aa-pokey.json` (58 images across 27 titles), both verified at 100% against
+hardware, and four single-title descriptions of the same Atari in-house engine --
+`commando-pokey.json`, `fatal-run-tia.json`, `meltdown-tia.json` and
+`missing-in-action-tia.json`. `rmt.json` identifies the 84 cartridges carrying a
+Raster Music Tracker module without pretending it can play one. The three
+shared descriptions cover 23% of the cartridges that have a recognisable player
+or module (195 of 841; see `docs/audio.md`).
+
+## Tests, and the cartridge they use
+
+`python tools/selftest.py` needs no ROM: `tests/synth.py` builds a 128K
+SuperGame + POKEY cartridge from source, and `tests/carts/synth128.a78` is a
+committed copy (selftest fails if the two differ). It is made to be hard for
+a static tracer on purpose -- a bank switch whose number comes from a table, a
+`JMP` through a RAM vector, a tune played from a switched bank -- and
+`facts()` says what a correct tool must find. With MAME and a BIOS configured
+([`docs/emulation.md`](docs/emulation.md#running-mame-with-no-atari-bios)),
+selftest also runs the probes against it and checks what they observe.
+
+## Addresses, on the command line
+
+Every option that takes an address reads `$C000`, `0xC000` and `C000` the same --
+hexadecimal, because that is how addresses on this machine are written (`tools/addr.py`).
+Before this, `--base 8000` in `gfx.py`, `assets.py`, `dlwalk.py` and the sprite tools
+meant *decimal* 8000 and `$8000` was refused, while `a8dis.py` and `modmap.py`
+refused `0x8000`. Bank numbers, counts, frames and lines are not addresses and stay
+decimal.
 
 ## The one rule
 
@@ -232,7 +279,9 @@ Watch the coverage figure too, and treat a bank stuck low as an open question.
 ## Requirements
 
 Python 3, no dependencies. MAME with 7800 BIOS images for the probes (`a7800`
-for NTSC, `a7800p` for PAL).
+for NTSC, `a7800p` for PAL). With no Atari BIOS, 7800OpenBIOS works in its place:
+[`docs/emulation.md`](docs/emulation.md#running-mame-with-no-atari-bios) has the
+setup, and `A7800_BIOS=a7800pr` points the tools at it.
 
 ## Status
 
@@ -264,8 +313,9 @@ the split. The display-list decoder was
 checked against a live list pulled out of a running game, not only against its
 own self-test.
 
-Activision banking, Bankset and SOUPER are recognised and refused with an
-explanation rather than laid out wrongly.
+Activision banking and Bankset are laid out (see
+[`docs/cartridges.md`](docs/cartridges.md)). Bankset images disassemble with MARIA's half as data, rebuild exactly, and the census and the screen rebuild read each half as the chip that uses it; which of MARIA's banks is in view is assumed, not yet confirmed (that doc says how). SOUPER and the 512K flat layout are
+recognised and refused with an explanation rather than laid out wrongly.
 
 ## Examples
 
