@@ -32,9 +32,11 @@ to draw, which is why 7800 code is so often written around a scanline budget.
 **Display List List (DLL)** -- one entry per zone, three bytes:
 
 ```
-byte 0:  bit 7    trigger a display interrupt at the end of this zone
-         bit 6    holey DMA, 16K
-         bit 5    holey DMA, 8K
+byte 0:  bit 7    display interrupt (DLI): it fires after DMA on the last line of
+                  the PREVIOUS zone, so the handler runs before this zone is
+                  drawn and its register writes apply to this zone
+         bit 6    holey DMA for 16-line zones (odd 4K blocks read as zero)
+         bit 5    holey DMA for 8-line zones (odd 2K blocks read as zero)
          bits 3-0 offset: scanlines in this zone, minus one
 byte 1:  display list address, high
 byte 2:  display list address, low
@@ -68,13 +70,13 @@ the single most reliable way to get a confident wrong answer out of a 7800 ROM.
 | addr | name | notes |
 |---|---|---|
 | `$20` | `BACKGRND` | border and background colour |
-| `$21-$3F` | `P0C1`..`P7C3` | eight palettes of three colours; colour 0 is the background |
+| `$21-$23`, `$25-$27`, `$29-$2B`, `$2D-$2F`, `$31-$33`, `$35-$37`, `$39-$3B`, `$3D-$3F` | `P0C1`..`P7C3` | eight palettes of three colours (write-only; high nibble hue, low nibble luminance); colour 0 is the background. The gaps are WSYNC, MSTAT, DPPH, DPPL, CHARBASE, OFFSET and CTRL |
 | `$24` | `WSYNC` | write to stall until the next scanline |
 | `$28` | `MSTAT` | read: bit 7 set during vertical blank |
 | `$2C`, `$30` | `DPPH`, `DPPL` | where the DLL is. **Write-only** |
 | `$34` | `CHARBASE` | high byte for character (indirect) mode |
 | `$38` | `OFFSET` | |
-| `$3C` | `CTRL` | DMA enable, read mode, character width, border, kangaroo |
+| `$3C` | `CTRL` | write-only: bit 7 colour kill, bits 6-5 DMA (`10` normal, `11` off; `00`/`01` are test modes, do not use), bit 4 two-byte characters, bit 3 border (black or background), bit 2 kangaroo (no transparency), bits 1-0 read mode. Bits 4 and 1-0 and the DMA value `10` were checked against MAME here; the rest are from the Guide |
 
 `DPPH`/`DPPL` being write-only is why finding a running game's display list
 needs a write tap rather than a memory read -- see `probes/dumpdl.lua`.
@@ -100,8 +102,16 @@ calibrated against extra NOPs (14.020 cycles/iteration fitted, 14.016 counted
 by hand) and the model was checked by predicting four shapes it had not seen,
 all within 0.3%.
 
-NTSC: **262 scanlines/frame, 114.00 CPU cycles each, 29,868 cycles/frame.** Of
-those, 21 lines are VBLANK, where DMA is off and the CPU has everything.
+NTSC: **263 scanlines/frame, 113.5 CPU cycles each (454 cycles of the 7.16 MHz
+clock), 29,850.5 cycles/frame, 59.96 frames/second.** That is what MAME runs: a
+cartridge that never turns MARIA on and spins in `JMP *` executes 29,850 cycles a
+frame, block after block. (This page used to say 262 lines of 114.00, 29,868, and
+`dmabudget.py`'s calibration above says the same; the 17.5-cycle difference is
+0.06% and below what that calibration could resolve, but the 263 x 113.5 figure is
+also the one the 7800 Software Guide gives, and it is the one that adds up.) Of
+those lines, about 21 are VBLANK, where DMA is off and the CPU has everything; the
+Guide puts the visible area at rasters 16-258 and the safe area at 41-233.
+PAL, from the Guide and not measured here: 313 rasters, 35,525.5 cycles.
 
 | what | CPU cycles | colour clocks |
 |---|---|---|
@@ -146,8 +156,9 @@ frame on DMA. A full screen of 16-byte-wide objects can pass 60%.
 
 ### Holey DMA
 
-With holey DMA on, reads from certain pages return zero instead of fetching.
-Games use it so one display list entry can span a region where most of the
+With holey DMA on, graphics reads from the odd 4K blocks (16-line zones, bit 6) or
+odd 2K blocks (8-line zones, bit 5) return zero instead of fetching, and it only
+works above `$8000`. Games use it so one display list entry can span a region where most of the
 graphics are absent, without paying DMA for the empty parts. If graphics vanish
 in a region that looks correct in the ROM, check the zone's holey bits.
 
@@ -176,7 +187,20 @@ more shipped a POKEY -- the header flags say where it is mapped.
 `INPTCTRL` at `$0001` is the console-control register. Games write it during
 startup to switch out of 2600 mode and enable MARIA; you will see it in the
 first few instructions after RESET, which is how the reset probe in
-`cart.py` recognises real startup code.
+`cart.py` recognises real startup code. Write-only; per the 7800 Software Guide
+(not measured here):
+
+| bit | name | meaning |
+|---|---|---|
+| 0 | lock | once set, the register cannot be changed until power-off |
+| 1 | MARIA enable | enables MARIA and the system RAM |
+| 2 | EXT | 0 = the BIOS is mapped at `$8000-$FFFF`, 1 = the cartridge is |
+| 3 | TIA-EN | 1 = TIA video and two-button mode off, 0 = MARIA video |
+
+The tools use bit 0 as the sign that the BIOS has handed over (`exectrace.lua`,
+`romcoverage.lua`). Accesses to the TIA (`$00-$1F`) and the RIOT (`$280-$2FF`) slow
+the CPU to 1.19 MHz for that cycle -- about half a cycle each, which
+`cyclebudget.lua` charges as its "slow" figure.
 
 ## POKEY, when a cartridge has one
 

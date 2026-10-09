@@ -50,6 +50,25 @@ where the lines really do ascend.
 a five-byte header's second byte) select the format. For read mode 0, the 160
 modes:
 
+The six modes are the combinations of two things: the *write mode* bit (bit 7 of
+a five-byte entry's second byte, or the set-up of the entry) and the *read mode*
+(CTRL bits 1-0). From the 7800 Software Guide, and agreeing with what was measured
+here for 160A, 160B and 320A:
+
+| mode | write mode | read mode (CTRL bits 1-0) |
+|---|---|---|
+| 160A | 0 | 0 |
+| 160B | 1 | 0 |
+| 320A | 0 | 3 |
+| 320B | 1 | 2 |
+| 320C | 1 | 3 |
+| 320D | 0 | 2 |
+
+Write mode is not initialised at power-up, so a game that never sets it draws
+whatever the last value was. In 320 modes objects can only be placed in 2-pixel
+steps; in 160B, palettes 0-3 and 4-7 combine for twelve usable colours; changing
+read mode in mid-line gives 320C or 320D.
+
 * **160A** (write mode 0) -- two bits per pixel, four pixels per byte, MSB first.
   Each 2-bit value indexes into the entry's own palette: value 0 is transparent,
   1-3 are that palette's three colours. Most artwork is this: three colours and
@@ -69,8 +88,7 @@ modes:
   that zone, not the one below it (Triple Punch's "1UP / HI SCORE" row is drawn
   with the font the handler selects; reading it with the previous registers gave
   noise).
-* **320D and the rest of the 320 modes** -- read mode 2, and read mode 3 with
-  write mode 1, were seen to draw something other than one bit per pixel (bits
+* **320B, 320C and 320D** -- read mode 2, and read mode 3 with write mode 1, were seen to draw something other than one bit per pixel (bits
   are paired across the byte) and are *not* decoded; `mariapix.py` returns
   nothing for them rather than guess.
 * **320B and 320C** reach four colours at 320 resolution by pairing bytes, so

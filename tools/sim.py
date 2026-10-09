@@ -783,7 +783,14 @@ class CPU(object):
 # Measured, not quoted: a counting cartridge run under MAME put the NTSC
 # scanline at exactly 114.00 CPU cycles and the non-VBLANK window at exactly
 # 241.0 of the 262 lines. See docs/hardware.md, "What MARIA costs", and
-# probes/dma-costcart.py for the instrument. PAL is derived the same way from
+# probes/dma-costcart.py for the instrument. NOTE: a later direct count (probes/
+# cyclebudget.lua on a cartridge that never turns MARIA on) found the frame is 263
+# lines of 113.5 cycles = 29,850.5, which is also the 7800 Software Guide's figure;
+# these constants (262 x 114 = 29,868) are 17.5 cycles a frame long and have NOT been
+# changed, because the simulator's validation against MAME was done with them. The
+# Guide also says a DLI fires after DMA on the last line of the PREVIOUS zone, i.e.
+# before the flagged zone is drawn; the comment on run() below says 'at the end of
+# any zone whose DLL entry has bit 7 set', a zone later. PAL is derived the same way from
 # its own clock and line count, and has NOT been measured.
 CYCLES_PER_LINE = 114.0
 LINES = {"ntsc": 262, "pal": 312}

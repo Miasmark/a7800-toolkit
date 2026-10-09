@@ -238,8 +238,9 @@ def t_dmabudget():
             raise AssertionError(
                 "width %d chars %d five %d: model %.0f vs measured %d (%.1f%%)"
                 % (width, chars, five, model, measured, 100 * err))
-    if d.REGIONS["ntsc"][0] != 262:
-        raise AssertionError("NTSC scanline count changed")
+    lines, hz, fps = d.REGIONS["ntsc"]
+    if lines != 263 or abs(hz / fps - 29850.5) > 0.5:
+        raise AssertionError("NTSC frame is 263 lines x 113.5 = 29,850.5 cycles")
     return ("12 measured configurations reproduced, worst error %.1f%%"
             % (100 * worst))
 
@@ -1469,7 +1470,20 @@ def t_probes_mame(rom):
     assert len(cb) == 3, cb
     m = re.match(r"f\d+ executed (\d+) nmi (\d+) slow (\d+) dma (\d+) all (\d+)", cb[1])
     ex, nm, sl, dm, al = [int(x) for x in m.groups()]
-    assert ex + sl + dm == 29868 and 0 < dm < 0.2 * 29868, cb[1]    # what is left is MARIA's
+    assert abs(ex + sl + dm - 29850.5) < 2 and 0 < dm < 0.2 * 29850.5, cb[1]  # the rest is MARIA's
+    # the frame length itself: with MARIA never turned on, the CPU gets all of it.
+    # 263 lines x 113.5 cycles = 29,850.5 (the older 262 x 114 = 29,868 was wrong)
+    import mktone
+    tone = os.path.join(work, "idle.a78")
+    mktone.build_tia(tone, 4, 5)
+    subprocess.run([tone if a == srom else a for a in sbase] +
+                   ["-nothrottle", "-seconds_to_run", "5", "-autoboot_script",
+                    os.path.join(ROOT, "probes", "cyclebudget.lua")],
+                   cwd=work, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                   env=dict(env, A7800_CB_FROM="60", A7800_CB_END="160", A7800_CB_BLOCK="50"))
+    idle = io.open(os.path.join(work, "cyclebudget.log"), encoding="utf-8").read().splitlines()
+    got = int(re.match(r"f\d+ executed (\d+)", idle[-1]).group(1))
+    assert 29849 <= got <= 29852, idle
     assert 10 < nm < 200 and abs(al - ex) < 50, cb[1]   # one short NMI a frame; all code is up here
     subprocess.run(sbase + ["-nothrottle", "-seconds_to_run", "10", "-autoboot_script",
                             os.path.join(ROOT, "probes", "addrorigin.lua")],

@@ -26,8 +26,9 @@
 --   A7800_CB_FROM    first frame counted (default 0)
 --   A7800_CB_END     stop after this frame (default 600)
 --   A7800_CB_BLOCK   frames per output line (default 100)
---   A7800_CB_FRAME   cycles in a frame (default 29868 = 262 lines x 114, NTSC;
---                    PAL is 35568 = 312 x 114)
+--   A7800_CB_FRAME   cycles in a frame (default 29850.5 = 263 lines x 113.5, NTSC,
+--                    measured with MARIA off; PAL should be 35525.5 = 313 x 113.5
+--                    per the 7800 Software Guide, not measured)
 --   A7800_CB_RANGES  name=lo-hi,... hex PC ranges, no $
 --   A7800_CB_OUT     output file
 --
@@ -47,7 +48,7 @@ local PEN = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,1,1,0,0,0,0
 local FROM = tonumber(os.getenv("A7800_CB_FROM") or "") or 0
 local END = tonumber(os.getenv("A7800_CB_END") or "") or 600
 local BLOCK = tonumber(os.getenv("A7800_CB_BLOCK") or "") or 100
-local FRAME = tonumber(os.getenv("A7800_CB_FRAME") or "") or 29868
+local FRAME = tonumber(os.getenv("A7800_CB_FRAME") or "") or 29850.5
 local OUT = os.getenv("A7800_CB_OUT") or "cyclebudget.log"
 local RANGES = {}
 for name, lo, hi in (os.getenv("A7800_CB_RANGES") or ""):gmatch("([%w_]+)=(%x+)%-(%x+)") do
