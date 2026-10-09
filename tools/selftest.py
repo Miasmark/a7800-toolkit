@@ -430,7 +430,26 @@ def t_sim_bus():
     assert st["regs"] == {"a": 0x60, "x": 0xFF, "y": 1, "s": 0xFF, "p": 0xB5}
     assert st["ram"][0x93] == 0x42 and st["ram"][0x1928] == 0xB0
     shutil.rmtree(work, True)
-    return "$xx28 is RAM, MSTAT at $28/$128, zero-page mirror, hand-over loads"
+    # the console switches: constant unless exploring, then every one of them moves
+    assert bus.read(0x0282) == 0x0B and bus.read(0x0008) == 0x00
+    seen = {sim.explore_switches(f) for f in range(2400)}
+    assert {(v >> 6) & 3 for v in seen} == {0, 1, 2, 3}, "difficulty switches do not cycle"
+    for bit in (0, 1, 3):
+        assert any(not v & (1 << bit) for v in seen), "switch bit %d never pressed" % bit
+        assert any(v & (1 << bit) for v in seen)
+    # pause is pressed twice per cycle so a toggling game resumes
+    pulses = sum(1 for f in range(1, 600)
+                 if not sim.explore_switches(f) & 8 and sim.explore_switches(f - 1) & 8)
+    assert pulses == 2, "pause pressed %d times in a cycle" % pulses
+    assert any(sim.explore_second_button(f, 1) for f in range(200)) and \
+        not all(sim.explore_second_button(f, 1) for f in range(200))
+    bus.frame = 105
+    bus.drive = "explore"
+    assert bus.read(0x0282) == 0x0B, "the plain sweep moves the console switches"
+    bus.drive = "switches"
+    assert not bus.read(0x0282) & 2, "select not held at frame 105 while exploring"
+    return ("$xx28 is RAM, MSTAT at $28/$128, zero-page mirror, hand-over loads, "
+            "explore moves the console switches")
 
 
 def t_cycles():
@@ -1249,6 +1268,11 @@ def t_census():
         cart = r["cart"]
         assert "b7" not in census.canon_spaces(cart) and "f7" in census.canon_spaces(cart)
         dark = census.dark_areas(cart, r["cls"])
+        # the branch the run never takes leads to code nothing reaches: dark, until
+        # branchforce finds it (t_branchforce)
+        lo = facts["sym"]["rare_path"]
+        assert any(a["space"] == "f7" and a["lo"] == lo for a in dark), dark
+        dark = [a for a in dark if not (a["space"] == "f7" and a["lo"] == lo)]
         got = {(a["space"], a["guess"]) for a in dark}
         want = {("b%d" % facts["text_bank"], "text")} | \
                {("b%d" % b, "graphics-like") for b in facts["never_executed_banks"]
@@ -1277,6 +1301,34 @@ def t_census():
     finally:
         shutil.rmtree(out, True)
     return "dark = the text bank and the two untouched banks; RAM counters found; merge only grows"
+
+
+def t_branchforce():
+    """branchforce.py on the synthetic cartridge: a branch the run never takes leads to a
+    hand-pushed RTS and code the static tracer cannot reach (kept, as joined), and its
+    twin leads into JAM bytes (trimmed); starts at known data are all dead."""
+    import branchforce
+    import census
+    import disasm
+    synth = _synth()
+    _d, facts = synth.build()
+    rom = os.path.join(ROOT, "tests", "carts", "synth128.a78")
+    r = branchforce.explore(rom, frames=120)
+    target = ("f7", facts["forced_target"])
+    assert r["kept"].get(target) == "joined", r["kept"]
+    an, _g, _w, _v = disasm.analyse(r["cart"], disasm.Config())
+    assert target not in an.code, "the static tracer was not meant to reach it"
+    assert any("opcode" in why for why in r["dead"].values()), r["dead"]
+    assert not any(l[1] in range(facts["forcing_demo"], facts["forced_target"] - 8)
+                   and l not in r["real"].x and l in r["kept"] and
+                   r["cart"].byte(l[0], l[1]) == 0x02 for l in r["kept"]), "JAM kept"
+    nl = branchforce.null_rate(r["cart"], r["real"], r["watcher"], n=40)
+    assert nl["joined"] == 0 and nl["dead"] > 0, nl
+    # in the census it is its own class, apart from what executed
+    c = census.build(rom, 120, False, force=True)
+    per, tot = census.summary(c["cart"], c["cls"])
+    assert tot[census.FORCED] > 0 and tot[census.EXEC] > 0, tot
+    return "forced branch found the computed-RTS target, junk path trimmed, data starts all dead"
 
 
 def t_census_guess():
@@ -4150,6 +4202,7 @@ def main():
     r.check("simulated address origins", t_simorigins)
     r.check("census", t_census)
     r.check("census guesses", t_census_guess)
+    r.check("branch forcing", t_branchforce)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)
     r.check("sim bus", t_sim_bus)

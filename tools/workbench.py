@@ -684,7 +684,7 @@ def _kinds():
                    "adds to the last, so coverage only grows.",
              build=build_census,
              params=[p("seconds", "seconds of play", "int", 30, min=5, max=600),
-                     p("explore", "sweep the joystick too", "bool", True),
+                     p("explore", "sweep the joystick and console switches too", "bool", True),
                      p("accumulate", "add to the previous census", "bool", True)]),
         dict(kind="profile", label="Where the time goes", group="Measure", mame=False,
              about="Where the 6502 spends its cycles, grouped under the routine "

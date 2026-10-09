@@ -296,6 +296,34 @@ def fold(a):
     return a
 
 
+def explore_switches(frame):
+    """SWCHB while exploring with `drive="switches"` (the joystick sweep of
+    `drive="explore"` plus these): the console switches move, so code behind them runs.
+
+    Active low, as on the console. The two difficulty switches (bits 7 and 6) step
+    through all four combinations, a new one every 300 frames. Select (bit 1) is held
+    for ten frames out of every 240 and Reset/Start (bit 0) for ten out of every 480,
+    at different phases so each is seen alone and neither starts the run. Pause
+    (bit 3) is pressed twice, thirty frames apart, once every 600 frames: most games
+    toggle on the press, so the pair pauses and then resumes, and a game that
+    pauses is not left stopped for the rest of the run."""
+    v = 0x0B | (((frame // 300) & 3) << 6)
+    if 100 <= frame % 240 < 110:
+        v &= ~0x02
+    if 200 <= frame % 480 < 210:
+        v &= ~0x01
+    t = frame % 600
+    if 400 <= t < 404 or 430 <= t < 434:
+        v &= ~0x08
+    return v & 0xFF
+
+
+def explore_second_button(frame, which):
+    """INPT0-3 while exploring: bit 7 set (pressed) for eight frames in every ninety,
+    each input at its own phase. 0 otherwise."""
+    return 0x80 if (frame + 23 * which) % 90 < 8 else 0x00
+
+
 class Bus(object):
     """The 7800's memory map, as much of it as sound needs.
 
@@ -371,7 +399,11 @@ class Bus(object):
             # played its second voice.)
             return 0x80 if self.vblank else 0x00
         if a in (0x0008, 0x0009, 0x000A, 0x000B):
-            return 0x00                  # INPT0-3: no paddles
+            # INPT0-3: no paddles -- or, exploring, the second buttons of two-button
+            # sticks, pressed (bit 7 set) in short turns so a game that has them uses them.
+            if self.drive == "switches":
+                return explore_second_button(self.frame, a - 0x0008)
+            return 0x00
         if a in (0x000C, 0x000D):
             # INPT4/5: fire buttons, active low.
             #
@@ -389,7 +421,7 @@ class Bus(object):
             # SWCHA: joystick directions, also active low. All ones is centred --
             # unless exploring: then the stick sweeps right, left, down, up and rests,
             # twenty frames each, so a game that needs a push to do anything does it.
-            if self.drive == "explore":
+            if self.drive in ("explore", "switches"):
                 step = (self.frame // 20) % 5
                 return (0xFF, 0x7F, 0xBF, 0xDF, 0xEF)[step] if step else 0xFF
             return 0xFF
@@ -398,7 +430,9 @@ class Bus(object):
             # bit means "not pressed". Returning zeros here reads as reset and
             # select both held down, and a game that waits for them to be
             # released waits forever. Midnight Mutants spins on exactly that.
-            #   bit 0 reset, bit 1 select, bit 3 colour/BW
+            #   bit 0 reset, bit 1 select, bit 3 pause, bits 6/7 difficulty
+            if self.drive == "switches":
+                return explore_switches(self.frame)
             return 0x0B
         return self.ram[fold(a)]
 

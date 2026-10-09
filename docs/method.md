@@ -49,7 +49,12 @@ it sorts every ROM byte by what the simulated run did with it and lists the dark
 ran, read or drew and the tracer does not reach -- with a guess at what each is. Against what the simulator
 observed in four cartridges, the code-like guess labelled all of the executed runs of 12 bytes or more as
 code and 3% of what MARIA drew; it is a pointer, not a verdict. Runs add to each other, so the dark shrinks
-as you play.
+as you play. Exploring drives the stick, then also the console switches (Select, Reset, Pause, both
+difficulty switches) and the second buttons, as two runs that are unioned: switches open code behind
+them (Mat Mania went from 244 to 2133 instructions in 900 frames) but can also change where a game goes,
+so neither run contains the other. `--force` goes further and takes the untaken side of each branch in a
+sandbox (`tools/branchforce.py`); what that finds is marked as its own class, because a forced path may
+be one the game never reaches.
 
 It is also where the later steps live. **Run** starts the toolkit's other tools on
 the cartridge -- the first-look report, the disassembly, *observe code* and *find

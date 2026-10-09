@@ -105,6 +105,24 @@ trick_rts:
     RTS                     ; ... so this RTS goes to rts_target, not to its caller
 rts_target:
     INC $B8
+    JSR forcing_demo        ; a branch the run never takes (see below)
+    RTS
+forcing_demo:
+    LDA $BC                 ; always zero, so the branch below is never taken ...
+    BNE rare_path
+    LDA $BC
+    BEQ forcing_out         ; ... and this one always is; its other side is not code
+    .byte $02, $02, $02
+forcing_out:
+    RTS
+rare_path:                  ; code only a forced branch runs, and only by a computed RTS
+    LDA #>forced_target-1
+    PHA
+    LDA #<forced_target-1
+    PHA
+    RTS
+forced_target:
+    INC $BD
     RTS
 bank_table:
     .byte %s
@@ -159,6 +177,8 @@ def build(region="ntsc", title="Synth128"):
         "handler_a": sym["handler_a"],          # reached only via JMP (VEC)
         "rts_target": sym["rts_target"],        # reached only by a hand-pushed RTS
         "trick_rts": sym["trick_rts"],
+        "forced_target": sym["forced_target"],   # reached only down a branch never taken
+        "forcing_demo": sym["forcing_demo"],
         "ram_vector": 0x00A0,
         "computed_switch": sym["computed_switch"],   # the STA BANKSEL
         "bank_table": sym["bank_table"],

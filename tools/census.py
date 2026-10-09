@@ -28,7 +28,7 @@ which stretches nothing and MARIA never touched (free RAM), and how deep the sta
 "UNREACHABLE" HAS TO BE READ CAREFULLY. This reports what one simulated run and the static
 trace did not reach. A level the run never entered is dark; so is code only a cheat code
 calls. Dark means "nothing found it yet", not "nothing can". Two things make it more
-honest: `--explore` sweeps the joystick as well as tapping fire, and `--merge` unions this
+honest: `--explore` sweeps the joystick as well as tapping fire, and adds a second run that also steps the difficulty switches and presses Select, Reset, Pause and the second buttons, and `--merge` unions this
 run with earlier ones, so coverage can only grow. The guesses at what a dark area is are
 heuristics and labelled as such.
 
@@ -52,14 +52,16 @@ import cart as cart_module  # noqa: E402
 import m6502  # noqa: E402
 import sim  # noqa: E402
 import simprobe  # noqa: E402
+import branchforce  # noqa: E402
 
-EXEC, READ, GFX, UNRUN, BLOCK, FILL, COPY, DARK = range(1, 9)
+EXEC, READ, GFX, UNRUN, BLOCK, FILL, COPY, DARK, FORCED = range(1, 10)
 NAMES = {EXEC: "executed", READ: "read as data", GFX: "fetched by MARIA",
          UNRUN: "code, not run", BLOCK: "block, untouched", FILL: "fill",
-         COPY: "copy of used bytes", DARK: "DARK"}
+         COPY: "copy of used bytes", DARK: "DARK",
+         FORCED: "code, found by forcing branches"}
 COLOURS = {EXEC: (70, 150, 90), READ: (70, 110, 200), GFX: (160, 90, 200),
            UNRUN: (200, 180, 60), BLOCK: (60, 160, 170), FILL: (90, 90, 90),
-           COPY: (120, 140, 150), DARK: (210, 60, 60)}
+           COPY: (120, 140, 150), DARK: (210, 60, 60), FORCED: (230, 140, 60)}
 RAM_LO, RAM_HI = 0x1800, 0x27FF
 MIN_FILL = 16
 
@@ -179,13 +181,26 @@ class CensusCollector(simprobe.Collector):
                                 self._mark(a + 1, bank)
 
 
-def run(rom, frames=1800, explore=False, mapper=None, low=None, handover=None):
+def run(rom, frames=1800, explore=False, mapper=None, low=None, handover=None,
+        drive=None, force=False):
+    """One simulated run. `drive` is sim's (True taps fire, "explore" sweeps the stick,
+    "switches" adds the console switches); by default `explore` picks "explore"."""
     cart = cart_module.Cart(rom, mapper=mapper, low=low)
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     start = sim.load_handover(handover) if handover else None
     col = CensusCollector(cart)
-    bus = sim.run(cart, frames, region, drive="explore" if explore else True,
-                  start_state=start, observer=col)
+    mode = drive or ("explore" if explore else True)
+    watcher = branchforce.Watcher(col) if force else None
+    bus = sim.run(cart, frames, region,
+                  drive=mode,
+                  start_state=start, observer=watcher or col)
+    col.forced, col.force_stats = set(), None
+    if force:
+        kept, dead, nfork = branchforce.force(cart, col, watcher, drive=mode)
+        col.forced = {l for l in kept if l not in col.x}
+        col.force_stats = {"forks": nfork, "dead": len(dead),
+                           "joined": sum(1 for l in col.forced if kept[l] == "joined"),
+                           "ran on": sum(1 for l in col.forced if kept[l] == "ran on")}
     return cart, col, bus
 
 
@@ -263,7 +278,8 @@ def classify(cart, sets, static_code, blocks):
     addresses is one set of bytes, not two."""
     marks = bytearray(len(cart.rom))
     for kind, locs in ((EXEC, sets["exec"]), (READ, sets["read"]), (GFX, sets["gfx"]),
-                       (UNRUN, static_code), (BLOCK, blocks)):
+                       (UNRUN, static_code), (FORCED, sets.get("forced", ())),
+                       (BLOCK, blocks)):
         for (sp, a) in locs:
             try:
                 o = cart._offset(sp, a)
@@ -292,7 +308,7 @@ def classify(cart, sets, static_code, blocks):
         out[sp] = cls
     # copies: unexplained bytes identical, at the same CPU address, to bytes another
     # bank used (so the copy is there for the day that bank is the one mapped in)
-    used = (EXEC, READ, GFX, UNRUN)
+    used = (EXEC, READ, GFX, UNRUN, FORCED)
     names = list(out)
     for sp in names:
         base, size = cart.base_of(sp), cart.size_of(sp)
@@ -448,20 +464,48 @@ def spans(addrs):
 
 # ------------------------------------------------------------------- the output
 def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
-          handover=None):
-    cart, col, bus = run(rom, frames, explore, mapper, low, handover)
-    sets = {"exec": executed_bytes(cart, col.x), "read": set(col.d), "gfx": set(col.gfx)}
+          handover=None, force=False):
+    # Exploring is two runs, unioned: the stick alone, and the stick with the console
+    # switches. Pressing Select or Reset changes where a game goes -- it opens code
+    # behind the switches but can also keep a game from reaching what plain play does
+    # (measured: Mat Mania 244 -> 2133 instructions, Galaga 1893 -> 1491) -- so neither
+    # run contains the other.
+    cart, col, bus = run(rom, frames, explore, mapper, low, handover, None, force)
+    sets = {"exec": executed_bytes(cart, col.x), "read": set(col.d), "gfx": set(col.gfx),
+            "forced": executed_bytes(cart, col.forced)}
+    notes = []
+    stats = [col.force_stats]
+    if explore:
+        cart2, col2, bus2 = run(rom, frames, explore, mapper, low, handover, "switches",
+                                force)
+        stats.append(col2.force_stats)
+        sets["forced"] |= executed_bytes(cart2, col2.forced)
+        sets["exec"] |= executed_bytes(cart2, col2.x)
+        sets["read"] |= set(col2.d)
+        sets["gfx"] |= set(col2.gfx)
+        notes.append("unioned with a second run that also worked the console switches: "
+                     "%d and %d instructions ran" % (len(col.x), len(col2.x)))
+        if len(col2.x) > len(col.x):
+            col, bus = col2, bus2
     # the CPU reads the interrupt and reset vectors itself, not through an instruction
     vsp = cart.space_of(0xFFFA, None)
     if vsp:
         sets["read"] |= {(vsp, 0xFFFA + i) for i in range(6)}
-    notes = []
     for path in merge:
         old = json.load(io.open(path, encoding="utf-8"))
-        for key in ("exec", "read", "gfx"):
+        for key in ("exec", "read", "gfx", "forced"):
             sets[key] |= set(expand({sp: [tuple(r) for r in rs]
-                                     for sp, rs in old["sets"][key].items()}))
+                                     for sp, rs in old["sets"].get(key, {}).items()}))
         notes.append("merged %s (%d frames)" % (os.path.basename(path), old["frames"]))
+    stats = [s for s in stats if s]
+    if stats:
+        notes.append("forcing the untaken side of branches (branchforce.py) ran %d paths "
+                     "and kept %d instructions the runs never executed -- %d joined code "
+                     "that ran, %d ran on unchecked -- and trimmed %d dead paths; those "
+                     "are marked apart from what executed"
+                     % (sum(s["forks"] for s in stats), len(sets["forced"]),
+                        sum(s["joined"] for s in stats), sum(s["ran on"] for s in stats),
+                        sum(s["dead"] for s in stats)))
     static_code, blocks = static_view(cart, config)
     cls = classify(cart, sets, static_code, blocks)
     return {"cart": cart, "col": col, "bus": bus, "sets": sets, "cls": cls,
@@ -527,7 +571,9 @@ def markdown(name, r):
     L = ["# Census: %s" % name, ""]
     L.append("%d frames simulated%s; the display list was live on %d of them; %d "
              "distinct instructions ran; MARIA's reads were sampled on %d frames."
-             % (r["frames"], " with the joystick swept" if r["explore"] else "",
+             % (r["frames"],
+                " with the joystick swept, and a second run on the console switches"
+                if r["explore"] else "",
                 col.frames_with_list, len(col.x), col.sampled))
     for n in r["notes"]:
         L.append("(%s.)" % n)
@@ -537,14 +583,17 @@ def markdown(name, r):
                  "Whatever is called dark below may only be what the simulator never got "
                  "to; see simprobe.py for what it does not model.")
     L += ["", "## ROM", "", "| what the machine did with it | bytes | share |", "|---|---:|---:|"]
-    for k in (EXEC, READ, GFX, UNRUN, BLOCK, FILL, COPY, DARK):
+    for k in (EXEC, READ, GFX, UNRUN, FORCED, BLOCK, FILL, COPY, DARK):
+        if k == FORCED and not tot[k]:
+            continue
         L.append("| %s | %d | %s |" % (NAMES[k], tot[k], pct(tot[k], total)))
-    L += ["", "Per space:", "", "| space | executed | read | MARIA | code, not run | block | fill | copy | DARK |",
-          "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    L += ["", "Per space:", "", "| space | executed | read | MARIA | code, not run | forced | block | fill | copy | DARK |",
+          "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for sp in canon_spaces(cart):
         d = per[sp]
-        L.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d |" % (
-            sp, d[EXEC], d[READ], d[GFX], d[UNRUN], d[BLOCK], d[FILL], d[COPY], d[DARK]))
+        L.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+            sp, d[EXEC], d[READ], d[GFX], d[UNRUN], d[FORCED], d[BLOCK], d[FILL], d[COPY],
+            d[DARK]))
     L += ["", "## Dark areas: nothing ran, read or drew them, and the tracer does not reach them", ""]
     if not dark:
         L.append("None of 4 bytes or more.")
@@ -658,7 +707,10 @@ def main(argv=None):
     ap.add_argument("-o", "--out", default="census")
     ap.add_argument("--frames", type=int, default=1800)
     ap.add_argument("--explore", action="store_true",
-                    help="sweep the joystick as well as tapping fire, to reach more")
+                    help="sweep the joystick as well as tapping fire, and add a second run that works the console switches and second buttons; the two are unioned")
+    ap.add_argument("--force", action="store_true",
+                    help="also take the untaken side of each branch (branchforce.py) and "
+                         "mark the code that finds apart from what executed; slow")
     ap.add_argument("-c", "--config", help="annotations.json: its data blocks and entries count")
     ap.add_argument("--merge", action="append", default=[], metavar="CENSUS.JSON",
                     help="union an earlier census (repeatable); coverage only grows")
@@ -670,7 +722,7 @@ def main(argv=None):
         sys.exit("census: no such file: %s" % args.rom)
     try:
         r = build(args.rom, args.frames, args.explore, args.config, args.merge,
-                  args.mapper, args.low, args.handover)
+                  args.mapper, args.low, args.handover, args.force)
     except (cart_module.UnknownMapper, cart_module.UnknownSpace, IOError) as e:
         sys.exit("census: %s" % e)
     os.makedirs(args.out, exist_ok=True)
