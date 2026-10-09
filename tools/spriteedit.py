@@ -74,6 +74,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from addr import address  # noqa: E402
+import localserver  # noqa: E402
 import cart as cart_module
 import palette as palette_mod
 
@@ -275,6 +276,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not localserver.guard(self, False):
+            return
         p = self.path.split("?")[0]
         try:
             if p == "/":
@@ -287,11 +290,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global DIRTY
-        n = int(self.headers.get("Content-Length", 0))
-        try:
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            return self._send(400, {"error": "bad JSON"})
+        body = localserver.read_json(self)
+        if body is None:
+            return                      # it has already answered
         try:
             if self.path == "/api/pixel":
                 REGION.set_pixel(int(body["cell"]), int(body["line"]),
@@ -311,6 +312,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/save":
                 out = body.get("path") or (os.path.splitext(PATH)[0]
                                            + "-edited.a78")
+                out = localserver.confine(out, localserver.roots(PATH))
                 r = save(out)
                 DIRTY = False
                 return self._send(200, r)
@@ -536,7 +538,7 @@ async function useCandidate(trio){
   closePicker();
 }
 async function applyPalette(cols){
-  const r = await fetch('/api/palette', {method:'POST',
+  const r = await fetch('/api/palette', {method:'POST',headers:{'Content-Type':'application/json'},
     body: JSON.stringify({colours: cols})});
   const j = await r.json();
   if(j.error){ msg(j.error, true); return; }
@@ -672,7 +674,7 @@ function pushUndo(){
   if(undoStack.length>64) undoStack.shift();
 }
 async function commit(){
-  const r=await fetch('/api/cell',{method:'POST',
+  const r=await fetch('/api/cell',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({cell:sel,rows:R.cells[sel]})});
   const j=await r.json();
   if(j.error){ msg(j.error,true); return; }
@@ -730,13 +732,13 @@ async function go(){
   const t=$('base').value.trim();
   body.base = t.startsWith('0x')||t.startsWith('$')
     ? parseInt(t.replace('$','0x'),16) : parseInt(t,16);
-  const r=await fetch('/api/goto',{method:'POST',body:JSON.stringify(body)});
+  const r=await fetch('/api/goto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const j=await r.json();
   if(j.error){msg(j.error,true);return;}
   R=j; sel=0; undoStack=[]; clip=null; draw(); msg('');
 }
 async function save(){
-  const r=await fetch('/api/save',{method:'POST',body:'{}'});
+  const r=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   const j=await r.json();
   if(j.error) msg(j.error,true);
   else msg('wrote '+j.path+' — '+j.changed+' bytes changed, all inside the '

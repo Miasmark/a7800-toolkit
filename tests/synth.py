@@ -108,11 +108,16 @@ rts_target:
     JSR forcing_demo        ; a branch the run never takes (see below)
     RTS
 forcing_demo:
+    LDY #$02
+    LDA fdata,Y             ; a table the code reads as data ...
+    STA $BE
     LDA $BC                 ; always zero, so the branch below is never taken ...
     BNE rare_path
     LDA $BC
-    BEQ forcing_out         ; ... and this one always is; its other side is not code
-    .byte $02, $02, $02
+    BEQ forcing_out         ; ... and this one always is; its other side is the table
+fdata:
+    .byte $A9, $01, $8D, $00, $18, $E8, $E8, $EA   ; decodes as code; read as data
+    .byte $02                                       ; JAM: where that "code" ends
 forcing_out:
     RTS
 rare_path:                  ; code only a forced branch runs, and only by a computed RTS
@@ -179,6 +184,7 @@ def build(region="ntsc", title="Synth128"):
         "trick_rts": sym["trick_rts"],
         "forced_target": sym["forced_target"],   # reached only down a branch never taken
         "forcing_demo": sym["forcing_demo"],
+        "fdata": sym["fdata"],                   # a table that falls through as "code"
         "ram_vector": 0x00A0,
         "computed_switch": sym["computed_switch"],   # the STA BANKSEL
         "bank_table": sym["bank_table"],

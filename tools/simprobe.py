@@ -69,6 +69,9 @@ class Collector(sim.Observer):
         self.arrival = {}            # location -> how it was first reached
         self.pred = {}               # location -> the location fetched just before it, first time
         self.frame = 0
+        self.callsite = {}           # stack pointer after a JSR -> the JSR's own location
+        self.irq_sites = []          # the instruction each interrupt in progress interrupted
+        self._site = None
         self.nmi_frames = set()      # frames in which at least one display interrupt was taken
         self.jfirst = {}             # (from, to) of a jump -> the frame it was first taken
         self.sfirst = {}             # (from, bank) of a bank switch -> the frame it was first taken
@@ -125,10 +128,22 @@ class Collector(sim.Observer):
         loc = self.loc(pc)
         if loc is None and (pc & 0xFFFF) < 0x4000:
             self.ramx.add(sim.fold(pc & 0xFFFF))
+        site, self._site = self._site, None             # a normal return's call site
+        irq_site = None
+        if self._prev_op == 0x40 and self.irq_sites:      # just after an RTI
+            irq_site = self.irq_sites.pop()
         if loc is not None:
             if loc not in self.x:
-                self.arrival[loc] = self._how(pc)
-                self.pred[loc] = self.last         # the instruction that ran just before
+                how, pred = self._how(pc), self.last   # the instruction that ran just before
+                # an RTS that matched its JSR, or an RTI, is control coming BACK: it was
+                # entered from the call (or the interrupted instruction), not from the
+                # callee's last instruction, which is a different question
+                if how == "rts" and site is not None:
+                    how, pred = "ret", site
+                elif how == "rti" and irq_site is not None:
+                    pred = irq_site
+                self.arrival[loc] = how
+                self.pred[loc] = pred
             self.x.add(loc)
             if self.profile is not None:
                 self.profile[loc] = self.profile.get(loc, 0) + m6502.CYCLES[opcode]
@@ -177,10 +192,13 @@ class Collector(sim.Observer):
 
     def call(self, pc, target, ret, sp):
         self.shadow[sp] = ret
+        self.callsite[sp] = self.last
 
     def ret(self, pc, target, sp):
         want = self.shadow.pop(sp, None)
+        site = self.callsite.pop(sp, None)
         if want == target:
+            self._site = site
             return
         # a return that did not come from a JSR: the return address was pushed by
         # hand (PHA / PHA / RTS), which is a computed jump no static tracer follows
@@ -198,6 +216,7 @@ class Collector(sim.Observer):
     def nmi(self):
         self.nmis += 1
         self.nmi_frames.add(self.frame)
+        self.irq_sites.append(self.last)
         self._irq = True
 
     def maria_write(self, reg, value):
@@ -234,7 +253,7 @@ def ram_sources(cart, bus, col, probe_len=16):
         off = rom.find(k)
         if off < 0 or not any(k):
             continue
-        for sp in cart.spaces():
+        for sp in cart_module.canonical_spaces(cart):    # fixed bank over its window alias
             o0, size, base = cart._file_base(sp), cart.size_of(sp), cart.base_of(sp)
             if o0 <= off < o0 + size:
                 out.append((lo, n, (sp, base + off - o0)))
@@ -355,6 +374,7 @@ def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=N
             "indirect_jumps": len(col.j), "bank_switches": len(col.s),
             "frames_with_display_list": col.frames_with_list,
             "stuck_fetches": col.stuck, "audio_writes": len(bus.writes),
+            "jammed": bus.jammed,
             "dll": ("%02X%02X" % (bus.dpph, bus.dppl)
                     if bus.dpph is not None and bus.dppl is not None else None),
             "ctrl": bus.ctrl}

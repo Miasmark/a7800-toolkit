@@ -115,6 +115,7 @@ def _sled(cart, executed, minrun=16):
 
 def measure(path, frames=300, drive=True):
     """One cartridge's record (a dict of plain numbers and strings)."""
+    import m6502
     import disasm
     import dyn
     import simprobe
@@ -200,13 +201,25 @@ def measure(path, frames=300, drive=True):
     except Exception as e:                                    # noqa: BLE001
         rec["recall"]["assisted_error"] = str(e)[:80]
     # data reads against the static classification
-    in_code = in_gap = 0
+    # A byte both read and executed is code the program also reads (a checksum, a copy): not
+    # evidence of false code. Read and NEVER executed, yet printed as an instruction, is.
+    ran = set()
+    for (sp, a) in col.x:
+        try:
+            n = m6502.LENGTH[cart.byte(sp, a)]
+        except Exception:                                     # noqa: BLE001
+            n = 1
+        ran.update((sp, a + k) for k in range(n))
+    in_code = in_gap = false_code = 0
     for (sp, a) in col.d:
         if a in static.get(sp, ()):
             in_code += 1
+            if (sp, a) not in ran:
+                false_code += 1
         else:
             in_gap += 1
-    rec["data"] = {"read": len(col.d), "in_static_code": in_code, "in_gap": in_gap}
+    rec["data"] = {"read": len(col.d), "in_static_code": in_code, "in_gap": in_gap,
+                   "false_code_bytes": false_code}
     rec["ok"] = True
     return rec
 
@@ -316,10 +329,14 @@ def report(recs, worst=15):
     ing = sum(r["data"]["in_gap"] for r in use)
     print("  %d bytes read; %d (%s) lie inside what the static pass printed as instructions, "
           "%d (%s) in gaps" % (dr, inc, pct(inc, dr).strip(), ing, pct(ing, dr).strip()))
-    worstd = sorted(use, key=lambda r: -r["data"]["in_static_code"])[:8]
-    print("  most data read from inside 'code':")
+    fc = sum(r["data"].get("false_code_bytes", 0) for r in use)
+    print("  of those, %d were never executed: printed as instructions yet read as data, which "
+          "is the measured lower bound on false code (the rest are code the program also "
+          "reads: checksums, copies)" % fc)
+    worstd = sorted(use, key=lambda r: -r["data"].get("false_code_bytes", 0))[:8]
+    print("  most false code (read as data, never executed, listed as instructions):")
     for r in worstd:
-        print("    %5d bytes  %s" % (r["data"]["in_static_code"], r["name"][:60]))
+        print("    %5d bytes  %s" % (r["data"].get("false_code_bytes", 0), r["name"][:60]))
     sw = sum(r["static"]["unresolved_switches"] for r in ok)
     print("\nstatic bank-switch sites it could not resolve: %d across %d cartridges"
           % (sw, sum(1 for r in ok if r["static"]["unresolved_switches"])))

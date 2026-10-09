@@ -61,6 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from addr import parse_addr  # noqa: E402
 import cart as cart_module
 import tracker
+import localserver
 
 CART = None
 ROM = None
@@ -549,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not localserver.guard(self, False):
+            return
         p = self.path.split("?")[0]
         try:
             if p == "/":
@@ -571,11 +574,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "no such thing"})
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
-        try:
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            return self._send(400, {"error": "bad JSON"})
+        body = localserver.read_json(self)
+        if body is None:
+            return                      # it has already answered
         try:
             if self.path == "/api/set":
                 for k, v in body.items():
@@ -590,6 +591,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"suggestions": out})
             if self.path == "/api/emit":
                 path = emit_path(body.get("path"))
+                if body.get("path"):
+                    path = localserver.confine(path, localserver.roots(ROM) + [
+                        os.path.join(os.path.dirname(os.path.dirname(
+                            os.path.abspath(__file__))), "formats")])
                 d = os.path.dirname(path)
                 if d and not os.path.isdir(d):
                     os.makedirs(d)
@@ -756,7 +761,7 @@ function draw(){
 }
 
 async function set(patch){
-  S=await (await fetch('/api/set',{method:'POST',body:JSON.stringify(patch)})).json();
+  S=await (await fetch('/api/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)})).json();
   draw();
 }
 for(const f of FIELDS){
@@ -781,7 +786,7 @@ $('play').onclick=async()=>{
 };
 async function doSuggest(){
   $('sugcol').innerHTML='<h2>readings</h2><div class="muted">scoring…</div>';
-  const j=await (await fetch('/api/suggest',{method:'POST',body:'{}'})).json();
+  const j=await (await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
   let h='<h2>readings, likeliest first</h2>'+
     '<div class="muted">Click one, then press Play. These are guesses at the '+
     '<em>layout</em>, and they assume you are pointed at music &mdash; the '+
@@ -793,10 +798,10 @@ async function doSuggest(){
        s.score.toFixed(2)+'  '+s.why+'</div>';
   $('sugcol').innerHTML=h;
 }
-async function apply(st){ S=await (await fetch('/api/set',{method:'POST',
+async function apply(st){ S=await (await fetch('/api/set',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(st)})).json(); draw(); $('msg').textContent='loaded — press Play'; }
 async function emit(){
-  const j=await (await fetch('/api/emit',{method:'POST',body:'{}'})).json();
+  const j=await (await fetch('/api/emit',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
   $('msg').textContent = j.error ? j.error : ('wrote '+j.path);
 }
 load();

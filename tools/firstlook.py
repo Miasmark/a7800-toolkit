@@ -196,8 +196,9 @@ class Mame(object):
 
     def run(self, probe, seconds, workdir, env=None, extra=()):
         """Run one probe headless; return MAME's output text."""
-        cmd = [self.exe, self.machine] + capture.bios_args() + [
-            "-rompath", self.roms, "-cart", self.rom, "-video", "none",
+        bios, roms = capture.machine_setup(self.machine, self.roms)
+        cmd = [self.exe, self.machine] + bios + [
+            "-rompath", roms, "-cart", self.rom, "-video", "none",
             "-sound", "none", "-skip_gameinfo", "-nothrottle",
             "-seconds_to_run", str(int(seconds))]
         if self.playback:
@@ -633,9 +634,11 @@ def merge_code(rom, out, c, log, rep):
     rep.facts["code"] = merged.get("_dynamic", {}).get("exectrace.log", {})
     return ["`annotations.json` is a starter file with what the run observed "
             "(marked observed, not proven):", ""] + ["- " + l.strip() for l in lines] + [
-            "", "Next: `python tools/disasm.py %s -c %s -o src` then "
-            "`python tools/verify.py %s -d src`." % (
-                '"%s"' % rom, '"%s"' % ann, '"%s"' % rom)]
+            "", "Next: copy that file to `annotations.json` beside your listing folder "
+            "(or let `python tools/workbench.py` do it: it adopts it into its project), "
+            "then `python tools/disasm.py %s -c annotations.json -o src` and "
+            "`python tools/verify.py %s -d src`. The starter file is `%s`." % (
+                '"%s"' % rom, '"%s"' % rom, ann)]
 
 
 # ------------------------------------------------------- the simulator as the engine

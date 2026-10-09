@@ -83,8 +83,16 @@ pinned by hand.
 
 Three things can sit at `$4000-$7FFF`, and the header says which: nothing,
 on-cart RAM (`$0004`), the second-to-last bank (`$0010`), or an extra ROM bank
-(`$0008`, the 144K arrangement). Getting this wrong is quiet -- the code still
-disassembles, it just disassembles the wrong bank.
+(`$0008`, the 144K arrangement and its 272K and 528K relatives). Getting this wrong is
+quiet -- the code still disassembles, it just disassembles the wrong bank.
+
+The `$0008` layout is **measured**, in MAME 0.264, on Alien Brigade (144K), Lunar
+Patrol (272K), Kinetescape and Drone Patrol (528K): `$4000` shows **file bank 0**, `$C000`
+shows the last bank, and a write of value *v* to the window shows **file bank *v* + 1**,
+so the window is the banks between the two fixed ones (`b1`..`b(n-2)`; `f0` and `f(n-1)`
+are the fixed ones). An earlier version of this layout put bank *n*-2 at `$4000` and
+numbered the window from 0; none of those images ran in the simulator, and all of them do
+now.
 
 The rule that the *last* bank is the one at `$C000` is not an assumption: across
 207 SuperGame images where the reset vector could be matched to real startup

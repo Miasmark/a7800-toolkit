@@ -332,10 +332,17 @@ class Analyzer:
                 for reg, clobbers in self._VEC_CLOBBERS.items():
                     if mn in clobbers:
                         last_imm[reg] = None
+            # pair each low-byte store with the NEAREST high-byte store, and only if each is
+            # the other's nearest: every low byte matched with every high byte within the
+            # window invents handlers (the low byte of one, the high byte of the next)
             for la, lv in los:
-                for ha, hv in his:
-                    if abs(ha - la) <= window:
-                        found.append((lv | (hv << 8), (space, la)))
+                near = [(abs(ha - la), ha, hv) for ha, hv in his if abs(ha - la) <= window]
+                if not near:
+                    continue
+                _d, ha, hv = min(near)
+                back = min((abs(la2 - ha), la2) for la2, _v in los)
+                if back[1] == la:
+                    found.append((lv | (hv << 8), (space, la)))
         return found
 
     # -- naming --------------------------------------------------------------
@@ -381,7 +388,7 @@ class Config:
     def __init__(self, path=None, data=None):
         d = dict(data) if data else {}
         if path and os.path.exists(path):
-            with open(path) as f:
+            with open(path, encoding="utf-8-sig") as f:        # a Notepad-saved file has a BOM
                 d = json.load(f)
         self.entries = [parse_loc(s) for s in d.get("entries", [])]
         self.labels = d.get("labels", {})
@@ -845,6 +852,12 @@ def main():
     except (cart_module.UnknownMapper, cart_module.UnknownSpace) as e:
         sys.stderr.write("%s\n" % e)
         return 2
+    if args.config and not os.path.exists(args.config):
+        # silently ignoring a missing file gives a listing with none of the annotations
+        # the user thinks it has, and a plausible coverage number
+        sys.stderr.write("disasm: no such annotations file: %s (init.py writes one)\n"
+                         % args.config)
+        return 2
     cfg = Config(args.config)
     if args.config and os.path.exists(args.config):
         # a key this reads with .get() and does not know is dropped silently, so
@@ -852,7 +865,7 @@ def main():
         try:
             import annotations
             report, _doc = annotations.lint(
-                open(args.config, encoding="utf-8").read(), args.config)
+                open(args.config, encoding="utf-8-sig").read(), args.config)
             if report.errors:
                 sys.stderr.write(
                     "%s has %d problem%s (%s). Run: python tools/annotations.py "

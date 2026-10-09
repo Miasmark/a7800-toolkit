@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tracker
+import localserver
 
 SONG = None
 PATH = None
@@ -450,6 +451,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not localserver.guard(self, False):
+            return
         p = self.path.split("?")[0]
         q = {}
         if "?" in self.path:
@@ -474,11 +477,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global DIRTY
-        n = int(self.headers.get("Content-Length", 0))
-        try:
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            return self._send(400, {"error": "bad JSON"})
+        body = localserver.read_json(self)
+        if body is None:
+            return                      # it has already answered
         try:
             if self.path == "/api/cell":
                 r = set_cell(int(body["row"]), int(body["ch"]), body["text"])
@@ -505,6 +506,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, r)
             if self.path == "/api/save":
                 out = body.get("path") or PATH
+                out = localserver.confine(out, localserver.roots(PATH))
                 with open(out, "w", encoding="utf-8") as f:
                     f.write(tracker.dump(SONG))
                 DIRTY = False
@@ -512,6 +514,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "rows": len(SONG), "dirty": False})
             if self.path == "/api/export":
                 out = body.get("path") or (os.path.splitext(PATH)[0] + ".asm")
+                out = localserver.confine(out, localserver.roots(PATH))
                 with open(out, "w", encoding="utf-8") as f:
                     f.write(tracker.export_asm(SONG))
                 return self._send(200, {"ok": True, "path": out})

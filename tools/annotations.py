@@ -79,7 +79,7 @@ def read_json_keep(path):
     turn a CRLF file into an LF one (or the reverse)."""
     with open(path, "rb") as f:
         raw = f.read()
-    return json.loads(raw.decode("utf-8")), ("\r\n" if b"\r\n" in raw else "\n")
+    return json.loads(raw.decode("utf-8-sig")), ("\r\n" if b"\r\n" in raw else "\n")
 
 
 def write_json_keep(path, doc, newline="\n", indent=2):

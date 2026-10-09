@@ -164,6 +164,32 @@ def data_blocks(rom, doc, log, reads, low=None, mapper=None, min_len=4, gap=2):
             if o is not None:
                 existing.add(o)
 
+    # ROM copied to RAM and run there is code (merge() made it an entry), and so is any
+    # entry point already in the file: neither may be cut out as data
+    keep = set()
+    for _ramaddr, n, src in log.get("r", []):
+        sp, _, a = src.partition(":")
+        for k in range(n):
+            o = off(sp, int(a, 16) + k)
+            if o is not None:
+                keep.add(o)
+    for e in doc.get("entries", []):
+        try:
+            sp, a = disasm.parse_loc(e)
+        except Exception:                                  # noqa: BLE001
+            continue
+        o = off(sp, a)
+        if o is not None:
+            keep.add(o)
+    # where each static instruction starts, so a block does not begin inside one
+    istart = {}
+    for (sp, a) in an.code:
+        n = an.insn[(sp, a)][3]
+        here = off(sp, a)
+        for k in range(n):
+            if here is not None:
+                istart[here + k] = (here, n)
+
     reads_off = set()
     for sp, addrs in reads.items():
         for a in addrs:
@@ -185,12 +211,31 @@ def data_blocks(rom, doc, log, reads, low=None, mapper=None, min_len=4, gap=2):
 
     out, cluster = [], []
     for o in data_off + [None]:
+        # a cluster never crosses from one space into the next: a block is `loc` + `len`
+        # inside one space, and a longer one overruns its listing
+        if cluster and o is not None and o - cluster[-1] <= gap and \
+                (where(o) or ("?",))[0] != (where(cluster[-1]) or ("?",))[0]:
+            cluster_end = cluster
+            cluster = []
+            lo, hi = cluster_end[0], cluster_end[-1]
+            pos = where(lo)
+            span = range(lo, hi + 1)
+            if pos is not None and hi - lo + 1 >= min_len and not any(
+                    x in ran or x in existing or x in keep for x in span):
+                out.append({"loc": "%s:%04X" % pos, "len": hi - lo + 1, "type": "bytes",
+                            "note": "read as data by the simulator; listed as code"})
         if cluster and (o is None or o - cluster[-1] > gap):
             lo, hi = cluster[0], cluster[-1]
+            if lo in istart and istart[lo][0] != lo:       # starts inside an instruction
+                lo = istart[lo][0]
+            if hi in istart and istart[hi][0] + istart[hi][1] - 1 > hi:
+                hi = istart[hi][0] + istart[hi][1] - 1     # ends inside one
             span = range(lo, hi + 1)
             pos = where(lo)
+            if pos is not None and where(hi) is not None and where(hi)[0] != pos[0]:
+                pos = None
             veto = (hi - lo + 1 < min_len or pos is None
-                    or any(x in ran or x in existing for x in span)
+                    or any(x in ran or x in existing or x in keep for x in span)
                     or sum(1 for x in span if x in code_bytes) * 2 < len(span)
                     # the read stream runs through code on either side
                     or any(x in through_code for x in range(lo - gap - 1, hi + gap + 2))

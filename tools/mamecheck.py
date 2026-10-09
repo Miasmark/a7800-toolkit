@@ -106,6 +106,10 @@ def run_mame(rom, work, seconds=40):
     if not ok:
         return {"ran": False, "why": text[:140]}
     why = mame_complaint(text)
+    if "Unsupported mapper" in why:
+        # MAME does not implement this cartridge type: whatever it shows is the BIOS's own
+        # game, not a reference for the image
+        return {"ran": False, "why": why}
     csv = os.path.join(work, "survey-frames.csv")
     if not os.path.isfile(csv):
         return {"ran": False, "why": why or "MAME wrote no frame log"}
@@ -138,9 +142,12 @@ def run_sim(rom):
     region = ((cart.info or {}).get("region", "NTSC")).lower()
     col = simprobe.Collector()
     t = time.time()
-    sim.run(cart, WINDOW, region, drive=True, observer=col)
+    sim_bus = sim.run(cart, WINDOW, region, drive=True, observer=col)
+    bus_jam = getattr(sim_bus, "jammed", None)
     return {"ran": True, "frames": WINDOW, "live": col.frames_with_list,
-            "dli": len(col.nmi_frames), "seconds": round(time.time() - t, 1), "why": ""}
+            "dli": len(col.nmi_frames), "seconds": round(time.time() - t, 1),
+            "why": ("the program ran a KIL at $%04X and stopped itself" % bus_jam)
+                   if bus_jam is not None else ""}
 
 
 def measure(rom):
@@ -184,16 +191,36 @@ def verdict(rec):
     return ("both" if m and s else "sim only" if s else "mame only" if m else "neither")
 
 
+def _code_stamp():
+    """A short hash of the code whose behaviour the result depends on, so a cached result is
+    not reused after the simulator or the layout code changed."""
+    h = hashlib.sha1()
+    for name in ("sim.py", "cart.py", "simprobe.py", "mamecheck.py"):
+        with open(os.path.join(HERE, name), "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:8]
+
+
+INFRASTRUCTURE = ("BIOS", "NOT FOUND", "Fatal error", "Required files", "was not found",
+                  "wrote no frame log")
+
+
 def _work(item):
     path, cache, force = item
     with open(path, "rb") as f:
         digest = hashlib.sha1(f.read()).hexdigest()[:16]
-    cpath = os.path.join(cache, "%s-v%d.json" % (digest, VERSION)) if cache else None
+    cpath = os.path.join(cache, "%s-%s-v%d.json" % (digest, _code_stamp(), VERSION)) \
+        if cache else None
     if cpath and not force and os.path.isfile(cpath):
         with open(cpath) as f:
             return json.load(f)
     rec = measure(path)
     rec["sha1"] = digest
+    # a failure of the setup (no BIOS, no MAME) says nothing about the cartridge: not kept
+    why = rec.get("mame", {}).get("why", "") if rec.get("ok") else ""
+    if cpath and rec.get("ok") and not rec["mame"].get("ran") and \
+            any(k in why for k in INFRASTRUCTURE):
+        cpath = None
     if cpath:
         os.makedirs(cache, exist_ok=True)
         with open(cpath, "w") as f:
@@ -215,7 +242,7 @@ def find_roms(paths):
 def load_cache(cache):
     out = []
     for f in sorted(os.listdir(cache)):
-        if f.endswith("-v%d.json" % VERSION):
+        if f.endswith("-v%d.json" % VERSION) and ("-%s-" % _code_stamp()) in f:
             with open(os.path.join(cache, f)) as fh:
                 out.append(json.load(fh))
     return out
@@ -236,6 +263,13 @@ def report(recs, show=12):
     for k in ("both", "sim only", "mame only", "neither"):
         print("  %-10s %5d  (%.1f%%)" % (k, len(groups.get(k, [])),
                                           100.0 * len(groups.get(k, [])) / len(ok)))
+    # display interrupts: one side taking them and the other not is a disagreement even
+    # when both draw
+    for r in ok:
+        m, s = r["mame"], r["sim"]
+        if m.get("ran") and s.get("ran") and ((m.get("dli", 0) >= 10) != (s.get("dli", 0) >= 10)):
+            print("    DLI disagrees: %-44s mame %d frames, sim %d" % (
+                r["name"][:44], m.get("dli", 0), s.get("dli", 0)))
     mame_dead = [r for r in ok if not is_live(r["mame"])]
     print("\nMAME did not get a live display list on %d of %d" % (len(mame_dead), len(ok)))
     by = {}

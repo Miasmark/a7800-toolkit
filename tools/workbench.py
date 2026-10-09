@@ -45,6 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import cart as cart_module
+import localserver
 import runprobe
 
 ROM = None
@@ -195,7 +196,9 @@ def launch(tool, args, what):
         # it takes a song, not a cartridge; the caller passes the path
         cmd = [sys.executable, os.path.join(HERE, tool)] + list(args) + \
               ["--no-browser", "--port", str(port)]
-    proc = _spawn(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # the editors may write only beside the cartridge, in the working folder, or in the project
+    env = dict(os.environ, A7800_EDIT_ROOT=PROJECT or "")
+    proc = _spawn(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=env)
     CHILDREN[port] = (proc, what)
     # hand the address back only once something answers there: a tab opened at once
     # gets "connection refused", and a child that died says why instead of leaving a
@@ -574,6 +577,20 @@ def build_disasm(p):
                "the listings open in the Listing tab")
 
 
+def build_check(p):
+    cfg = config_path()
+    steps = [{"cmd": _py("disasm.py", ROM, "-o", src_dir()) +
+              (["-c", cfg] if os.path.isfile(cfg) else []) + ["--gaps"]}]
+    if os.path.isfile(cfg):
+        steps.append({"cmd": _py("annotations.py", cfg, "--rom", ROM), "soft": True})
+    steps.append({"cmd": _py("verify.py", ROM, "-d", src_dir())})
+    steps.append({"cmd": _py("build.py", ROM, "-d", src_dir(), "-o",
+                             os.path.join(PROJECT, "build", "rebuilt.a78"))})
+    return Job("check", "check my work", steps, os.path.join(PROJECT, "build"),
+               "stops at the first step that fails: the listing, the annotation checks, "
+               "the round trip, the rebuild")
+
+
 def build_verify(p):
     if not os.path.isdir(src_dir()):
         raise ValueError("there is no src/ yet: run Disassemble first")
@@ -806,6 +823,12 @@ def _kinds():
              build=build_addresses,
              params=[p("engine", "run it in", "choice", "sim", choices=["sim", "mame"]),
                      p("seconds", "seconds", "int", 10, min=5, max=600)]),
+        dict(kind="check", label="Check my work", group="Annotate", mame=False,
+             about="The whole loop in one job: disassemble with the annotations, check them, "
+                   "reassemble the listings and compare with the cartridge, then rebuild it. "
+                   "Run it after every change to the annotations; the Annotations tab's "
+                   "\"save, disassemble and verify\" starts it.",
+             build=build_check, params=[]),
         dict(kind="verify", label="Verify the round trip", group="Annotate", mame=False,
              about="Assemble the listings in src/ and check they rebuild this cartridge "
                    "byte for byte. Run it after every change to the annotations: a listing "
@@ -908,8 +931,11 @@ def save_history():
             keep = [j.saved() for j in sorted(JOBS.values(), key=lambda j: j.id)
                     if j.status in ("done", "failed", "cancelled")][-60:]
         os.makedirs(PROJECT, exist_ok=True)
-        with io.open(history_path(), "w", encoding="utf-8") as f:
-            json.dump(keep, f)
+        tmp = history_path() + ".tmp%d" % os.getpid()
+        with LOCK:
+            with io.open(tmp, "w", encoding="utf-8") as f:
+                json.dump(keep, f)
+            os.replace(tmp, history_path())
     except (OSError, TypeError, ValueError):
         pass
 
@@ -919,11 +945,22 @@ def load_history():
         rows = json.load(io.open(history_path(), encoding="utf-8"))
     except (OSError, ValueError):
         return
+    if not isinstance(rows, list):
+        return
+    root = os.path.realpath(PROJECT)
     for r in rows:
         try:
+            if not isinstance(r, dict):
+                continue
+            outdir = os.path.realpath(str(r["outdir"]))
+            if outdir != root and not outdir.startswith(root + os.sep):
+                continue                     # a job's folder is inside the project
+            r = dict(r, outdir=outdir, seconds=float(r.get("seconds", 0)))
+            if r["seconds"] != r["seconds"] or abs(r["seconds"]) > 1e9:
+                r["seconds"] = 0
             job = Job.restore(r)
-        except (KeyError, TypeError, ValueError):
-            continue
+        except Exception:                                    # noqa: BLE001
+            continue                         # a damaged history is not worth refusing to start
         JOBS[job.id] = job
         JOB_SEQ[0] = max(JOB_SEQ[0], job.id)
 
@@ -945,9 +982,25 @@ def adopt_firstlook():
     add = [e for e in new.get("entries", []) if e not in have]
     if add:
         cur.setdefault("entries", []).extend(add)
+    # the bank-switch pins and data blocks first look worked out: only where the file
+    # has none for that place, so nothing the user wrote is replaced
+    pins = 0
+    for loc, banks in (new.get("banksw") or {}).items():
+        if loc not in cur.setdefault("banksw", {}) and loc not in cur.get("bankat", {}):
+            cur["banksw"][loc] = banks
+            pins += 1
+    have_b = {b.get("loc") for b in cur.get("blocks", [])}
+    blocks = [b for b in new.get("blocks", []) if b.get("loc") not in have_b]
+    if blocks:
+        cur.setdefault("blocks", []).extend(blocks)
+    for k, v in (new.get("_dynamic") or {}).items():
+        cur.setdefault("_dynamic", {}).setdefault(k, v)
+    if add or pins or blocks:
         annotations.write_json_keep(config_path(), cur, nl)
-    return "%d entry point%s from first look added to annotations.json" % (
-        len(add), "" if len(add) == 1 else "s")
+    return "%d entry point%s, %d bank pin%s and %d data block%s from first look added to " \
+        "annotations.json" % (len(add), "" if len(add) == 1 else "s", pins,
+                              "" if pins == 1 else "s", len(blocks),
+                              "" if len(blocks) == 1 else "s")
 
 
 def project_file(rel):
@@ -965,8 +1018,8 @@ def read_annotations():
     path = config_path()
     if not os.path.isfile(path):
         return {"path": path, "exists": False, "text": "", "findings": []}
-    text = io.open(path, encoding="utf-8").read()
-    return {"path": path, "exists": True, "text": text,
+    text = io.open(path, encoding="utf-8-sig").read()      # a Notepad-saved file has a BOM
+    return {"path": path, "exists": True, "text": text, "stamp": os.stat(path).st_mtime_ns,
             "findings": lint_annotations(text)}
 
 
@@ -983,6 +1036,7 @@ def lint_annotations(text):
 
 def write_annotations(text):
     """Save the file if it is JSON at all; return the lint findings either way."""
+    text = text.lstrip("\ufeff")
     json.loads(text)                  # ValueError if it is not JSON: nothing written
     os.makedirs(PROJECT, exist_ok=True)
     # keep the file's own line ending: the page hands over LF text whatever the file has
@@ -1022,12 +1076,16 @@ def census_suggestions():
 
 
 def apply_census(items):
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        raise ValueError("items is a list of {kind, loc}")
     """Add the chosen census suggestions to annotations.json, once each.
 
     `items` are {"kind", "loc"} pairs -- what the page showed, not positions in a list
     that a newer census would have reordered. A missing annotations file is started the
     way every other job starts one (init.py), so it gets its scaffold."""
     cur = {(s["kind"], s["loc"].upper()): s for s in census_suggestions()["suggestions"]}
+    if not any((str(i.get("kind")), str(i.get("loc", "")).upper()) in cur for i in items):
+        return {"added": 0, "findings": []}           # nothing valid: start nothing
     if not os.path.isfile(config_path()):
         os.makedirs(PROJECT, exist_ok=True)
         subprocess.run(_py("init.py", ROM, "-o", config_path()), cwd=PROJECT,
@@ -1060,7 +1118,9 @@ def listing_files():
         # the fixed bank first: it holds the reset code, which is where reading starts
         # (MARIA's half of a bankset cartridge, m<space>.asm, is data: it goes last)
         for f in sorted(os.listdir(src_dir()),
-                        key=lambda n: (n.startswith("m"), not n.startswith("f"), n)):
+                        key=lambda n: (n.startswith("m"), not n.startswith("f"),
+                                       [int(t) if t.isdigit() else t
+                                        for t in re.split(r"(\d+)", n)])):
             if f.endswith(".asm"):
                 out.append({"path": "src/" + f,
                             "size": os.path.getsize(os.path.join(src_dir(), f))})
@@ -1117,27 +1177,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(206, data[start:end + 1], TYPES[ext], extra)
         return self._send(200, data, TYPES[ext], extra)
 
-    MAX_BODY = 8 * 1024 * 1024
-
     def _guard(self, post):
         """Refuse what a web page could send. This server has no password, so it must not
         answer a page on another site: a request whose Host is not this machine's own
         address is a DNS-rebinding attempt, a foreign Origin is a cross-site request, and a
         POST that is not JSON is the kind a form or a no-cors fetch can make."""
-        port = self.server.server_address[1]
-        hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port}
-        if self.headers.get("Host", "") not in hosts:
-            self._send(403, {"error": "this server answers only on its own address"})
-            return False
-        origin = self.headers.get("Origin")
-        if origin and origin not in {"http://" + h for h in hosts}:
-            self._send(403, {"error": "cross-site request refused"})
-            return False
-        if post and not self.headers.get("Content-Type", "").lower().startswith(
-                "application/json"):
-            self._send(415, {"error": "POST bodies are application/json"})
-            return False
-        return True
+        return localserver.guard(self, post)
 
     def do_GET(self):
         if not self._guard(False):
@@ -1185,20 +1230,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "no such thing"})
 
     def do_POST(self):
-        if not self._guard(True):
-            return
-        try:
-            n = int(self.headers.get("Content-Length", 0))
-        except ValueError:
-            return self._send(400, {"error": "bad Content-Length"})
-        if n < 0 or n > self.MAX_BODY:
-            return self._send(413, {"error": "request too large"})
-        try:
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            return self._send(400, {"error": "bad JSON"})
-        if not isinstance(body, dict):
-            return self._send(400, {"error": "the request body is a JSON object"})
+        body = localserver.read_json(self)
+        if body is None:
+            return                      # it has already answered
         if not isinstance(body.get("params", {}), dict):
             return self._send(400, {"error": "params is a JSON object"})
         try:
@@ -1217,7 +1251,19 @@ class Handler(BaseHTTPRequestHandler):
                     job.cancel()
                 return self._send(200, {"ok": bool(job)})
             if self.path == "/api/annotations":
-                return self._send(200, {"findings": write_annotations(body.get("text", ""))})
+                text = body.get("text", "")
+                if not isinstance(text, str):
+                    raise ValueError("text is a string")
+                base = body.get("base")
+                if (base is not None and not body.get("force") and os.path.isfile(config_path())
+                        and os.stat(config_path()).st_mtime_ns != base):
+                    return self._send(409, {"error": "changed on disk since you opened it "
+                                            "(a job or a census apply wrote to it): reload "
+                                            "to see it, or save again to overwrite",
+                                            "conflict": True})
+                r = write_annotations(text)
+                return self._send(200, {"findings": r, "stamp":
+                                        os.stat(config_path()).st_mtime_ns})
             if self.path == "/api/census/apply":
                 return self._send(200, apply_census(body.get("items") or []))
             if self.path == "/api/open":
@@ -1311,7 +1357,7 @@ PAGE = r"""<!doctype html>
  .pill{border:1px solid var(--line);border-radius:9px;padding:0 8px;color:var(--dim)}
  .pill.ok{color:var(--good)} .pill.bad{color:var(--bad)}
  a{color:var(--accent)}
- #msg{min-height:20px}
+ #msg{min-height:20px;position:sticky;top:0;background:var(--bg);z-index:5}
  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px}
  .card{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:10px 12px}
  .card .about{color:var(--dim);margin:2px 0 8px}
@@ -1439,7 +1485,7 @@ async function drawOverview(){
     'Then Disassemble, and Observe code / Find address tables to teach the listing what the static tracer cannot see.'));
   const bar=el('div',{class:'bar'},
     el('button',{text:'scan for assets',onclick:scan}),
-    el('button',{text:'open tracker',onclick:openTracker}));
+    el('button',{text:'open tracker',onclick:()=>openTracker()}));
   box.append(el('h2',{text:'assets'}),bar,el('div',{id:'assets'}));
   if(MANIFEST_VIEW) showAssets(MANIFEST_VIEW);
   box.append(el('div',{id:'tools'}));
@@ -1479,20 +1525,30 @@ function showAssets(m){
       : 'Finding these is not the same as being able to read the songs: they say where the sound data is, not what it means as music. Until a format file describes this player, the tracker records the game instead.'}));
   } else box.append(el('div',{class:'muted',text:'No audio tables reached. The player is usually behind an indirect jump; Observe code may find it, and the tracker still works because it watches the running machine.'}));
 }
+// Open an editor in a tab once it answers. The tracker may record in an emulator first (a
+// minute), so a tab opened at a fixed delay shows "connection refused"; ask the port instead.
+async function openWhenUp(url,what,limit){
+  const t0=Date.now();
+  while(Date.now()-t0<(limit||150000)){
+    try{ await fetch(url,{mode:'no-cors'}); window.open(url,'_blank'); msg(''); setTimeout(refreshTools,300); return; }
+    catch(e){ msg(what+' is starting ('+Math.round((Date.now()-t0)/1000)+' s) ...'); await new Promise(r=>setTimeout(r,700)); }
+  }
+  msg(what+' did not start; see the tools list below',true);
+}
 async function openSprite(space,base,width){
   try{ const j=await api('/api/open',{kind:'sprite',space:space,base:base,width:width,height:8,side:INFO.bankset?'maria':'sally'});
-       window.open(j.url,'_blank'); setTimeout(refreshTools,600);}catch(e){msg(e.message,true);}
+       await openWhenUp(j.url,'the sprite editor');}catch(e){msg(e.message,true);}
 }
 async function openExplore(loc){
   msg('opening the format explorer at '+loc);
   try{ const j=await api('/api/open',{kind:'explore',loc:loc,chip:INFO.chip});
-       window.open(j.url,'_blank'); msg(''); setTimeout(refreshTools,600);}catch(e){msg(e.message,true);}
+       await openWhenUp(j.url,'the format explorer');}catch(e){msg(e.message,true);}
 }
 async function openTracker(song){
   msg(INFO.format?'reading the songs out of the ROM with '+INFO.format+' — no emulator'
-     :'no format file describes this cartridge, so it will be recorded in an emulator; that takes about a minute');
-  try{ const j=await api('/api/open',{kind:'tracker',song:song||null});
-       msg('tracker starting at '+j.url); setTimeout(()=>{window.open(j.url,'_blank');refreshTools();},2500);}
+     :'no format file describes this cartridge, so it will be recorded first; that takes about a minute');
+  try{ const j=await api('/api/open',{kind:'tracker',song:(typeof song==='string')?song:null});
+       await openWhenUp(j.url,'the tracker');}
   catch(e){ msg(e.message,true); }
 }
 async function refreshTools(){
@@ -1685,12 +1741,13 @@ async function drawListing(){
 }
 
 // --------------------------------------------------------------- annotations
-let ANNOT_DRAFT=null;
+let ANNOT_DRAFT=null, ANNOT_BASE=null, ANNOT_FORCE=false;
 window.addEventListener('beforeunload',e=>{ if(ANNOT_DRAFT!==null){ e.preventDefault(); e.returnValue=''; } });
 async function drawAnnotations(fresh){
   const box=$('t-annotations'); box.replaceChildren();
   if(fresh) ANNOT_DRAFT=null;
   const a=await api('/api/annotations');
+  ANNOT_BASE=a.stamp||null; ANNOT_FORCE=false;
   if(!a.exists){
     box.append(el('div',{class:'muted',text:'There is no annotations.json in the project yet. It is the file the disassembler reads: names, entry points, data blocks, bank pins.'}),
       el('div',{class:'bar'},el('button',{text:'start one',onclick:async()=>{try{await api('/api/job',{kind:'newannot',params:{}});setTimeout(drawAnnotations,1500);}catch(e){msg(e.message,true);}}})));
@@ -1708,11 +1765,11 @@ async function drawAnnotations(fresh){
     for(const f of fs) list.append(el('div',{class:'find '+f.level,text:f.level+': '+f.message}));
   }
   const save=el('button',{text:'save and check',onclick:async()=>{
-    try{ const r=await api('/api/annotations',{text:ta.value}); findings(r.findings); status.textContent='saved'; ANNOT_DRAFT=null; }
-    catch(e){ status.textContent=''; msg(e.message,true); }
+    try{ const r=await api('/api/annotations',{text:ta.value,base:ANNOT_BASE,force:ANNOT_FORCE}); findings(r.findings); status.textContent='saved'; ANNOT_DRAFT=null; ANNOT_BASE=r.stamp||null; ANNOT_FORCE=false; }
+    catch(e){ status.textContent=''; if(/changed on disk/.test(e.message)){ ANNOT_FORCE=true; status.textContent='changed on disk -- press save again to overwrite'; } msg(e.message,true); }
   }});
   const lintbtn=el('button',{text:'reload',onclick:()=>{ if(ANNOT_DRAFT!==null&&!confirm('Discard your unsaved edits and reload the file?')) return; drawAnnotations(true); }});
-  const dis=el('button',{text:'save and disassemble',onclick:async()=>{try{ const s=await api('/api/annotations',{text:ta.value}); ANNOT_DRAFT=null; findings(s.findings); const r=await api('/api/job',{kind:'disasm',params:{}});CUR=r.id;show('results');}catch(e){msg(e.message,true);}}});
+  const dis=el('button',{text:'save, disassemble and verify',onclick:async()=>{try{ const s=await api('/api/annotations',{text:ta.value,base:ANNOT_BASE,force:ANNOT_FORCE}); ANNOT_DRAFT=null; ANNOT_BASE=s.stamp||null; ANNOT_FORCE=false; findings(s.findings); const r=await api('/api/job',{kind:'check',params:{}});CUR=r.id;show('results');}catch(e){ if(/changed on disk/.test(e.message)) ANNOT_FORCE=true; msg(e.message,true);}}});
   box.append(el('div',{class:'bar'},save,lintbtn,dis,status),ta,el('h2',{text:'checks'}),list);
   findings(a.findings);
 }
@@ -1734,7 +1791,8 @@ def main():
     ap.add_argument("rom")
     ap.add_argument("--side", choices=["sally", "maria"], default="sally",
                     help="bankset cartridges: which parallel set to work on")
-    ap.add_argument("--port", type=int, default=8120)
+    ap.add_argument("--port", type=int, default=None,
+                    help="default 8120, or the next free port after it")
     ap.add_argument("--project", help="where jobs write (default: <rom>-workbench "
                                       "beside the cartridge)")
     ap.add_argument("--no-browser", action="store_true")
@@ -1751,11 +1809,11 @@ def main():
 
     load_history()
     try:
-        srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port or 8120), Handler)
     except OSError:
         # the default port may be held by another workbench; take the next free one
         # (an explicit --port that is busy is the user's to sort out)
-        if args.port != 8120:
+        if args.port is not None:
             sys.stderr.write("port %d is already in use\n" % args.port)
             return 2
         srv = ThreadingHTTPServer(("127.0.0.1", free_port(8121)), Handler)

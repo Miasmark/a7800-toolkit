@@ -78,7 +78,9 @@ def launch(args, extra):
                  "A7800_ROMPATH to the folder holding it.")
     folder = rec_dir(args.rom)
     os.makedirs(folder, exist_ok=True)
-    cmd = [mame, machine_for(args.rom)] + capture.bios_args() + [
+    machine = machine_for(args.rom)
+    bios, rompath = capture.machine_setup(machine, rompath)
+    cmd = [mame, machine] + bios + [
            "-rompath", rompath,
            "-cart", os.path.abspath(args.rom), "-skip_gameinfo", "-window",
            "-input_directory", folder] + extra

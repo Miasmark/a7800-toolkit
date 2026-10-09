@@ -132,6 +132,7 @@ class Mapper(object):
     switch = None            # where a write selects a bank, as (lo, hi) or None
     note = ""
     window_banks = None      # banks the window can show; None means all of them
+    first_window = 0         # the file bank the window's value 0 selects
 
     def __init__(self, nbanks):
         self.nbanks = nbanks
@@ -149,7 +150,7 @@ class Mapper(object):
             return None
         lo, hi = self.switch
         if lo <= addr <= hi:
-            return value % self.nwindow
+            return self.first_window + value % self.nwindow
         return None
 
 
@@ -214,11 +215,22 @@ class SuperGame(Mapper):
         # $C000, and a fixed ROM bank at $4000. Which bank lands low is inferred
         # from the 128K case rather than confirmed -- see probe_fixed_high() and
         # the docs to check it against a particular image.
-        self.inferred = (low == "rom")
+        # MEASURED in MAME 0.264 (Alien Brigade 144K, Lunar Patrol 272K, Kinetescape and
+        # Drone Patrol 528K, all flagged $0008): $4000 shows FILE bank 0, $C000 the last bank,
+        # and a write of value v to the window shows file bank v + 1 -- so the window is the
+        # banks between the two fixed ones. (The first version of this laid out bank n-2 at
+        # $4000 and numbered the window from 0; it was inferred, and it is why those images
+        # stalled in the simulator.)
+        self.inferred = False
+        if low == "rom":
+            self.first_window = 1
+            self.window_banks = max(nbanks - 2, 1)
 
     def regions(self):
         r = []
-        if self.low in ("bank6", "rom"):
+        if self.low == "rom":
+            r.append((0x4000, 0x8000, "fixed", 0))
+        elif self.low == "bank6":
             r.append((0x4000, 0x8000, "fixed", self.nbanks - 2))
         elif self.low == "ram":
             r.append((0x4000, 0x8000, "ram", None))
@@ -280,15 +292,12 @@ class Activision(Mapper):
     name = "activision"
     switch = (0xFF80, 0xFF8F)
     window_banks = 8
-    swapped = False          # the "(OM)" dumps: blocks 14 and 15 the other way round
-
     def regions(self):
-        b8, bE = (0x1C000, 0x1E000) if self.swapped else (0x1E000, 0x1C000)
         return [(0x4000, 0x6000, "fixed", (0x1A000, "h13")),
                 (0x6000, 0x8000, "fixed", (0x18000, "h12")),
-                (0x8000, 0xA000, "fixed", (b8, "h15")),
+                (0x8000, 0xA000, "fixed", (0x1E000, "h15")),
                 (0xA000, 0xE000, "window", None),
-                (0xE000, 0x10000, "fixed", (bE, "h14"))]
+                (0xE000, 0x10000, "fixed", (0x1C000, "h14"))]
 
     def bank_from_write(self, addr, value):
         """The address selects the bank here, not the value written."""
@@ -440,18 +449,37 @@ class Cart(object):
             return
         alt = self.rom[0x1FFFC] | (self.rom[0x1FFFD] << 8)
         extra = ""
-        if 0x4000 <= alt < 0xFFFF:
-            self.map.swapped = True
-            self._region = list(self.map.regions())
+        if 0x4000 <= alt < 0xFFFF and len(self.rom) == 0x20000:
+            # MEASURED against the AM dump of the same game: every 8K block of an (OM) image
+            # is its AM block index XOR 1 -- all sixteen, not just 14 and 15 -- and the AM
+            # layout run on the permuted image behaves identically in the simulator. So read
+            # the image in AM order; `to_file_order` puts it back for a rebuild.
+            self.om_order = True
+            self.rom = self.to_file_order(self.rom)
             self.warnings.append(
-                "this is an \"(OM)\" Activision dump: blocks 14 and 15 are the other way "
-                "round, so they are laid out swapped (RESET $%04X). MAME 0.264 runs it "
-                "that way." % self.vectors().get("RESET", 0))
+                "this is an \"(OM)\" Activision dump: its 8K blocks are in the other order "
+                "(each index XOR 1), so it is read in the usual order (RESET $%04X). "
+                "MAME 0.264 runs the (OM) order and does not run the usual one."
+                % self.vectors().get("RESET", 0))
             return
         self.warnings.append(
             "this Activision image's reset vector reads $%04X, which is not a "
             "usable address, so the fixed blocks are probably not in the order "
             "this mapper expects.%s" % (rst, extra))
+
+    om_order = False
+
+    def to_file_order(self, rom):
+        """The 8K blocks of an Activision image with each pair exchanged (an involution:
+        it converts between an (OM) file and the usual order, either way)."""
+        rom = bytes(rom)
+        if not self.om_order:
+            return rom
+        out = bytearray(len(rom))
+        for i in range(len(rom) // 0x2000):
+            j = i ^ 1
+            out[i * 0x2000:(i + 1) * 0x2000] = rom[j * 0x2000:(j + 1) * 0x2000]
+        return bytes(out)
 
     def _check_pokey(self):
         """A POKEY at $4000 and ROM at $4000 cannot both be right."""
@@ -475,7 +503,8 @@ class Cart(object):
             if kind == "fixed":
                 out.append(self._fixed_name(bank))
             elif kind == "window":
-                out.extend("b%d" % i for i in range(self.map.nwindow))
+                first = self.map.first_window
+                out.extend("b%d" % i for i in range(first, first + self.map.nwindow))
         return out
 
     def _fixed_name(self, arg):
@@ -653,8 +682,8 @@ class Cart(object):
                 else:
                     what = "bank %d, space %s" % (b, self._fixed_name(b))
             elif kind == "window":
-                n = self.map.nwindow
-                what = "banks 0-%d, spaces b0-b%d" % (n - 1, n - 1)
+                n, f0 = self.map.nwindow, self.map.first_window
+                what = "banks %d-%d, spaces b%d-b%d" % (f0, f0 + n - 1, f0, f0 + n - 1)
             else:
                 what = "on-cart RAM"
             lines.append("  $%04X-$%04X %s" % (start, end - 1, what))

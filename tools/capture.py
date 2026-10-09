@@ -65,6 +65,15 @@ def bios_args():
     return ["-bios", name] if name else []
 
 
+def machine_setup(machine, rompath):
+    """(the -bios arguments, the rompath) for a machine. The PAL machine has no -bios
+    a7800pr, so with the open BIOS selected it gets pal_overlay's folder instead."""
+    bios = bios_args()
+    if machine == "a7800p" and bios and rompath:
+        return [], pal_overlay(rompath)
+    return bios, rompath
+
+
 _OVERLAYS = {}
 
 
@@ -308,13 +317,15 @@ def capture(rom, out=None, seconds=40, frames=None, skip=0, drive=True,
             f.write(watch_script(info))
         if os.path.exists(errlog):
             os.remove(errlog)
-        cmd = [exe, info["machine"]] + bios_args() + ["-rompath", roms, "-cart",
+        bios, roms = machine_setup(info["machine"], roms)
+        cmd = [exe, info["machine"]] + bios + ["-rompath", roms, "-cart",
                os.path.abspath(rom), "-debug", "-debugscript", wp,
                "-autoboot_script", FRAME_PROBE, "-autoboot_delay", "1", "-log",
                "-sound", "none", "-video", "none", "-nothrottle",
                "-seconds_to_run", str(int(seconds) + 8)]
     else:
-        cmd = [exe, info["machine"]] + bios_args() + ["-rompath", roms, "-cart",
+        bios, roms = machine_setup(info["machine"], roms)
+        cmd = [exe, info["machine"]] + bios + ["-rompath", roms, "-cart",
                os.path.abspath(rom), "-autoboot_script", PROBE,
                "-sound", "none", "-video", "none", "-nothrottle",
                "-seconds_to_run", str(int(seconds) + 5)]

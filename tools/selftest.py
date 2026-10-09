@@ -935,7 +935,22 @@ vectors_pad:
         assert bus.ram[0x1804] == 0, "decimal ADC set Z from the decimal result"
     finally:
         shutil.rmtree(work, True)
-    return "WSYNC pacing, RIOT timer, cartridge RAM and decimal flags behave"
+    # ... and the RIOT timer and WSYNC against what MAME 0.264 itself returned for a synthetic
+    # cartridge that samples INTIM/TIMINT (tests/carts/riot.a78, dump in tests/golden/): the
+    # first samples of each prescale, the flag clear-on-INTIM-read sequence and the WSYNC
+    # phase rows are exact; later samples after an expiry can sit one count off at a prescale
+    # boundary, which is the one thing not yet modelled (6532 divider phase)
+    gold = io.open(os.path.join(ROOT, "tests", "golden", "riot-mame.bin"), "rb").read()
+    rc = cart_module.Cart(os.path.join(ROOT, "tests", "carts", "riot.a78"))
+    rb = sim.run(rc, 40, "ntsc", drive=False)
+    got = bytes(rb.ram[0x1800:0x2800])
+    for name, lo, n in (("TIM64T", 0x000, 48), ("TIM64T flag", 0x100, 64), ("TIM1T", 0x200, 20),
+                        ("TIM1T flag", 0x300, 20), ("TIM8T", 0x400, 7), ("TIM8T flag", 0x500, 20),
+                        ("INTIM clears TIMINT", 0x600, 0x15), ("WSYNC", 0x700, 0x20)):
+        assert got[lo:lo + n] == gold[lo:lo + n], (name, gold[lo:lo + n].hex(), got[lo:lo + n].hex())
+    off = sum(1 for i in range(0x300) if got[i] != gold[i])
+    assert off < 0x180, "RIOT samples differ from MAME's in %d places" % off
+    return "WSYNC pacing, RIOT timer (against MAME's own dump), cartridge RAM and decimal flags behave"
 
 
 def t_sim_window():
@@ -1121,6 +1136,47 @@ def t_workbench_hardening():
         WB.JOBS.clear()
         WB.load_history()
         assert any(x.status == "failed" for x in WB.JOBS.values()), WB.JOBS
+        # a Notepad-saved file (BOM) reads; the page's draft is not overwritten blindly;
+        # a bad census request starts nothing; first look is adopted without losing pins
+        with io.open(WB.config_path(), "w", encoding="utf-8-sig") as f:
+            f.write('{"entries": []}')
+        assert WB.read_annotations()["text"].startswith("{"), "BOM not stripped"
+        base = WB.read_annotations()["stamp"]
+        time.sleep(0.02)
+        with io.open(WB.config_path(), "w", encoding="utf-8") as f:
+            f.write('{"entries": ["f7:C000"]}')
+        os.utime(WB.config_path(), (time.time() + 5, time.time() + 5))
+        url2, stop2 = _wb_serve(WB)
+        try:
+            code, r = _wb_call(url2, "/api/annotations", {"text": '{"entries": []}', "base": base})
+            assert code == 409 and r.get("conflict"), (code, r)
+            code, r = _wb_call(url2, "/api/annotations", {"text": '{"entries": []}', "base": base,
+                                                          "force": True})
+            assert code == 200 and "stamp" in r, (code, r)
+            gone = os.path.join(WB.PROJECT, "annotations.json")
+            os.remove(gone)
+            code, r = _wb_call(url2, "/api/census/apply", {"items": "ab"})
+            assert code == 400 and not os.path.exists(gone), (code, r)
+            code, r = _wb_call(url2, "/api/census/apply", {"items": [{"kind": "x", "loc": "q:1"}]})
+            assert code == 200 and r["added"] == 0 and not os.path.exists(gone), (code, r)
+        finally:
+            stop2()
+        os.makedirs(os.path.join(WB.PROJECT, "firstlook"), exist_ok=True)
+        with io.open(os.path.join(WB.PROJECT, "firstlook", "annotations.json"), "w") as f:
+            json.dump({"entries": ["f7:C100"], "banksw": {"f7:C0DC": [1, 2]},
+                       "blocks": [{"loc": "f7:D000", "len": 4}]}, f)
+        with io.open(WB.config_path(), "w") as f:
+            json.dump({"entries": ["f7:C000"]}, f)
+        WB.adopt_firstlook()
+        got = json.load(io.open(WB.config_path()))
+        assert got["entries"] == ["f7:C000", "f7:C100"] and got["banksw"] == {"f7:C0DC": [1, 2]} \
+            and got["blocks"], got
+        # a damaged jobs.json does not stop the workbench starting
+        for junk in ("null", '[{"id": 1e400, "kind": "x"}]', "[1, 2]", '[{"outdir": "/etc"}]'):
+            with io.open(WB.history_path(), "w") as f:
+                f.write(junk)
+            WB.JOBS.clear()
+            WB.load_history()
         # saving annotations keeps the file's line ending
         with io.open(WB.config_path(), "w", encoding="utf-8", newline="") as f:
             f.write('{\r\n  "entries": []\r\n}\r\n')
@@ -1130,6 +1186,60 @@ def t_workbench_hardening():
     finally:
         shutil.rmtree(work, True)
     return "foreign Host/Origin/non-JSON refused, bodies capped, probe settings limited, one job per kind, failures finish, cancel kills the tree, history survives, line endings kept"
+
+
+def t_localserver():
+    """The rules every local server shares (localserver.py): own Host only, no foreign
+    Origin, POSTs are JSON objects of sane size, and a save path stays in the folders the
+    user is working in. Also that the three editors really call them."""
+    import localserver
+
+    class H(object):
+        class server(object):
+            server_address = ("127.0.0.1", 8140)
+
+        def __init__(self, headers, body=b""):
+            import io as _io
+            self.headers = headers
+            self.rfile = _io.BytesIO(body)
+            self.sent = None
+
+        def _send(self, code, body, ctype=None):
+            self.sent = code
+
+    ok = {"Host": "127.0.0.1:8140", "Content-Type": "application/json"}
+    assert localserver.guard(H(dict(ok)), True)
+    for bad, code in (({"Host": "evil.com", "Content-Type": "application/json"}, 403),
+                      (dict(ok, Origin="http://evil.com"), 403),
+                      (dict(ok, **{"Content-Type": "text/plain"}), 415),
+                      ({"Content-Type": "application/json"}, 403)):
+        h = H(bad)
+        assert not localserver.guard(h, True) and h.sent == code, (bad, h.sent)
+    assert localserver.guard(H(dict(ok, Origin="http://localhost:8140")), True)
+    h = H(dict(ok, **{"Content-Length": "2"}), b"[]")
+    assert localserver.read_json(h) is None and h.sent == 400
+    h = H(dict(ok, **{"Content-Length": "x"}))
+    assert localserver.read_json(h) is None and h.sent == 400
+    h = H(dict(ok, **{"Content-Length": "99999999999"}))
+    assert localserver.read_json(h) is None and h.sent == 413
+    h = H(dict(ok, **{"Content-Length": "7"}), b'{"a":1}')
+    assert localserver.read_json(h) == {"a": 1}
+    work = tempfile.mkdtemp(prefix="selftest-confine-")
+    try:
+        roots = [work]
+        assert localserver.confine(os.path.join(work, "x", "y.bin"), roots)
+        for bad in ("/etc/passwd", os.path.join(work, "..", "elsewhere")):
+            try:
+                localserver.confine(bad, roots)
+            except ValueError:
+                continue
+            raise AssertionError("accepted %s" % bad)
+    finally:
+        shutil.rmtree(work, True)
+    for name in ("spriteedit", "trackeredit", "explore", "workbench"):
+        text = io.open(os.path.join(HERE, name + ".py"), encoding="utf-8").read()
+        assert "localserver.guard" in text or "localserver.read_json" in text, name
+    return "Host, Origin, Content-Type, body limits and save-path confinement; all four servers use them"
 
 
 def t_workbench_jobs():
@@ -1361,7 +1471,14 @@ def t_workbench_browser():
             pg.wait_for_selector("#t-annotations textarea", timeout=20000)
             pg.fill("#t-annotations textarea", '{"entrys": []}')
             pg.click("#t-annotations button:has-text('save and check')")
-            pg.wait_for_selector("#t-annotations .find.error")
+            try:
+                pg.wait_for_selector("#t-annotations .find.error", timeout=4000)
+            except Exception:                                  # noqa: BLE001
+                # the start-one job may still have been writing the file: the page says it
+                # changed on disk and asks for a second press to overwrite
+                assert "changed on disk" in pg.inner_text("#msg"), pg.inner_text("#msg")
+                pg.click("#t-annotations button:has-text('save and check')")
+                pg.wait_for_selector("#t-annotations .find.error")
             assert "did you mean" in pg.inner_text("#t-annotations .find.error")
             b.close()
     finally:
@@ -1471,7 +1588,9 @@ def t_census():
         # branchforce finds it (t_branchforce)
         lo = facts["sym"]["rare_path"]
         assert any(a["space"] == "f7" and a["lo"] == lo for a in dark), dark
-        dark = [a for a in dark if not (a["space"] == "f7" and a["lo"] == lo)]
+        # (the forcing demo's table is only partly read, so its unread tail is dark too)
+        end = facts["sym"]["bank_table"]
+        dark = [a for a in dark if not (a["space"] == "f7" and facts["fdata"] <= a["lo"] < end)]
         got = {(a["space"], a["guess"]) for a in dark}
         want = {("b%d" % facts["text_bank"], "text")} | \
                {("b%d" % b, "graphics-like") for b in facts["never_executed_banks"]
@@ -1497,6 +1616,15 @@ def t_census():
         m = census.build(rom, 60, False, merge=[os.path.join(o2, "census.json")])
         _p, tot2 = census.summary(cart_module.Cart(rom), m["cls"])
         assert tot2[census.EXEC] >= j["totals"]["executed"], "merging lost coverage"
+        j["rom_sha1"] = "0" * 40
+        other = os.path.join(out, "other.json")
+        io.open(other, "w", encoding="utf-8").write(json.dumps(j))
+        try:
+            census.build(rom, 60, False, merge=[other])
+        except ValueError as e:
+            assert "different cartridge" in str(e), e
+        else:
+            raise AssertionError("a census of another cartridge was merged")
     finally:
         shutil.rmtree(out, True)
     return "dark = the text bank and the two untouched banks; RAM counters found; merge only grows"
@@ -1596,6 +1724,38 @@ def t_mamecheck():
     return "live-display-list rule and the four verdicts"
 
 
+def t_exrom_layout():
+    """The `$0008` (EXROM) SuperGame layout as measured in MAME: file bank 0 at $4000, the
+    last bank at $C000, and the window showing file bank value + 1."""
+    import cart as cart_module
+    work = tempfile.mkdtemp(prefix="selftest-exrom-")
+    try:
+        nb = 9
+        body = bytearray()
+        for b in range(nb):
+            body += bytes([b]) * 0x4000
+        body[-6:] = bytes([0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0])
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = len(body).to_bytes(4, "big")
+        hdr[53], hdr[54] = 0x00, 0x0A                 # SuperGame + EXROM
+        hdr[55] = 1
+        rom = os.path.join(work, "e.a78")
+        io.open(rom, "wb").write(bytes(hdr) + bytes(body))
+        c = cart_module.Cart(rom)
+        assert c.byte(c.space_of(0x4000, None), 0x4000) == 0, "$4000 is not file bank 0"
+        assert c.byte(c.space_of(0xC000, None), 0xC000) == nb - 1, "$C000 is not the last bank"
+        assert c.map.bank_from_write(0x8000, 5) == 6 and c.map.bank_from_write(0x8000, 0) == 1
+        assert c.map.bank_from_write(0x8000, 7) == 1, "the window has nb-2 banks and wraps"
+        sp = c.spaces()
+        assert sp[0] == "f0" and "b1" in sp and "b0" not in sp and sp[-1] == "f%d" % (nb - 1), sp
+        assert c.byte("b6", 0x8000) == 6
+    finally:
+        shutil.rmtree(work, True)
+    return "EXROM: f0 at $4000, last bank at $C000, window value v -> file bank v+1"
+
+
 def t_branchforce():
     """branchforce.py on the synthetic cartridge: a branch the run never takes leads to a
     hand-pushed RTS and code the static tracer cannot reach (kept, as joined), and its
@@ -1611,7 +1771,8 @@ def t_branchforce():
     assert r["kept"].get(target) == "joined", r["kept"]
     an, _g, _w, _v = disasm.analyse(r["cart"], disasm.Config())
     assert target not in an.code, "the static tracer was not meant to reach it"
-    assert any("opcode" in why for why in r["dead"].values()), r["dead"]
+    # the path through the table dies: it runs into bytes the run read as data
+    assert any("read as data" in why or "opcode" in why for why in r["dead"].values()), r["dead"]
     assert not any(l[1] in range(facts["forcing_demo"], facts["forced_target"] - 8)
                    and l not in r["real"].x and l in r["kept"] and
                    r["cart"].byte(l[0], l[1]) == 0x02 for l in r["kept"]), "JAM kept"
@@ -1649,10 +1810,20 @@ def t_dyn_sim():
         assert "f7:%04X" % facts["forced_target"] in doc["entries"], doc["entries"]
         assert "forced_entries" in doc["_dynamic"]["exectrace.log"], doc["_dynamic"]
         # reads over code the run never executed turn into one block, and nothing is lost
-        lo = facts["forced_target"]
-        reads = {"f7": set(range(lo, lo + 3))}
-        blocks = dyn.data_blocks(rom, doc, log, reads, min_len=3)
-        assert len(blocks) == 1 and blocks[0]["loc"] == "f7:%04X" % lo and blocks[0]["len"] == 3, blocks
+        lo = facts["fdata"]
+        reads = {"f7": set(range(lo, lo + 8))}
+        blocks = dyn.data_blocks(rom, doc, log, reads)
+        assert len(blocks) == 1 and blocks[0]["loc"] == "f7:%04X" % lo and blocks[0]["len"] == 8, blocks
+        # a table straddling the end of one space and the start of the next is split there,
+        # never proposed as one block that overruns its listing
+        fe = facts["fdata"]
+        assert not [b for b in dyn.data_blocks(rom, doc, log, {"f7": set(range(fe, fe + 8)),
+                                                                "b0": set(range(0x8000, 0x8008))})
+                    if b["len"] > 8], "a block crossed a space boundary"
+        # nor over a forced entry, which is code
+        ft = facts["forced_target"]
+        assert not dyn.data_blocks(rom, doc, log, {"f7": set(range(ft, ft + 3))}, min_len=3), \
+            "a block was cut over an entry point"
         # ... but not a range a retained branch goes to: that is code the game also reads
         rp = facts["sym"]["rare_path"]
         assert not dyn.data_blocks(rom, doc, log, {"f7": set(range(rp, rp + 4))}, min_len=3), \
@@ -4550,6 +4721,7 @@ def main():
     r.check("address origins", t_origins)
     r.check("POKEY to TIA", t_pokey2tia)
     r.check("workbench jobs", t_workbench_jobs)
+    r.check("local server rules", t_localserver)
     r.check("workbench hardening", t_workbench_hardening)
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
@@ -4560,6 +4732,7 @@ def main():
     r.check("census, bankset", t_census_bankset)
     r.check("bankset round trip", t_bankset_roundtrip)
     r.check("mamecheck", t_mamecheck)
+    r.check("EXROM layout", t_exrom_layout)
     r.check("branch forcing", t_branchforce)
     r.check("corpus measure", t_corpus)
     r.check("first look, simulated", t_firstlook_sim)
@@ -4603,7 +4776,7 @@ def main():
     print("")
     print("%d passed, %d failed, %d skipped" % (n_ok, len(r.failed), n_skip))
     if n_skip and not user_rom:
-        print("Pass --rom, --format and --log to run the rest.")
+        print("Pass --rom, --format and --log to run the rest; the tests marked nothing-to-test need MAME and its BIOS (docs/emulation.md).")
     return 1 if r.failed else 0
 
 

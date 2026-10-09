@@ -13,11 +13,13 @@ the ROM it came from. If the comparison fails, the listing is wrong -- not
 "close", wrong -- and no annotation on top of it is worth anything.
 
 ```
+python tools/init.py game.a78 -o annotations.json     # once
 python tools/disasm.py game.a78 -c annotations.json -o src
 python tools/verify.py game.a78 -d src
+python tools/build.py game.a78 -d src                 # rebuilds the whole image
 ```
 
-Do this from the first hour, not once at the end. It costs seconds and it means
+(The workbench's **Check my work** job runs all four after every change.) Do this from the first hour, not once at the end. It costs seconds and it means
 that when you later mark a byte range as data, or rename a label, or split a
 table, you find out immediately whether you broke the reconstruction. Everything
 else in this document is a way of adding *meaning* to a listing that is already

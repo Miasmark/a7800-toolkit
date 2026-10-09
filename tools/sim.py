@@ -340,6 +340,9 @@ class Bus(object):
         self.cart = cart
         self.ram = bytearray(0x10000)
         self.bank = cart.nbanks - 1 if cart.nbanks > 1 else 0
+        first = getattr(getattr(cart, "map", None), "first_window", 0)
+        if first:
+            self.bank = first                       # the window's lowest bank, before any switch
         self.audio = {}                 # address -> last value written
         self.writes = []                # (frame, address, value)
         self.frame = 0
@@ -361,26 +364,41 @@ class Bus(object):
         self.rom_low = min([0x4000] + starts)
         self.cart_ram = [(r[0], r[1]) for r in regions if r[2] == "ram"]
         self.wsync = False              # a write to WSYNC is waiting to stall the CPU
+        self.jammed = None              # set to the address of a KIL the program ran
         self.timer = None               # the RIOT interval timer: (set at cycle, value, interval)
+        self.timer_flag_cleared = False
         self.pokeys = set()
         for base in cart.pokeys():
             for r in range(16):
                 self.pokeys.add(base + r)
 
+    RIOT_BIAS = 1       # cycles from the write that starts the timer to the first count (fitted)
+
     def riot(self, a):
-        """INTIM ($0284/$0286) and TIMINT ($0285/$0287) from the timer last started."""
+        """INTIM ($0284/$0286) and TIMINT ($0285/$0287) as the 6532 answers them (the numbers
+        are MAME's, checked against tests/golden/riot-mame.bin):
+
+        the timer reads N - ceil(e / interval) until it reaches zero, expiring at e = N *
+        interval; then it counts down once per CYCLE from $FF and TIMINT bit 7 is set. Reading
+        INTIM clears TIMINT, and if the timer had expired it goes back to the programmed rate
+        from the value it had just reached."""
         if self.timer is None:
-            return 0x00 if a in (0x0284, 0x0286) else 0x00
-        t0, val, interval = self.timer
-        elapsed = int(self.cpu_cycles() - t0)
-        ticks = elapsed // interval
-        if ticks <= val:
-            value, expired = val - ticks, False
+            return 0x00
+        t0, val, interval, bias = self.timer
+        e = int(self.cpu_cycles() - t0) + bias
+        expired = e >= val * interval
+        if not expired:
+            value = val - -(-e // interval)
         else:
-            # past zero: it flags and then counts down every cycle
-            value = (0xFF - (elapsed - (val + 1) * interval)) & 0xFF
-            expired = True
-        return value if a in (0x0284, 0x0286) else (0x80 if expired else 0x00)
+            value = (0xFF - (e - val * interval) + (1 if interval == 1 else 0)) & 0xFF
+        if a in (0x0285, 0x0287):
+            return 0x80 if (expired and not self.timer_flag_cleared) else 0x00
+        # an INTIM read: clears the flag if it is set, and an expired timer goes back to
+        # counting at the programmed rate from where it has got to
+        if expired:
+            self.timer = (self.cpu_cycles(), value, interval, bias)
+            self.timer_flag_cleared = True
+        return value
 
     def random(self, cycles):
         """POKEY's RANDOM register: the top bits of a 17-bit LFSR.
@@ -492,7 +510,9 @@ class Bus(object):
             return                       # ROM: writes go nowhere
         if 0x0294 <= a <= 0x0297:
             # the RIOT's interval timer: TIM1T / TIM8T / TIM64T / T1024T
-            self.timer = (self.cpu_cycles(), v, (1, 8, 64, 1024)[a - 0x0294])
+            interval = (1, 8, 64, 1024)[a - 0x0294]
+            self.timer = (self.cpu_cycles(), v, interval, 2 if interval == 1 else self.RIOT_BIAS)
+            self.timer_flag_cleared = False
             return
         low = a & 0xFF
         if low == 0x24 and a < 0x0400 and (a & 0x300) in (0, 0x100, 0x200):
@@ -631,6 +651,7 @@ class CPU(object):
         self.p = U | I
         self.pc = self.word(0xFFFC)
         self.cycles = 0
+        self.jammed = None              # the address of a KIL/JAM opcode the program ran
         self.obs = None                 # an observer (see Observer), or None
 
     def word(self, a):
@@ -720,24 +741,26 @@ class CPU(object):
 
     def adc(self, v):
         if self.p & D:
-            # BCD. Rare in players but not unheard of, and silently wrong
-            # arithmetic is exactly the kind of bug that hides.
-            c_in = self.p & C
-            lo = (self.a & 0x0F) + (v & 0x0F) + (self.p & C)
-            hi = (self.a >> 4) + (v >> 4) + (1 if lo > 9 else 0)
-            if lo > 9:
-                lo += 6
-            r = ((hi << 4) | (lo & 0x0F)) & 0xFF
-            if hi > 9:
-                hi += 6
-                r = ((hi << 4) | (lo & 0x0F)) & 0xFF
-            self.p = (self.p & ~C) | (1 if hi > 15 else 0)
-            self.setzn(r)
-            # NMOS: Z comes from the BINARY sum, not the decimal result (0x99+0x01 gives
-            # $00 in decimal but Z is clear)
-            binary = (self.a + v + c_in) & 0xFF
-            self.p = (self.p & ~Z) | (Z if binary == 0 else 0)
-            self.a = r
+            # NMOS decimal ADC (the 6502 as it is documented in "6502.org: Decimal Mode"): the
+            # low nibble is adjusted first; N and V come from that intermediate sum, Z from
+            # the plain binary sum, and only the carry and the result from the final adjust.
+            a, c_in = self.a, self.p & C
+            lo = (a & 0x0F) + (v & 0x0F) + c_in
+            if lo >= 0x0A:
+                lo = ((lo + 0x06) & 0x0F) + 0x10
+            mid = (a & 0xF0) + (v & 0xF0) + lo
+            self.p &= ~(N | V | Z | C)
+            if mid & 0x80:
+                self.p |= N
+            if (~(a ^ v) & (a ^ mid)) & 0x80:
+                self.p |= V
+            if ((a + v + c_in) & 0xFF) == 0:
+                self.p |= Z
+            if mid >= 0xA0:
+                mid += 0x60
+            if mid >= 0x100:
+                self.p |= C
+            self.a = mid & 0xFF
             return
         t = self.a + v + (self.p & C)
         self.p = (self.p & ~(C | V)) | (1 if t > 0xFF else 0)
@@ -778,6 +801,13 @@ class CPU(object):
             self.cycles += 2
             return
         mn, mode = entry[0], entry[1]
+        if mn == "JAM":
+            # KIL halts a real 6502 for good (only a reset frees it). Games plant them as
+            # error traps; running on past one invents behaviour the machine never had.
+            self.jammed = pc0
+            self.pc = pc0
+            self.cycles += 2
+            return
         cyc = m6502.CYCLES[op]
         a, extra = self.addr(mode)
 
@@ -1123,6 +1153,8 @@ def run(cart, frames, region="ntsc", drive=False, nmi=True, quiet=False,
                     cpu.nmi()
                 i += 1
             cpu.step()
+            if cpu.jammed is not None:
+                bus.jammed = cpu.jammed          # the program has stopped itself
             if bus.wsync:
                 # WSYNC: the CPU is halted until the start of the next scanline
                 bus.wsync = False

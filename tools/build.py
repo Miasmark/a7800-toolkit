@@ -72,6 +72,7 @@ def main():
             return 1
 
     image = b"".join(banks[b] for b in range(cart.nbanks))
+    image = cart.to_file_order(image)         # an (OM) Activision file is stored in the other order
     if mcart is not None:
         image += b"".join(mbanks[b] for b in range(mcart.nbanks))
     out = (cart.header_bytes or b"") + image

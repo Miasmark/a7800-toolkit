@@ -251,15 +251,20 @@ def executed_bytes(cart, x):
 
 
 def static_view(cart, config):
-    """(bytes of static code, bytes of declared blocks) by (space, addr)."""
+    """(bytes of static code, bytes of declared blocks, JSR/JMP targets) by (space, addr)."""
     import disasm
     cfg = disasm.Config(config) if config else disasm.Config()
     an, _g, _w, _v = disasm.analyse(cart, cfg)
-    code = set()
+    code, targets = set(), set()
     for (sp, a) in an.code:
         for i in range(an.insn[(sp, a)][3]):
             code.add((sp, a + i))
-    return code, set(an.forced_data)
+    for tloc, srcs in an.xrefs.items():
+        for s in srcs:
+            ins = an.insn.get(s)
+            if ins and ins[0] in ("JSR", "JMP") and ins[1] == "abs":
+                targets.add(tloc)
+    return code, set(an.forced_data), targets
 
 
 def canon_spaces(cart):
@@ -348,29 +353,32 @@ def decodable(data, starts=8):
     Starting only at byte 0 loses code that follows a few bytes of table, and code that is
     followed by data stops at the first illegal byte rather than failing the whole area."""
     n = len(data)
-    best = (0.0, False, 0)
+    best = (0.0, 0, 0)
     for s in range(min(starts, n)):
-        i, flow = s, False
+        i, flow = s, 0
         while i < n:
             mn, mode, illegal = m6502.OPCODES[data[i]]
             ln = 1 + m6502.MODES[mode]
             if illegal or i + ln > n:
                 break
             if mn in ("RTS", "RTI", "JMP", "JSR", "BNE", "BEQ", "BCC", "BCS", "BPL", "BMI"):
-                flow = True
+                flow += 1
             i += ln
         if flow and (i - s) / float(n) > best[0]:
-            best = ((i - s) / float(n), True, s)
+            best = ((i - s) / float(n), flow, s)
     return best
 
 
-def guess(data, known=None):
+def guess(data, known=None, corroborated=False):
     """(label, evidence) for a block of dark bytes. A heuristic, said as such.
 
     `known(address)` says whether an address is somewhere the census has seen used. Given
     it, a block is only an address table if most of its words point at such places; random
     and pixel bytes pass the old test (a high byte of $40 or more) a third of the time and
-    more."""
+    more. With `known` given the gate on "code-like" is strict too, because sparse pixel rows
+    decode as plausible instructions about a quarter of the time: at least 32 bytes and two
+    branches or returns, unless something already traced JSRs or JMPs into the area
+    (`corroborated`)."""
     n = len(data)
     if n == 0:
         return "empty", ""
@@ -384,7 +392,9 @@ def guess(data, known=None):
     if n >= 8 and pr >= 0.85 * n:
         return "text", "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in data[:24])
     frac, flow, at = decodable(data)
-    if n >= 12 and flow and frac >= 0.6 and frac * n >= 16:
+    strict = known is not None and not corroborated
+    if n >= 12 and flow and frac >= 0.6 and frac * n >= (32 if strict else 16) and \
+            (flow >= 2 or not strict):
         return "code-like", "%d%% decodes as documented instructions with branches or returns%s" % (
             100 * frac, "" if not at else ", from offset %d" % at)
     if n >= 8:
@@ -509,10 +519,19 @@ def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
         sets["read"] |= {(vsp, 0xFFFA + i) for i in range(6)}
     for path in merge:
         old = json.load(io.open(path, encoding="utf-8"))
+        # merging another cartridge's census would silently pollute this one's sets
+        if old.get("rom_sha1") and old["rom_sha1"] != rom_digest(cart):
+            raise ValueError("%s is a census of a different cartridge (%s); not merged"
+                             % (path, old.get("rom", "?")))
         for key in ("exec", "read", "gfx", "forced"):
             sets[key] |= set(expand({sp: [tuple(r) for r in rs]
                                      for sp, rs in old["sets"].get(key, {}).items()}))
         notes.append("merged %s (%d frames)" % (os.path.basename(path), old["frames"]))
+    for b_ in (bus, locals().get("bus2")):
+        if b_ is not None and getattr(b_, "jammed", None) is not None:
+            notes.append("the program ran a KIL (JAM) opcode at $%04X and stopped itself -- an "
+                         "error trap, so this run ended there" % b_.jammed)
+            break
     stats = [s for s in stats if s]
     if stats:
         notes.append("forcing the untaken side of branches (branchforce.py) ran %d paths "
@@ -522,10 +541,10 @@ def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
                      "were trimmed"
                      % (sum(s["forks"] for s in stats), len(sets["forced"]),
                         sum(s["ran on"] for s in stats), sum(s["dead"] for s in stats)))
-    static_code, blocks = static_view(cart, config)
+    static_code, blocks, targets = static_view(cart, config)
     cart = cart.sides()              # a bankset cartridge: both halves, MARIA's as m<space>
     cls = classify(cart, sets, static_code, blocks)
-    return {"cart": cart, "col": col, "bus": bus, "sets": sets, "cls": cls,
+    return {"cart": cart, "col": col, "bus": bus, "sets": sets, "cls": cls, "targets": targets,
             "notes": notes, "frames": frames, "explore": explore,
             "static_code": static_code, "blocks": blocks}
 
@@ -558,18 +577,36 @@ def _known_fn(cart, cls):
     return known
 
 
-def dark_areas(cart, cls, min_size=4):
+def dark_areas(cart, cls, min_size=4, targets=()):
     out = []
     known = _known_fn(cart, cls)
+    aimed = {}
+    for sp, a in targets:                        # JSR/JMP targets, by space
+        aimed.setdefault(sp, []).append(a)
     for sp, c in cls.items():
         base = cart.base_of(sp)
         for lo, hi in runs_of(c, DARK, base):
             if hi - lo + 1 < min_size:
                 continue
             data = cart.slice(sp, lo, hi - lo + 1)
-            label, why = guess(data, known)
+            hit = any(lo <= a <= hi for a in aimed.get(sp, ()))
+            label, why = guess(data, known, hit)
+            at = decodable(data)[2] if label == "code-like" else 0
             out.append({"space": sp, "lo": lo, "hi": hi, "size": hi - lo + 1,
-                        "guess": label, "evidence": why})
+                        "guess": label, "evidence": why, "code_at": at})
+    # MARIA reads a sprite a row at a time, a page apart: the same-sized dark area at the same
+    # low byte on three pages or more is graphics rows, whatever it decodes as
+    rows = {}
+    for a in out:
+        rows.setdefault((a["space"], a["lo"] & 0xFF, a["size"]), []).append(a)
+    for group in rows.values():
+        pages = {a["lo"] >> 8 for a in group}
+        if len(pages) >= 3:
+            for a in group:
+                a["guess"] = "graphics-like"
+                a["evidence"] = "the same %d bytes recur on %d pages (sprite rows)" % (
+                    a["size"], len(pages))
+                a["code_at"] = 0
     out.sort(key=lambda r: -r["size"])
     return out
 
@@ -584,6 +621,7 @@ def suggestions(dark):
         loc = "%s:%04X" % (a["space"], a["lo"])
         g = a["guess"]
         if g == "code-like":
+            loc = "%s:%04X" % (a["space"], a["lo"] + a.get("code_at", 0))     # where it decodes from
             out.append({"kind": "entry", "loc": loc, "size": a["size"],
                         "why": "dark and decodes as code: try it as an entry point"})
         elif g == "text":
@@ -617,7 +655,7 @@ def markdown(name, r):
     cart, col, cls = r["cart"], r["col"], r["cls"]
     per, tot = summary(cart, cls)
     total = sum(tot.values())
-    dark = dark_areas(cart, cls)
+    dark = dark_areas(cart, cls, targets=r.get("targets", ()))
     L = ["# Census: %s" % name, ""]
     L.append("%d frames simulated%s; the display list was live on %d of them; %d "
              "distinct instructions ran; MARIA's reads were sampled on %d frames."
@@ -732,6 +770,12 @@ def write_png(cart, cls, outdir):
     return names
 
 
+def rom_digest(cart):
+    import hashlib
+    with open(cart.path, "rb") as f:
+        return hashlib.sha1(f.read()).hexdigest()
+
+
 def to_json(name, r):
     cart, col = r["cart"], r["col"]
     per, tot = summary(cart, r["cls"])
@@ -740,8 +784,9 @@ def to_json(name, r):
             "frames_with_display_list": col.frames_with_list,
             "totals": {NAMES[k]: v for k, v in tot.items()},
             "per_space": {sp: {NAMES[k]: v for k, v in d.items()} for sp, d in per.items()},
-            "dark": dark_areas(cart, r["cls"]),
-            "suggestions": suggestions(dark_areas(cart, r["cls"]))
+            "rom_sha1": rom_digest(cart),
+            "dark": dark_areas(cart, r["cls"], targets=r.get("targets", ())),
+            "suggestions": suggestions(dark_areas(cart, r["cls"], targets=r.get("targets", ())))
             + forced_suggestions(cart, r["cls"]),
             "sets": {k: ranges(v) for k, v in r["sets"].items()},
             "ram": {"touched": len(rows), "uninitialised_reads": uninit,
@@ -774,7 +819,7 @@ def main(argv=None):
     try:
         r = build(args.rom, args.frames, args.explore, args.config, args.merge,
                   args.mapper, args.low, args.handover, args.force)
-    except (cart_module.UnknownMapper, cart_module.UnknownSpace, IOError) as e:
+    except (cart_module.UnknownMapper, cart_module.UnknownSpace, IOError, ValueError) as e:
         sys.exit("census: %s" % e)
     os.makedirs(args.out, exist_ok=True)
     name = os.path.basename(args.rom)
@@ -789,7 +834,7 @@ def main(argv=None):
           "used bytes, %s DARK"
           % (pct(tot[EXEC], total), pct(tot[READ], total), pct(tot[GFX], total),
              pct(tot[UNRUN], total), pct(tot[COPY], total), pct(tot[DARK], total)))
-    dk = dark_areas(r["cart"], r["cls"])
+    dk = dark_areas(r["cart"], r["cls"], targets=r.get("targets", ()))
     print("%d dark areas of 4 bytes or more; the largest: %s" % (
         len(dk), ", ".join("%s:%04X (%d, %s)" % (a["space"], a["lo"], a["size"], a["guess"])
                            for a in dk[:3]) or "none"))
