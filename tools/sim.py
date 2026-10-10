@@ -370,6 +370,12 @@ class Bus(object):
         # $C000-$FFFF -- the a7800 fork's bankset.cpp
         self.mcart = cart.for_maria() if getattr(cart, "bankset", False) else None
         self.mram = bytearray(0x4000) if getattr(cart, "bankram", False) else None
+        # the two things the bankset spec says a bank-RAM cartridge cannot do: MARIA read a display
+        # list from the cart RAM ("Your DL must be stored in console ram, rather than bankset cart
+        # ram"), and the CPU run code from its own ("execution from Sally's cart-ram isn't
+        # supported"). Each is refused as the a7800 port of MAME refuses it (the list reads as
+        # empty, the opcode as $FF) and counted here: {"dl": [count, first address], "exec": ...}
+        self.rule_breaks = {}
         # a flat bankset with POKEY at $4000 keeps its ROM readable there: the fork routes
         # only WRITES to the chip (bankset.h, a78_bankset_rom_p4000_device), and StoneAge
         # executes `JMP $4000` into that ROM
@@ -586,17 +592,17 @@ class Bus(object):
         holes = 0
         i = 0
         for _ in range(32):
-            b1 = self.mem((dl + i + 1) & 0xFFFF)
+            b1 = self.mem_dl((dl + i + 1) & 0xFFFF)
             if b1 == 0:
                 break
-            lo = self.mem((dl + i) & 0xFFFF)
+            lo = self.mem_dl((dl + i) & 0xFFFF)
             if (b1 & 0x1F) == 0:                      # five-byte entry
-                hi = self.mem((dl + i + 2) & 0xFFFF)
-                w = 32 - (self.mem((dl + i + 3) & 0xFFFF) & 0x1F)
+                hi = self.mem_dl((dl + i + 2) & 0xFFFF)
+                w = 32 - (self.mem_dl((dl + i + 3) & 0xFFFF) & 0x1F)
                 five, chars = True, bool(b1 & 0x20)
                 i += 5
             else:
-                hi = self.mem((dl + i + 2) & 0xFFFF)
+                hi = self.mem_dl((dl + i + 2) & 0xFFFF)
                 w = 32 - (b1 & 0x1F)
                 five, chars = False, False
                 i += 4
@@ -617,6 +623,18 @@ class Bus(object):
             per_line += self.DMA_HOLE_LINE + self.DMA_HOLE_OBJ * holes
         return (lines * min(per_line, self.DMA_LINE_CAP) + self.DMA_ZONE
                 + (self.DMA_DLI if (flags & 0x80) else 0))
+
+    def break_rule(self, rule, a):
+        n = self.rule_breaks.setdefault(rule, [0, a])
+        n[0] += 1
+
+    def mem_dl(self, a):
+        """A byte of a display list or the list of lists, as MARIA reads it: the same as `mem`,
+        except that the bank RAM on the cartridge ($4000-$7FFF) is not allowed to hold one."""
+        if self.mram is not None and 0x4000 <= (a & 0xFFFF) < 0x8000:
+            self.break_rule("dl", a & 0xFFFF)
+            return 0
+        return self.mem(a)
 
     def mem(self, a):
         """A byte as MARIA reads it: RAM (through its mirrors), or the cartridge."""
@@ -665,9 +683,9 @@ class Bus(object):
             return []
         out, line = [], 0
         for z in range(self.MAX_ZONES):
-            b0 = self.mem((addr + z * 3) & 0xFFFF)
-            hi = self.mem((addr + z * 3 + 1) & 0xFFFF)
-            lo = self.mem((addr + z * 3 + 2) & 0xFFFF)
+            b0 = self.mem_dl((addr + z * 3) & 0xFFFF)
+            hi = self.mem_dl((addr + z * 3 + 1) & 0xFFFF)
+            lo = self.mem_dl((addr + z * 3 + 2) & 0xFFFF)
             n = (b0 & 0x0F) + 1
             line += n
             out.append((line, bool(b0 & 0x80),
@@ -675,6 +693,22 @@ class Bus(object):
             if line >= self.MAX_LINES:
                 break
         return out
+
+
+def rule_break_notes(bus):
+    """What a bank-RAM bankset cartridge did that the spec rules out (Bus.rule_breaks), in words."""
+    out = []
+    n = getattr(bus, "rule_breaks", {}) or {}
+    if "dl" in n:
+        out.append("MARIA fetched a display list from the bankset cart RAM at $%04X (%d reads): "
+                   "the spec says it must be in console RAM (\"Your DL must be stored in console "
+                   "ram, rather than bankset cart ram\"), and the a7800 port of MAME reads it as "
+                   "empty; so does this run" % (n["dl"][1], n["dl"][0]))
+    if "exec" in n:
+        out.append("the CPU ran code from the bankset cart RAM at $%04X (%d instructions): the "
+                   "spec says execution from Sally's cart RAM is not supported, and the a7800 port "
+                   "of MAME reads $FF there; so does this run" % (n["exec"][1], n["exec"][0]))
+    return out
 
 
 class CPU(object):
@@ -835,6 +869,9 @@ class CPU(object):
         obs = self.obs
         pc0 = self.pc
         op = b.read(pc0)
+        if b.mram is not None and 0x4000 <= pc0 < 0x8000:
+            b.break_rule("exec", pc0)
+            op = 0xFF
         entry = m6502.OPCODES.get(op)
         self.pc = (self.pc + 1) & 0xFFFF
         if obs is not None:

@@ -1957,6 +1957,94 @@ def t_bankset_ram():
     return "bank RAM per chip, CPU writes through $C000, MARIA's half and bank, ROM over POKEY at $4000"
 
 
+def t_bankset_rules():
+    """The two things the Bankset spec rules out for a bank-RAM cartridge are refused as the
+    a7800 port of MAME refuses them, and said so: a display list in the cart RAM ("Your DL must
+    be stored in console ram") reads as empty, and the CPU running code from its own cart RAM
+    ("execution from Sally's cart-ram isn't supported") reads $FF. Checked against that MAME build
+    with a cartridge of each (the warnings, and the library's bank-RAM images unchanged)."""
+    import random
+    import cart as cart_module
+    import sim
+    rng = random.Random(5)
+    work = tempfile.mkdtemp(prefix="selftest-bsrules-")
+
+    def image(name, mapper, size):
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = size.to_bytes(4, "big")
+        hdr[53], hdr[54] = mapper >> 8, mapper & 0xFF
+        hdr[55] = 1
+        path = os.path.join(work, name)
+        io.open(path, "wb").write(bytes(hdr) + bytes(rng.randrange(256) for _ in range(size)))
+        return path
+    try:
+        c = cart_module.Cart(image("ram.a78", 0x6000, 0x10000))
+        bus = sim.Bus(c)
+        bus.write(0x3C, 0x40)                                   # DMA on
+        # a list of lists in console RAM, pointing at a display list in the cart RAM
+        for z in range(3):
+            for i, v in enumerate((0x0F, 0x41, 0x00)):
+                bus.write(0x1800 + 3 * z + i, v)
+        bus.write(0x2C, 0x18)
+        bus.write(0x30, 0x00)
+        bus.write(0xC100, 0x00)                                 # MARIA's RAM: an object header
+        bus.write(0xC101, 0x20)
+        zones = bus.zones()
+        assert zones and bus.rule_breaks.get("dl", [0])[0] > 0, "a list in the cart RAM was read"
+        assert bus.rule_breaks["dl"][1] == 0x4101
+        assert zones[0][2] == bus.zone_cost(0x4100, 16) and bus.mem(0x4101) == 0x20
+        assert "console ram" in sim.rule_break_notes(bus)[0]
+        # the list of lists itself in the cart RAM
+        b2 = sim.Bus(c)
+        b2.write(0x3C, 0x40)
+        b2.write(0x2C, 0x40)
+        b2.write(0x30, 0x00)
+        b2.write(0xC000, 0x8F)
+        got = b2.zones()
+        assert b2.rule_breaks["dl"][1] == 0x4000 and got and not got[0][1], "a DLL entry was read"
+        # the CPU running from its cart RAM
+        b3 = sim.Bus(c)
+        b3.write(0x4000, 0xEA)
+        cpu = sim.CPU(b3)
+        cpu.pc = 0x4000
+        cpu.step()
+        assert b3.rule_breaks["exec"] == [1, 0x4000], b3.rule_breaks
+        assert "not supported" in sim.rule_break_notes(b3)[0]
+        # ... while reads of it as data, and code anywhere else, are not breaks
+        b4 = sim.Bus(c)
+        b4.write(0x4000, 0xEA)
+        b4.write(0x80, 0xEA)
+        cpu4 = sim.CPU(b4)
+        cpu4.pc = 0x80
+        cpu4.step()
+        assert b4.read(0x4000) == 0xEA and not b4.rule_breaks and not sim.rule_break_notes(b4)
+        # no bank RAM, no rule: a plain bankset runs from $4000 as ever
+        n = sim.Bus(cart_module.Cart(image("plain.a78", 0x2000, 0x10000)))
+        n.mem_dl(0x4000)
+        assert n.mram is None and not n.rule_breaks
+        # probes/bankset-rules-cart.py: the three test cartridges, run through simprobe
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "bsrc", os.path.join(ROOT, "probes", "bankset-rules-cart.py"))
+        bsrc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bsrc)
+        seen = {}
+        for mode in ("ok", "dl", "exec"):
+            rom = os.path.join(work, "rules-%s.a78" % mode)
+            bsrc.build(rom, mode)
+            out = subprocess.run([sys.executable, os.path.join(HERE, "simprobe.py"), rom,
+                                  "-o", os.path.join(work, "o-" + mode), "--frames", "30"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 universal_newlines=True).stdout
+            seen[mode] = ("MARIA fetched a display list" in out, "the CPU ran code" in out)
+        assert seen == {"ok": (False, False), "dl": (True, False), "exec": (False, True)}, seen
+    finally:
+        shutil.rmtree(work, True)
+    return "a list in bank RAM reads as empty, code run from it reads $FF, both noted; nothing else is"
+
+
 def t_mamecheck():
     """mamecheck.py's judgement, without MAME: a display list kept live on half the frames
     counts as running, and the four verdicts come out right and report without error."""
@@ -5226,6 +5314,7 @@ def main():
     r.check("bankset round trip", t_bankset_roundtrip)
     r.check("bankset vs a7800 source", t_bankset_fork_model)
     r.check("bankset RAM", t_bankset_ram)
+    r.check("bankset rules", t_bankset_rules)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)

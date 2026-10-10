@@ -252,7 +252,8 @@ The fork's cartridge and MARIA work can be ported onto a current MAME (0.289 dev
 what the fork cannot give: the Lua taps every probe here uses. The port is a patch kept outside this
 repository (all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-clock first-hole penalty,
 8 clocks of last-line shutdown, and each line shown a pixel at a time so a mid-scanline register write
-appears mid-scanline); current MAME's POKEY already has the fork's POKEY work. Run with
+appears mid-scanline; and two rules the Bankset spec sets for bank RAM, which warn once and refuse: a display list
+fetched from the cart RAM reads as empty, and an opcode fetched from it reads `$FF` -- docs/cartridges.md); current MAME's POKEY already has the fork's POKEY work. Run with
 `-bios a7800pr -rompath <folder>` like any MAME here (0.289 wants `7800.u7` for the plain `a7800` BIOS).
 
 What it changes, measured with `mamecheck.py` on the same 278-image sample as above:
@@ -387,6 +388,7 @@ proved goes here once its addresses have become parameters.
 | `dumpgfx.lua` | Dump a live game's graphics and MARIA register writes (`dumpgfx_regs.txt`) for `spritedump.py`. |
 | `rendersurvey.lua` | MARIA and CPU spend per frame; dumps RAM for `zonebill.py`. |
 | `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
+| `bankset-rules-cart.py` | Build a bank-RAM bankset cartridge that obeys, or breaks, the spec's two rules (display list in cart RAM, code run from it). |
 | `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
 | `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |

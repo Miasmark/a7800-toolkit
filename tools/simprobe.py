@@ -425,6 +425,9 @@ def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=N
             "frames_with_display_list": col.frames_with_list,
             "stuck_fetches": col.stuck, "audio_writes": len(bus.writes),
             "jammed": bus.jammed,
+            "rule_breaks": {k: {"count": v[0], "first": v[1]}
+                            for k, v in bus.rule_breaks.items()},
+            "rule_break_notes": sim.rule_break_notes(bus),
             "dll": ("%02X%02X" % (bus.dpph, bus.dppl)
                     if bus.dpph is not None and bus.dppl is not None else None),
             "ctrl": bus.ctrl}
@@ -476,6 +479,8 @@ def main(argv=None):
     if r["frames_with_display_list"] < r["frames"] * 0.5:
         print("note: it reached a display list late or never; it may be waiting on "
               "something the simulator does not provide (try --drive).")
+    for note in r["rule_break_notes"]:
+        print("note: " + note)
     print("wrote exectrace.log dataread.log regs.txt ram.bin audio.log%s in %s"
           % (" pcprof.log" if args.profile else "", args.out))
     return 0
