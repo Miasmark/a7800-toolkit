@@ -332,9 +332,11 @@ class Screen(object):
         # display lists, character lists and graphics may be in RAM or in ROM
         # (several zones of a real game keep their lists in the fixed bank)
         self.src = type("Mem", (), {"byte": staticmethod(self.byte)})
-        # ... but not display lists in the bank RAM: the spec says they must be in console RAM,
+        # ... but not display lists in the cartridge (bankset): the spec says they must be in console RAM,
         # and MARIA reads such a list as empty (the a7800 port of MAME, the simulator)
         self.dl_in_cart_ram = 0
+        starts = [r[0] for r in getattr(c, "_region", []) if r[2] != "ram"]
+        self.list_floor = min([0x4000] + starts) if c.bankset else None
         self.lsrc = type("Mem", (), {"byte": staticmethod(self.list_byte)})
 
     def byte(self, addr):
@@ -347,7 +349,7 @@ class Screen(object):
         return self.c.byte(sp, addr) if sp else 0
 
     def list_byte(self, addr):
-        if self.mram is not None and 0x4000 <= self.dlwalk.unmirror(addr) < 0x8000:
+        if self.list_floor is not None and self.dlwalk.unmirror(addr) >= self.list_floor:
             self.dl_in_cart_ram += 1
             return 0
         return self.byte(addr)

@@ -247,28 +247,34 @@ simulator and the fork draw the same screens on the library's bankset demos and 
 the Petscii Robots. What is *not* settled is a short list in docs/emulation.md (Pit Fighter's
 Alt 1 prototype above all). `forkshot.py` repeats the comparison for any image.
 
-**Two rules the spec sets for bank RAM are enforced.** The Bankset page says "Your DL must be
+**Two rules the spec sets for a bankset are enforced.** The Bankset page says "Your DL must be
 stored in console ram, rather than bankset cart ram" and that "execution from Sally's cart-ram
 isn't supported". Neither the fork nor stock MAME does anything about either. The a7800 port of
-MAME (`bankset-full.patch`) now does: a display list or list of lists MARIA fetches from the
-cart RAM window reads as empty, and an opcode the CPU fetches from it reads `$FF`, each with
-one warning on the console. The simulator does the same (`Bus.mem_dl`, `Bus.rule_breaks`,
+MAME (`bankset-full.patch`) now does: on any bankset cartridge a display list or list of lists
+MARIA fetches from the cartridge's address space -- its RAM *or its ROM* -- reads as empty (a
+list built into the ROM half cannot be fixed by the CPU either, which cannot read that half), and
+on a cartridge with bank RAM an opcode the CPU fetches from `$4000-$7FFF` reads `$FF`; each
+gives one warning on the console. The simulator does the same (`Bus.mem_dl`, `Bus.rule_breaks`,
 `t_bankset_rules`) and says so in `simprobe.py`, `firstlook.py` and `census.py`. A game that
-breaks the rules shows a blank screen or runs away rather than working by accident: the
-library's bank-RAM images never trip either (the 2x128K RAM demos, Bubble Bobble and Attack
-of the Petscii Robots read `$4000-$7FFF` as data -- 387,000 times in Bubble Bobble -- and
-run no code there), and MAME draws the same screens before and after. `probes/bankset-rules-cart.py ok|dl|exec out.a78` builds a cartridge that obeys the rules, keeps its
-display list in the cart RAM, or runs code from it. On the a7800 fork (which enforces neither) the
-`dl` image draws its box from the list in cart RAM and the `exec` image turns the background red; on
-the port, and in the simulator, `ok` draws the box, `dl` is blank with the warning, and `exec` keeps a
-black background with the warning. MARIA's half of the image is therefore graphics and nothing else, and `disasm.py`
-lists it that way (`mb0.asm`, `mrom.asm`, ...: data, never traced). Measured on the library: in 300
-frames each, 14 of the 15 bankset images fetch every display list and list of lists from console RAM,
-and none from the ROM half or the cart RAM. The exception is Pit Fighter's Alt 1 prototype, which in the
-simulator reads 480 list bytes from `$C000-$CFFF` (ROM) -- the same image that draws nothing anywhere.
-Data reads of the
-CPU's RAM are *not* restricted; the spec's "write-only" is MARIA's chunk, which the CPU can
-only reach by writing `$C000-$FFFF`.
+breaks the rules shows a blank screen or runs away rather than working by accident. Cartridges
+that are not banksets keep their lists in ROM if they like; the rule is the bankset's.
+
+`probes/bankset-rules-cart.py ok|dl|rom|exec out.a78` builds a cartridge that obeys the rules, keeps
+its display list in the cart RAM, keeps it in the cartridge ROM, or runs code from the cart RAM. On
+the a7800 fork (which enforces neither) the `dl` and `rom` images draw their box from the list in the
+cartridge and the `exec` image turns the background red; on the port, and in the simulator, `ok`
+draws the box, `dl` and `rom` are blank with the warning, and `exec` keeps a black background with
+the warning.
+
+MARIA's half of the image is therefore graphics and nothing else, and `disasm.py` lists it that way
+(`mb0.asm`, `mrom.asm`, ...: data, never traced). Measured on the library, in 300 frames each: 14 of
+the 15 bankset images fetch every display list and list of lists from console RAM and none from the
+cartridge, and the same 14 draw the same screens with the rules enforced. The exception is Pit
+Fighter's Alt 1 prototype, which keeps its lists in ROM (the simulator reads 480 list bytes from
+`$C000-$CFFF`) -- the same image that draws nothing anywhere.
+Data reads of the CPU's RAM are *not* restricted: the library's bank-RAM images read `$4000-$7FFF`
+heavily (387,000 times in Bubble Bobble) and run no code there, and the spec's "write-only" is
+MARIA's chunk, which the CPU can only reach by writing `$C000-$FFFF`.
 
 **Mainline MAME 0.264 cannot be
 asked:** it answers `Unsupported mapper, please contact MAMEdevs` for `$2000`-flagged images

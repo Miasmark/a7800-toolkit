@@ -370,11 +370,11 @@ class Bus(object):
         # $C000-$FFFF -- the a7800 fork's bankset.cpp
         self.mcart = cart.for_maria() if getattr(cart, "bankset", False) else None
         self.mram = bytearray(0x4000) if getattr(cart, "bankram", False) else None
-        # the two things the bankset spec says a bank-RAM cartridge cannot do: MARIA read a display
-        # list from the cart RAM ("Your DL must be stored in console ram, rather than bankset cart
-        # ram"), and the CPU run code from its own ("execution from Sally's cart-ram isn't
-        # supported"). Each is refused as the a7800 port of MAME refuses it (the list reads as
-        # empty, the opcode as $FF) and counted here: {"dl": [count, first address], "exec": ...}
+        # what a bankset cartridge cannot do: have MARIA read a display list from it ("Your DL must
+        # be stored in console ram, rather than bankset cart ram" -- and not from its ROM either),
+        # and, with bank RAM, have the CPU run code from its own ("execution from Sally's cart-ram
+        # isn't supported"). Each is refused as the a7800 port of MAME refuses it (the list reads
+        # as empty, the opcode as $FF) and counted here: {"dl": [count, first address], "exec": ...}
         self.rule_breaks = {}
         # a flat bankset with POKEY at $4000 keeps its ROM readable there: the fork routes
         # only WRITES to the chip (bankset.h, a78_bankset_rom_p4000_device), and StoneAge
@@ -630,8 +630,9 @@ class Bus(object):
 
     def mem_dl(self, a):
         """A byte of a display list or the list of lists, as MARIA reads it: the same as `mem`,
-        except that the bank RAM on the cartridge ($4000-$7FFF) is not allowed to hold one."""
-        if self.mram is not None and 0x4000 <= (a & 0xFFFF) < 0x8000:
+        except that a bankset cartridge may not hold one, in its ROM or its RAM: they belong in
+        console RAM."""
+        if self.mcart is not None and (a & 0xFFFF) >= self.rom_low:
             self.break_rule("dl", a & 0xFFFF)
             return 0
         return self.mem(a)
@@ -700,10 +701,10 @@ def rule_break_notes(bus):
     out = []
     n = getattr(bus, "rule_breaks", {}) or {}
     if "dl" in n:
-        out.append("MARIA fetched a display list from the bankset cart RAM at $%04X (%d reads): "
-                   "the spec says it must be in console RAM (\"Your DL must be stored in console "
-                   "ram, rather than bankset cart ram\"), and the a7800 port of MAME reads it as "
-                   "empty; so does this run" % (n["dl"][1], n["dl"][0]))
+        out.append("MARIA fetched a display list from the bankset cartridge at $%04X (%d reads): "
+                   "it must be in console RAM (\"Your DL must be stored in console ram, rather "
+                   "than bankset cart ram\"; the ROM is no better), and the a7800 port of MAME "
+                   "reads it as empty; so does this run" % (n["dl"][1], n["dl"][0]))
     if "exec" in n:
         out.append("the CPU ran code from the bankset cart RAM at $%04X (%d instructions): the "
                    "spec says execution from Sally's cart RAM is not supported, and the a7800 port "

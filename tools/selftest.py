@@ -1965,8 +1965,8 @@ def t_bankset_ram():
 
 def t_bankset_rules():
     """The two things the Bankset spec rules out for a bank-RAM cartridge are refused as the
-    a7800 port of MAME refuses them, and said so: a display list in the cart RAM ("Your DL must
-    be stored in console ram") reads as empty, and the CPU running code from its own cart RAM
+    a7800 port of MAME refuses them, and said so: a display list in the cartridge, RAM or ROM
+    ("Your DL must be stored in console ram"), reads as empty, and the CPU running code from its own cart RAM
     ("execution from Sally's cart-ram isn't supported") reads $FF. Checked against that MAME build
     with a cartridge of each (the warnings, and the library's bank-RAM images unchanged)."""
     import random
@@ -2026,10 +2026,13 @@ def t_bankset_rules():
         cpu4.pc = 0x80
         cpu4.step()
         assert b4.read(0x4000) == 0xEA and not b4.rule_breaks and not sim.rule_break_notes(b4)
-        # no bank RAM, no rule: a plain bankset runs from $4000 as ever
+        # a bankset without bank RAM has no RAM to run code from, but its ROM is no place for a list
+        # either; and a cartridge that is not a bankset keeps its lists in ROM if it likes
         n = sim.Bus(cart_module.Cart(image("plain.a78", 0x2000, 0x10000)))
-        n.mem_dl(0x4000)
-        assert n.mram is None and not n.rule_breaks
+        assert n.mram is None and n.mem_dl(0x1800) == n.mem(0x1800) and not n.rule_breaks
+        assert n.mem_dl(0xC123) == 0 and n.rule_breaks["dl"] == [1, 0xC123]
+        flat = sim.Bus(cart_module.Cart(image("nobank.a78", 0x0000, 0x8000)))
+        assert flat.mem_dl(0xC123) == flat.mem(0xC123) and not flat.rule_breaks
         # probes/bankset-rules-cart.py: the three test cartridges, run through simprobe
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -2037,7 +2040,7 @@ def t_bankset_rules():
         bsrc = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bsrc)
         seen = {}
-        for mode in ("ok", "dl", "exec"):
+        for mode in ("ok", "dl", "rom", "exec"):
             rom = os.path.join(work, "rules-%s.a78" % mode)
             bsrc.build(rom, mode)
             out = subprocess.run([sys.executable, os.path.join(HERE, "simprobe.py"), rom,
@@ -2045,7 +2048,8 @@ def t_bankset_rules():
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  universal_newlines=True).stdout
             seen[mode] = ("MARIA fetched a display list" in out, "the CPU ran code" in out)
-        assert seen == {"ok": (False, False), "dl": (True, False), "exec": (False, True)}, seen
+        assert seen == {"ok": (False, False), "dl": (True, False), "rom": (True, False),
+                        "exec": (False, True)}, seen
     finally:
         shutil.rmtree(work, True)
     return "a list in bank RAM reads as empty, code run from it reads $FF, both noted; nothing else is"
