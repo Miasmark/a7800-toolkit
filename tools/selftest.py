@@ -1932,6 +1932,12 @@ def t_bankset_ram():
         assert bus.bank == 3
         bus.write(0xC123, 0x5A)                                # ... and writes MARIA's RAM
         assert bus.bank == 3 and bus.mram[0x123] == 0x5A, "a write to $C000+ switched or was lost"
+        # the disassembler's view agrees: only $8000-$BFFF selects a bank with bank RAM, and a
+        # store to $C000-$FFFF is MARIA's RAM, not a bank switch (it is, without the RAM)
+        assert c.map.switch == (0x8000, 0xBFFF) and c.map.bank_from_write(0xC123, 3) is None
+        assert c.map.bank_from_write(0x8000, 3) is not None
+        plain = cart_module.Cart(image("sg1.a78", 0x2002, 0x40000))
+        assert plain.map.switch == (0x8000, 0xFFFF) and plain.map.bank_from_write(0xC000, 3) is not None
         bus.write(0x4123, 0x77)                                # the CPU's own RAM
         assert bus.read(0x4123) == 0x77 and bus.mem(0x4123) == 0x5A, "the two RAMs are one"
         m = cart_module.Cart(c.path, side="maria")

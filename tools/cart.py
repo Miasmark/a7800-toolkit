@@ -426,6 +426,11 @@ class Cart(object):
         self.bankram = bool(self.bankset and (self.info or {}).get("cart_type", 0) & 0x4000)
         if self.bankram and self.map.name == "linear" and self.map.start >= 0x8000:
             self._region.insert(0, (0x4000, 0x8000, "ram", None))
+        if self.bankram and self.map.switch is not None and self.map.switch[1] > 0xBFFF:
+            # ... and with that RAM the CPU's writes to $C000-$FFFF go to MARIA's, not to the bank
+            # register: only $8000-$BFFF selects (a store there is `STA $E000,Y` filling MARIA's RAM,
+            # which the disassembler used to list as an unresolved bank switch)
+            self.map.switch = (self.map.switch[0], 0xBFFF)
         self.warnings = []
         self._check_pokey()
         self._check_activision()
