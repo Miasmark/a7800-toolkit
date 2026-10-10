@@ -323,6 +323,42 @@ captures POKEY from the **CPU bus** instead of the device: it records what the
 game writes to both chips whether or not anything is listening, and
 `tracker.py` renders all eight voices from that. See `docs/audio.md`.
 
+## Driving MAME from an assistant (`mamemcp.py`)
+
+`tools/mamemcp.py` is a Model Context Protocol server: an MCP client (Claude Code, Claude Desktop,
+...) starts it over stdio and gets seventeen tools that drive a live MAME on a cartridge -- start
+it, run frames, step instructions, read and write memory and registers, disassemble what is in
+memory now (the bank switched in, with register names), screenshots, breakpoints and watchpoints,
+inputs, save states, and two that are aimed at disassembly:
+
+* **`mame_trace`** runs some frames logging every instruction executed and says which code ran,
+  per cartridge bank. MAME's trace does not record the bank, so it is told from the bytes: the
+  bank whose instruction at that address disassembles to what the trace says ran (an address
+  whose bytes match in more than one bank is listed apart). With `entries_file` it adds the
+  executed addresses to an annotations file as entry points for `disasm.py -c`. On Ikari
+  Warriors two seconds of play at the title added 42 instructions in bank 4 the static tracer
+  had not reached (805 to 847).
+* **`mame_watch_writes`** runs some frames with a write tap on a range and reports, per address,
+  how many writes, from which PCs, with which values: who owns a variable or a table.
+
+```
+claude mcp add a7800-mame -- python /path/to/a7800-toolkit/tools/mamemcp.py
+python tools/mamemcp.py --selftest game.a78      # every tool once, against a real MAME
+```
+
+MAME, the BIOS and the rompath are found from `A7800_MAME`, `A7800_ROMPATH` and `A7800_BIOS` as
+everywhere else. Inside MAME it is `probes/mcp-server.lua`, an autoboot script listening on
+127.0.0.1 only (through `emu.file`'s socket, as MAME's own gdbstub plugin does).
+
+**Breakpoints, watchpoints, stepping and tracing need the patched MAME.** Stock MAME's
+`-debugger none` resumes the machine the moment it stops -- its `wait_for_debugger` calls `go()`
+-- so a breakpoint is over before a script can look at it. The a7800 patch (`bankset-full.patch`)
+adds `-debugger script`, a short module: a debugger with no window that holds the stop and keeps
+Lua's periodic callbacks running, so the script decides when to go on. On a MAME without it the
+server notices (the machine is running when it should have stopped at its first instruction),
+says so, and runs without the debugger; the other tools work there, and on the a7800 fork's older
+Lua only memory, registers and screenshots are dependable.
+
 ## Running MAME with no Atari BIOS
 
 The probes need a booting 7800, and MAME's `a7800` needs a BIOS the toolkit
@@ -391,6 +427,7 @@ proved goes here once its addresses have become parameters.
 | `bankset-rules-cart.py` | Build a bank-RAM bankset cartridge that obeys, or breaks, the spec's two rules (display list in cart RAM or ROM, code run from the cart RAM). |
 | `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
 | `pokey-irqcart.py` | Build a cartridge that counts POKEY timer interrupts (or, with `--poll`, IRQST underflows). |
+| `mcp-server.lua` | The MAME side of `tools/mamemcp.py`: a line-protocol command server on 127.0.0.1 (run, step, memory, breakpoints, trace, taps, inputs, states, snapshots). |
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
 | `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |
 | `cyclebudget.lua` | Where a frame's CPU cycles go and how many MARIA took: executed cycles (with branch and page-crossing extras), the part inside the NMI, the TIA/RIOT slow-access penalty, `dma` as what is left of the frame, and executed cycles per named PC range. Compare `dma` with `dmabudget.py`'s model of the same display list. Measured first in the Karateka XE port; see its header for what it does not count. |

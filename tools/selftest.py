@@ -2148,6 +2148,64 @@ def t_pokeychip():
     return "chip tables, reset, poly9, timers and IRQST; RANDOM and 3 timer counts equal the a7800 fork's"
 
 
+def t_mamemcp():
+    """tools/mamemcp.py without a MAME: the MCP handshake and tool list, a tool refusing
+    cleanly when MAME is not running, the live disassembler's decoding, and a trace line from a
+    window bank resolved to its bank by its bytes (MAME's trace does not record the bank), with
+    the executed addresses added to an annotations file disasm.py reads.
+    `python tools/mamemcp.py --selftest game.a78` exercises every tool against a real MAME."""
+    import random
+    import cart as cart_module
+    import mamemcp
+    r = mamemcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2025-03-26"}})["result"]
+    assert r["protocolVersion"] == "2025-03-26" and r["capabilities"] == {"tools": {}}
+    r = mamemcp.handle({"jsonrpc": "2.0", "id": 2, "method": "initialize",
+                        "params": {"protocolVersion": "1999-01-01"}})["result"]
+    assert r["protocolVersion"] == mamemcp.VERSIONS[0]
+    assert mamemcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    tools = mamemcp.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
+    assert len(tools) == 17 and all(t["inputSchema"]["type"] == "object" for t in tools)
+    got = mamemcp.call("mame_status", {})
+    assert got["isError"] and "mame_start" in got["content"][0]["text"]
+    assert mamemcp.handle({"jsonrpc": "2.0", "id": 4, "method": "nope"})["error"]["code"] == -32601
+    assert mamemcp.addr("$C000") == mamemcp.addr("0xc000") == mamemcp.addr(0xC000) == 0xC000
+    # decoding, with hardware names
+    assert mamemcp.decode(bytes([0xA9, 0x20, 0, 0]), 0x9000, 0)[1] == "LDA  #$20"
+    assert mamemcp.decode(bytes([0x85, 0x20, 0, 0]), 0x9000, 0)[1] == "STA  BACKGRND"
+    assert mamemcp.decode(bytes([0xD0, 0xFC, 0, 0]), 0xFCBE, 0)[1] == "BNE  $FCBC"
+    # a trace: bank 3's code at $8000 is told from the other banks' by its bytes
+    rng = random.Random(7)
+    work = tempfile.mkdtemp(prefix="selftest-mcp-")
+    try:
+        body = bytearray(rng.randrange(256) for _ in range(0x20000))
+        for b in range(8):
+            body[b * 0x4000:b * 0x4000 + 3] = bytes([0xEA, 0xEA, 0xEA])      # NOPs everywhere
+        body[3 * 0x4000:3 * 0x4000 + 2] = bytes([0xA9, 0x05])                # ... but bank 3
+        body[7 * 0x4000 + 0x10:7 * 0x4000 + 0x12] = bytes([0xA2, 0x01])
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = len(body).to_bytes(4, "big")
+        hdr[53], hdr[54] = 0x00, 0x02
+        rom = os.path.join(work, "sg.a78")
+        io.open(rom, "wb").write(bytes(hdr) + bytes(body))
+        mamemcp.M.cart = cart_module.Cart(rom)
+        trace = os.path.join(work, "t.log")
+        io.open(trace, "w").write("8000: lda #$05\nC010: ldx #$01\n8000: nop\n   (loops for 3 instructions)\n")
+        ann = os.path.join(work, "ann.json")
+        text = mamemcp.trace_summary(trace, ann)
+        assert "b3" in text and "f7" in text and "loops collapsed" in text, text
+        entries = json.load(io.open(ann))["entries"]
+        assert "b3:8000" in entries and "f7:C010" in entries, entries
+        mamemcp.trace_summary(trace, ann)                                    # merging adds nothing new
+        assert json.load(io.open(ann))["entries"] == entries
+    finally:
+        mamemcp.M.cart = None
+        shutil.rmtree(work, True)
+    return "handshake, 17 tools, clean refusal, decoding, a trace resolved to its bank and merged into annotations"
+
+
 def t_mamecheck():
     """mamecheck.py's judgement, without MAME: a display list kept live on half the frames
     counts as running, and the four verdicts come out right and report without error."""
@@ -5419,6 +5477,7 @@ def main():
     r.check("bankset RAM", t_bankset_ram)
     r.check("bankset rules", t_bankset_rules)
     r.check("pokey chip", t_pokeychip)
+    r.check("MCP server", t_mamemcp)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)
