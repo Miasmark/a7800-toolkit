@@ -261,7 +261,12 @@ run no code there), and MAME draws the same screens before and after. `probes/ba
 display list in the cart RAM, or runs code from it. On the a7800 fork (which enforces neither) the
 `dl` image draws its box from the list in cart RAM and the `exec` image turns the background red; on
 the port, and in the simulator, `ok` draws the box, `dl` is blank with the warning, and `exec` keeps a
-black background with the warning. Data reads of the
+black background with the warning. MARIA's half of the image is therefore graphics and nothing else, and `disasm.py`
+lists it that way (`mb0.asm`, `mrom.asm`, ...: data, never traced). Measured on the library: in 300
+frames each, 14 of the 15 bankset images fetch every display list and list of lists from console RAM,
+and none from the ROM half or the cart RAM. The exception is Pit Fighter's Alt 1 prototype, which in the
+simulator reads 480 list bytes from `$C000-$CFFF` (ROM) -- the same image that draws nothing anywhere.
+Data reads of the
 CPU's RAM are *not* restricted; the spec's "write-only" is MARIA's chunk, which the CPU can
 only reach by writing `$C000-$FFFF`.
 
