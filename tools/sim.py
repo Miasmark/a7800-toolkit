@@ -563,11 +563,14 @@ class Bus(object):
     MAX_ZONES = 32
     MAX_LINES = 250
 
-    # Measured DMA costs, in CPU cycles. Same numbers as tools/dmabudget.py
-    # and docs/hardware.md; see probes/dma-costcart.py for how they were got.
-    DMA_LINE, DMA_ZONE = 5.633, 1.678
-    DMA_OBJ, DMA_BYTE, DMA_FIVE = 2.081, 0.744, 0.483
-    DMA_DLI = 16.6
+    # Measured DMA costs, in CPU cycles. Same numbers as tools/dmabudget.py (its "fork"
+    # timing: the a7800 fork's MARIA, which current MAME now has) and docs/hardware.md; see
+    # probes/dma-costcart.py and tools/dmameasure.py for how they were got.
+    DMA_LINE, DMA_ZONE = 5.624, 1.888
+    DMA_OBJ, DMA_BYTE, DMA_FIVE = 1.990, 0.755, 0.483
+    DMA_DLI = 17.4
+    DMA_HOLE_LINE, DMA_HOLE_OBJ = 0.988, 0.510     # a holey zone: the first-hole penalty
+    DMA_LINE_CAP = 108.62                          # MARIA's DMA limit: no scanline costs more
 
     def zone_cost(self, dl, lines, flags=0):
         """CPU cycles MARIA steals drawing one zone.
@@ -580,6 +583,7 @@ class Bus(object):
         """
         holey16 = bool(flags & 0x40)
         per_line = self.DMA_LINE
+        holes = 0
         i = 0
         for _ in range(32):
             b1 = self.mem((dl + i + 1) & 0xFFFF)
@@ -601,6 +605,7 @@ class Bus(object):
             # header and no pixels. See docs/hardware.md.
             if holey16 and (((hi << 8) | lo) & 0x1000):
                 w = 0
+                holes += 1
             if chars:
                 bpc = 2 if (self.ctrl & 0x10) else 1
                 per_line += (self.DMA_OBJ + self.DMA_FIVE
@@ -608,7 +613,9 @@ class Bus(object):
             else:
                 per_line += (self.DMA_OBJ + w * self.DMA_BYTE
                              + (self.DMA_FIVE if five else 0))
-        return (lines * per_line + self.DMA_ZONE
+        if holes:
+            per_line += self.DMA_HOLE_LINE + self.DMA_HOLE_OBJ * holes
+        return (lines * min(per_line, self.DMA_LINE_CAP) + self.DMA_ZONE
                 + (self.DMA_DLI if (flags & 0x80) else 0))
 
     def mem(self, a):

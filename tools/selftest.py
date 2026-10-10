@@ -202,6 +202,7 @@ def t_dmabudget():
     way.
     """
     import dmabudget as d
+    d.set_timing("mame0264")        # the numbers below came off MAME 0.264
     cases = [                       # 12 zones x 16 lines, 2 objects
         (8, 0, 0, 4177), (1, 0, 0, 2242), (16, 0, 0, 6489),
         (8, 0, 1, 4373),                       # 5-byte entries
@@ -242,8 +243,76 @@ def t_dmabudget():
     lines, hz, fps = d.REGIONS["ntsc"]
     if lines != 263 or abs(hz / fps - 29850.5) > 0.5:
         raise AssertionError("NTSC frame is 263 lines x 113.5 = 29,850.5 cycles")
-    return ("12 measured configurations reproduced, worst error %.1f%%"
-            % (100 * worst))
+    # the a7800 fork's MARIA (and MAME built with it): iteration counts off the counting cartridge
+    # by tools/dmameasure.py, (zones, zone lines, zones with objects, objects, width, extras)
+    d.set_timing("fork")
+    fork = [
+        (12, 16, 0, 1, 4, {}, 1882),
+        (12, 16, 6, 1, 4, {}, 1847),
+        (12, 16, 6, 2, 4, {}, 1813),
+        (12, 16, 6, 2, 12, {}, 1730),
+        (12, 16, 6, 4, 8, {}, 1661),
+        (12, 16, 6, 3, 16, {}, 1591),
+        (12, 16, 12, 1, 4, {}, 1813),
+        (12, 16, 12, 2, 4, {}, 1744),
+        (12, 16, 12, 2, 12, {}, 1579),
+        (12, 16, 12, 4, 8, {}, 1441),
+        (12, 16, 12, 3, 16, {}, 1304),
+        (12, 16, 12, 2, 8, {'holey': True}, 1799),
+        (12, 16, 12, 2, 8, {'dli': True}, 1647),
+        (12, 16, 12, 2, 20, {'holey': True}, 1799),
+        (12, 16, 12, 2, 20, {'dli': True}, 1399),
+        (12, 16, 12, 4, 8, {'holey': True}, 1731),
+        (12, 16, 12, 4, 8, {'dli': True}, 1426),
+        (24, 8, 24, 2, 8, {'holey': True}, 1798),
+        (24, 8, 24, 2, 8, {'dli': True}, 1629),
+        (24, 8, 24, 2, 20, {'holey': True}, 1798),
+        (24, 8, 24, 2, 20, {'dli': True}, 1382),
+        (24, 8, 24, 4, 8, {'holey': True}, 1729),
+        (24, 8, 24, 4, 8, {'dli': True}, 1409),
+    ]
+    fworst = 0.0
+    for nz, zl, used, nobj, width, ex, iters in fork:
+        zones = [d.Zone(zl, nobj if z < used else 0, width, holey=ex.get("holey", False),
+                        dli=ex.get("dli", False)) for z in range(nz)]
+        model = sum(z.cycles() for z in zones)
+        measured = (1960 - iters) * 14.0156
+        err = abs(model - measured) / measured
+        fworst = max(fworst, err)
+        if err > 0.02:
+            raise AssertionError("fork timing, %s: model %.0f vs measured %.0f (%.1f%%)"
+                                 % ((nz, zl, used, nobj, width, ex), model, measured, 100 * err))
+    # eight 16-byte objects a line saturate MARIA's DMA: the cost stops growing
+    heavy = sum(d.Zone(16, 8, 16).cycles() for _ in range(12))
+    if abs(heavy - (1960 - 472) * 14.0156) / ((1960 - 472) * 14.0156) > 0.02 or not d.Zone(16, 8, 16).saturated():
+        raise AssertionError("a saturated screen: model %.0f" % heavy)
+    d.set_timing("fork")
+    return ("12 measured configurations reproduced (MAME 0.264, worst %.1f%%), and %d for the "
+            "fork's timing (worst %.1f%%)" % (100 * worst, len(fork), 100 * fworst))
+
+
+def t_dmameasure():
+    """tools/dmameasure.py's counting cartridges all assemble, differ from one another where
+    the shapes differ, and its fit shapes cover what the model's constants need."""
+    import dmameasure as dm
+    work = tempfile.mkdtemp(prefix="selftest-dmam-")
+    try:
+        cc = dm.costcart()
+        seen = set()
+        for name, kw, nz, zl in dm.SHAPES:
+            kw = dict(kw)
+            nobj, width = kw.pop("nobj"), kw.pop("width")
+            kw.setdefault("zones_used", nz)
+            rom = os.path.join(work, "t.a78")
+            cc.build(rom, nobj, width, **kw)
+            seen.add(io.open(rom, "rb").read())
+        assert len(seen) == len(dm.SHAPES), "two shapes built the same cartridge"
+        shapes = dm.fit_shapes()
+        assert any(s[5].get("holey") for s in shapes) and any(s[5].get("dli") for s in shapes)
+        assert {s[0] for s in shapes} >= {12, 16, 24}, "zone counts must vary to separate the constants"
+    finally:
+        shutil.rmtree(work, True)
+    return "%d shapes build distinct cartridges; %d shapes to fit from" % (len(dm.SHAPES), len(shapes))
 
 
 def t_mksprite():
@@ -5146,6 +5215,7 @@ def main():
     r.check("workbench handoff", t_workbench_handoff)
     r.check("(OM) file offsets", t_om_file_offsets)
     r.check("RAM vector runs", t_ram_vector_runs)
+    r.check("dmameasure", t_dmameasure)
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
     r.check("simulated address origins", t_simorigins)

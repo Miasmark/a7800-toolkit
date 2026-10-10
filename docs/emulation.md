@@ -246,6 +246,31 @@ Turmoil (a KIL at `$D4A7` stops the program at frame 55; undiagnosed). Display-i
 timing disagrees on 15 images, mostly where one side has no live list. Rerun it on a new MAME
 before trusting any of this: `python tools/mamecheck.py /path/to/roms --sample 60 --cache c`.
 
+### MAME with the fork's work: bankset, POKEY at $0800, and the fork's MARIA timing
+
+The fork's cartridge and MARIA work can be ported onto a current MAME (0.289 development here), which keeps
+what the fork cannot give: the Lua taps every probe here uses. The port is a patch kept outside this
+repository (all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-clock first-hole penalty,
+8 clocks of last-line shutdown, and each line shown a pixel at a time so a mid-scanline register write
+appears mid-scanline); current MAME's POKEY already has the fork's POKEY work. Run with
+`-bios a7800pr -rompath <folder>` like any MAME here (0.289 wants `7800.u7` for the plain `a7800` BIOS).
+
+What it changes, measured with `mamecheck.py` on the same 278-image sample as above:
+
+| | MAME 0.264 | MAME with the port |
+|---|---|---|
+| both run it | 256 (92.8%) | 266 (96.4%) |
+| simulator only | 15 (5.4%) | 6 (2.2%) |
+| MAME only | 2 (0.7%) | 2 (0.7%) |
+| neither | 3 (1.1%) | 2 (0.7%) |
+
+Of the 15 bankset images, 14 now run in MAME with live display lists (4 before). What is left of
+"simulator only" is five Activision images in the usual (AM) block order, which MAME has never run (it runs
+the (OM) order), and Sexy Six's header. Every probe in the toolkit runs on it (the self-test passes in full
+under it), which is what makes bankset cartridges observable without the fork. MARIA's DMA cost on it
+matches the fork's exactly on all 14 shapes `tools/dmameasure.py` compared; against MAME 0.264 it differs on
+holey zones, display interrupts and one-byte objects (docs/hardware.md has the second timing).
+
 ### Running the fork, and what it showed about bankset cartridges
 
 The fork's source is at <https://github.com/7800-devtools/a7800>. It is a MAME tree from

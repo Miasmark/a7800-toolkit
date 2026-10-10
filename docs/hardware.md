@@ -132,6 +132,30 @@ Two more costs, measured later and now in `dmabudget.py`:
 | one display interrupt (MARIA's signal plus the 6502's entry and exit) | 16.6 |
 | a graphics byte in a region **holey DMA** suppresses | 0 |
 
+**Two timings.** The table above is MAME 0.264's. The a7800 fork's MARIA (current MAME has it
+once its work is ported, docs/emulation.md) charges slightly differently, and
+`tools/dmameasure.py` re-measures it on any emulator you point it at: 45 display shapes, fitted
+by least squares, worst residual 0.85%.
+
+| what | CPU cycles, MAME 0.264 | CPU cycles, the fork |
+|---|---|---|
+| every scanline inside a zone | 5.63 | 5.62 |
+| a zone boundary | 1.68 | 1.89 |
+| one 4-byte DL entry, per scanline | 2.08 | 1.99 |
+| one graphics byte, per scanline | 0.74 | 0.755 |
+| one display interrupt | 16.6 | 17.4 |
+| a **holey** zone, per scanline | 0 | +0.99, and +0.51 per object |
+| **most one scanline can cost** | 108.62 | 108.62 |
+
+The fork charges 3 colour clocks for the first hole in each object's graphics, so under it a
+holey zone is no longer exactly the byte cost. Its other changes (a 430-clock DMA limit, 8 clocks of
+last-line shutdown) show up as the small differences above. A line of DMA stops at the limit: eight
+16-byte objects in every zone cost 20,855 cycles a frame on both machines, where the linear model
+says 22,583 -- past the limit the 6502 keeps about 4.9 cycles of the line and the rest of what you
+asked MARIA to draw is not drawn. `dmabudget.py` applies the cap per scanline and says which zones
+reach it. MAME with the fork's MARIA work and the fork itself agree on all 14 shapes compared,
+holey and interrupt shapes included. (`dmabudget.py --timing mame0264` is the first set.)
+
 Holey DMA is a large saving, not a rounding error -- two 20-byte objects over
 192 scanlines went from 1,412 iterations a frame to 1,825 -- and it is exactly
 the byte cost that disappears: the objects still pay for their display-list
