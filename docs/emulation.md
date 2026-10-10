@@ -390,6 +390,7 @@ proved goes here once its addresses have become parameters.
 | `dma-count.lua`, `dma-costcart.py` | Measure CPU cycles that survive DMA. |
 | `bankset-rules-cart.py` | Build a bank-RAM bankset cartridge that obeys, or breaks, the spec's two rules (display list in cart RAM or ROM, code run from the cart RAM). |
 | `pokey-polyoracle.py` | Build a cartridge sampling POKEY's RANDOM register at known spacing. |
+| `pokey-irqcart.py` | Build a cartridge that counts POKEY timer interrupts (or, with `--poll`, IRQST underflows). |
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
 | `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |
 | `cyclebudget.lua` | Where a frame's CPU cycles go and how many MARIA took: executed cycles (with branch and page-crossing extras), the part inside the NMI, the TIA/RIOT slow-access penalty, `dma` as what is left of the frame, and executed cycles per named PC range. Compare `dma` with `dmabudget.py`'s model of the same display list. Measured first in the Karateka XE port; see its header for what it does not count. |

@@ -896,7 +896,8 @@ def main(argv=None):
                                  "(an error trap), so the run ends there."
                                  % sim_engine.bus.jammed)
             import sim as _sim
-            for note in _sim.rule_break_notes(getattr(sim_engine, "bus", None)):
+            for note in (_sim.rule_break_notes(getattr(sim_engine, "bus", None))
+                         + _sim.pokey_notes(getattr(sim_engine, "bus", None))):
                 rep.notes.append(note[0].upper() + note[1:] + ".")
             runs = [
                 ("music", "What it sounds like", lambda: sim_engine.music(out, rep)),

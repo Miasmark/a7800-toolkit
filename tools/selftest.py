@@ -450,6 +450,10 @@ def t_sim_random():
     bus = sim.Bus(FakeCart())
     cyc = [0]
     bus.cpu_cycles = lambda: cyc[0]
+    # the chip powers up in reset, where RANDOM is held at one value, as on MAME and the fork
+    cyc[0] = 100
+    assert len({bus.read(0x400A) for _ in range(4)}) == 1
+    bus.write(0x400F, 0x03)                  # SKCTL: out of reset
     seen = set()
     for step in range(64):
         cyc[0] += 37
@@ -2053,6 +2057,95 @@ def t_bankset_rules():
     finally:
         shutil.rmtree(work, True)
     return "a list in bank RAM reads as empty, code run from it reads $FF, both noted; nothing else is"
+
+
+def t_pokeychip():
+    """POKEY as the 6502 sees it (tools/pokeychip.py): the chip's own polynomial tables, reset
+    holding RANDOM and the timers still, the poly9 switch, timer periods, IRQST and its
+    acknowledgement -- and, against the a7800 fork's own counts, a RANDOM stream and timer
+    interrupt counts that match it, which is how the model was checked (MAME's agree)."""
+    import importlib.util
+    import cart as cart_module
+    import pokeychip
+    import sim
+    import tracker
+    # the tables are the chip's: their output bit is the recovered polynomial, inverted
+    for table, ref in ((pokeychip.poly17(), tracker.poly17()), (pokeychip.poly9(), tracker.poly9())):
+        bits = "".join(str(x & 1) for x in table)
+        inv = "".join("1" if c == "0" else "0" for c in bits[:200])
+        both = "".join(map(str, ref)) * 2
+        assert inv in both and len(table) == len(ref)
+    # reset: powered up in reset, RANDOM sits at the table's start; released, it counts clocks
+    t17 = pokeychip.poly17()
+    chip = pokeychip.PokeyChip()
+    assert chip.read(0x0A, 500) == t17[0] >> 8 & 0xFF == 0xFF
+    chip.write(0x0F, 0x03, 100)
+    assert chip.read(0x0A, 100) == 0xFF and chip.read(0x0A, 114) == (t17[14] >> 8) & 0xFF
+    assert chip.read(0x0A, 100 + 131071 + 14) == (t17[14] >> 8) & 0xFF
+    chip.write(0x08, 0x80, 114)
+    assert chip.read(0x0A, 120) == pokeychip.poly9()[20] & 0xFF
+    chip.write(0x0F, 0x00, 200)                              # back into reset
+    assert chip.read(0x0A, 300) == 0xFF and chip.release is None
+    # timers on the 64 kHz clock: AUDF 20 -> one every 21 * 28 clocks, first on the 21st tick
+    chip = pokeychip.PokeyChip()
+    chip.write(0x0F, 0x03, 100)
+    chip.write(0x00, 20, 100)
+    chip.write(0x0E, 0x01, 100)
+    chip.write(0x09, 0, 1000)                               # step 900
+    first = (900 // 28 + 1) * 28 + 20 * 28
+    assert chip.read(0x0E, 100 + first - 1) == 0xF7             # SEROC is set at power-up
+    assert chip.read(0x0E, 100 + first) == 0xF6, "IRQST bit 0 low once the timer has fired"
+    chip.write(0x0E, 0x00, 100 + first + 1)                  # acknowledge ...
+    chip.write(0x0E, 0x01, 100 + first + 2)                  # ... and re-enable
+    assert chip.read(0x0E, 100 + first + 3) == 0xF7
+    assert chip.read(0x0E, 100 + first + 588) == 0xF6
+    # the 1.79 MHz clock: AUDF + 4 clocks a period, AUDF16 + 7 for a joined pair
+    assert chip._timer(0x01, 0x40, [100, 0, 0, 0]) == (101, 104, True)
+    assert chip._timer(0x02, 0x50, [0, 1, 0, 0]) == (257, 263, True)
+    assert chip._timer(0x04, 0x01, [0, 0, 0, 9]) == (10, 10 * 114, False)
+    # a program that enables the interrupt and never polls, or sets two-tone, is told so
+    chip = pokeychip.PokeyChip()
+    chip.write(0x0F, 0x03, 0)
+    chip.write(0x0E, 0x04, 1)
+    chip.write(0x0F, 0x0B, 2)
+    assert len(chip.notes()) == 2
+    chip.read(0x0E, 3)
+    assert len(chip.notes()) == 1
+    work = tempfile.mkdtemp(prefix="selftest-pokey-")
+    try:
+        def load(name):
+            spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, "probes", name + ".py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        # RANDOM, sampled every 14 cycles: the fork's own stream (probes/pokey-polyoracle.py's
+        # cartridge, read from RAM at frame 90) is ours shifted one sample, up to its first eight
+        oracle = load("pokey-polyoracle")
+        fork = {0: "ff0f7cff07ffc3ec", 1: "ff0f1f3f8ce0cf73"}
+        for pad in (0, 1):
+            rom = os.path.join(work, "oracle%d.a78" % pad)
+            oracle.build(rom, pad_nops=pad)
+            bus = sim.run(cart_module.Cart(rom), 4)
+            got = bytes(bus.read(0x1800 + i) for i in range(7)).hex()
+            assert got == fork[pad][2:], (pad, got, fork[pad])
+        # timer interrupts counted by polling IRQST: the fork's counts at frame 130 (a 64 kHz
+        # timer, the 1.79 MHz timer, and a joined pair on it; one count of slack in the busiest)
+        irq = load("pokey-irqcart")
+        cases = ((0x00, (20,) * 4, 0x01, 6599, 0), (0x40, (100,) * 4, 0x01, 37311, 1),
+                 (0x50, (0, 1, 0, 0), 0x02, 14754, 0))
+        for audctl, audf, irqen, want, slack in cases:
+            rom = os.path.join(work, "irq%02x.a78" % audctl)
+            irq.build(rom, audctl, audf, irqen, poll=True)
+            bus = sim.run(cart_module.Cart(rom), 130)
+            n = bus.read(0x80) + 256 * bus.read(0x81)
+            assert abs(n - want) <= slack, (audctl, n, want)
+            assert not sim.pokey_notes(bus)
+        rom = os.path.join(work, "irqmode.a78")
+        irq.build(rom, 0, (20,) * 4, 0x01)
+        assert "never polled IRQST" in " ".join(sim.pokey_notes(sim.run(cart_module.Cart(rom), 10)))
+    finally:
+        shutil.rmtree(work, True)
+    return "chip tables, reset, poly9, timers and IRQST; RANDOM and 3 timer counts equal the a7800 fork's"
 
 
 def t_mamecheck():
@@ -5325,6 +5418,7 @@ def main():
     r.check("bankset vs a7800 source", t_bankset_fork_model)
     r.check("bankset RAM", t_bankset_ram)
     r.check("bankset rules", t_bankset_rules)
+    r.check("pokey chip", t_pokeychip)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)

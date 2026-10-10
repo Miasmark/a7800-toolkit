@@ -427,7 +427,7 @@ def probe(rom, out, frames=600, drive=False, handover=None, steal=True, mapper=N
             "jammed": bus.jammed,
             "rule_breaks": {k: {"count": v[0], "first": v[1]}
                             for k, v in bus.rule_breaks.items()},
-            "rule_break_notes": sim.rule_break_notes(bus),
+            "rule_break_notes": sim.rule_break_notes(bus) + sim.pokey_notes(bus),
             "dll": ("%02X%02X" % (bus.dpph, bus.dppl)
                     if bus.dpph is not None and bus.dppl is not None else None),
             "ctrl": bus.ctrl}

@@ -585,6 +585,7 @@ def build(rom, frames, explore, config=None, merge=(), mapper=None, low=None,
     for b_ in (bus, locals().get("bus2")):
         if b_ is not None:
             notes.extend(sim.rule_break_notes(b_))
+            notes.extend(sim.pokey_notes(b_))
     stats = [s for s in stats if s]
     if stats:
         notes.append("forcing the untaken side of branches (branchforce.py) ran %d paths "

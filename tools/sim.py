@@ -46,10 +46,15 @@ runs whose lengths were not recorded and could not be reproduced.)
 All five reproduce a commercial game's music from its own code, with the frame
 clock exact in every one. That is what this was built to do.
 
-**Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
-generates its music from POKEY's random register and cannot be scored by log
-comparison at all, and Commando -- the only other retail POKEY cartridge --
-emits 11 states against a capture's 424 for reasons not yet understood.
+**Treat this as a TIA tool.** POKEY is modelled as far as a program can see it
+(`tools/pokeychip.py`: RANDOM from the chip's own tables, SKCTL reset, the poly9
+switch, timers and IRQST -- RANDOM and the timer counts equal the a7800 fork's, to
+the integer), but its sound is not rendered here and its interrupt is not delivered
+(neither does MAME). Ballblazer generates its music from POKEY's random register and
+still cannot be scored by log comparison: the stream is exact but a read only lines
+up if the cycle does, and ours drifts from MAME's (36% agreement, 95% progress).
+Commando -- the only other retail POKEY cartridge -- emits 11 states against a
+capture's 424 for reasons not yet understood.
 
 ### The bug that made Donkey Kong silent
 
@@ -84,10 +89,15 @@ table across an address ending in `$28`, the simulator wrote values no AUDC can
 hold (`$1F`) and then fell silent for the rest of the run. With MSTAT answering
 only at `$28` and `$128`, both play through.
 
-**Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
-generates its music from POKEY's random register and cannot be scored by log
-comparison at all, and Commando -- the only other retail POKEY cartridge --
-emits 11 states against a capture's 424 for reasons not yet understood.
+**Treat this as a TIA tool.** POKEY is modelled as far as a program can see it
+(`tools/pokeychip.py`: RANDOM from the chip's own tables, SKCTL reset, the poly9
+switch, timers and IRQST -- RANDOM and the timer counts equal the a7800 fork's, to
+the integer), but its sound is not rendered here and its interrupt is not delivered
+(neither does MAME). Ballblazer generates its music from POKEY's random register and
+still cannot be scored by log comparison: the stream is exact but a read only lines
+up if the cycle does, and ours drifts from MAME's (36% agreement, 95% progress).
+Commando -- the only other retail POKEY cartridge -- emits 11 states against a
+capture's 424 for reasons not yet understood.
 
 ### Comparing like for like, which is most of the difficulty
 
@@ -138,8 +148,9 @@ and played silence -- which is why the failure looked like a player that
 stops, then like a missing interrupt, then like a display-list problem, and
 was none of those.
 
-`Bus.random` now implements the 17-bit polynomial counter, clocked at the CPU
-rate. The music plays: 428 of 429 logged states carry voice four, against one
+`Bus.random` implemented the 17-bit polynomial counter, clocked at the CPU
+rate (it is now `PokeyChip.read` in `tools/pokeychip.py`, with the chip's XNOR-fed
+tables; the first version here was a plain XOR register, which no chip has). The music plays: 428 of 429 logged states carry voice four, against one
 of 164 before, and it keeps playing to the end of the run instead of dying
 around frame 400.
 
@@ -270,6 +281,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cart as cart_module
 import m6502
+import pokeychip
 
 # Flags
 C, Z, I, D, B, U, V, N = 1, 2, 4, 8, 16, 32, 64, 128
@@ -353,8 +365,6 @@ class Bus(object):
         self.dppl = None                # hardware; the sim keeps its own copy
         self.ctrl = 0x00                # MARIA CTRL: DMA is OFF until a game
                                         # turns it on, and so are its interrupts
-        self.poly = 0x1FFFF             # POKEY's 17-bit polynomial counter
-        self.poly_at = 0                # ... and the cycle it was last advanced
         self.drive = drive
         self.obs = None                 # an observer, or None
         self.maria = {}                 # MARIA register -> last value written
@@ -386,7 +396,9 @@ class Bus(object):
         self.timer = None               # the RIOT interval timer: (set at cycle, value, interval)
         self.timer_flag_cleared = False
         self.pokeys = set()
+        self.pk = {}                    # POKEY base address -> its PokeyChip
         for base in cart.pokeys():
+            self.pk[base] = pokeychip.PokeyChip()
             for r in range(16):
                 self.pokeys.add(base + r)
 
@@ -418,36 +430,11 @@ class Bus(object):
             self.timer_flag_cleared = True
         return value
 
-    def random(self, cycles):
-        """POKEY's RANDOM register: the top bits of a 17-bit LFSR.
-
-        This is not a detail. Ballblazer generates its music rather than
-        playing a score, and the generator asks POKEY for entropy --
-        `CMP $400A / BCS` at $B333, which skips the note when the comparison
-        fails. Return a constant zero, as this simulator did, and the
-        comparison always skips: the engine runs, emits nothing, and the game
-        plays silence through a player that is working perfectly.
-
-        The polynomial is x^17 + x^12 + 1, clocked at the CPU rate, so it is
-        advanced by however many cycles have passed since it was last asked.
-        """
-        # the cycle count is fractional once MARIA's DMA has taken its share of a line
-        step = int(cycles - self.poly_at)
-        self.poly_at += step
-        p = self.poly
-        for _ in range(min(step, 4096)):
-            p = ((p >> 1) | (((p ^ (p >> 5)) & 1) << 16)) & 0x1FFFF
-        self.poly = p
-        return (p >> 9) & 0xFF
-
     # -- reads
     def read(self, a):
         a &= 0xFFFF
         if a in self.pokeys and not (self.rom_over_pokey and self.cart.space_of(a, self.bank)):
-            reg = a & 0x0F
-            if reg == 0x0A:                       # RANDOM
-                return self.random(self.cpu_cycles())
-            return 0xFF
+            return self.pk[a & ~0x0F].read(a & 0x0F, self.cpu_cycles())
         if a >= self.rom_low:
             sp = self.cart.space_of(a, self.bank)
             if sp is not None:
@@ -523,6 +510,7 @@ class Bus(object):
             if a in self.pokeys:
                 self.audio[a] = v
                 self.writes.append((self.frame, a, v))
+                self.pk[a & ~0x0F].write(a & 0x0F, v, self.cpu_cycles())
                 return
             for lo, hi in self.cart_ram:
                 if lo <= a < hi:
@@ -560,6 +548,7 @@ class Bus(object):
         if a in self.pokeys:
             self.audio[a] = v
             self.writes.append((self.frame, a, v))
+            self.pk[a & ~0x0F].write(a & 0x0F, v, self.cpu_cycles())
             return
         if self.obs is not None:
             self.obs.data_write(a, v)
@@ -709,6 +698,15 @@ def rule_break_notes(bus):
         out.append("the CPU ran code from the bankset cart RAM at $%04X (%d instructions): the "
                    "spec says execution from Sally's cart RAM is not supported, and the a7800 port "
                    "of MAME reads $FF there; so does this run" % (n["exec"][1], n["exec"][0]))
+    return out
+
+
+def pokey_notes(bus):
+    """What the program asked of a POKEY that the simulator cannot give it, in words."""
+    out = []
+    for base, chip in sorted((getattr(bus, "pk", None) or {}).items()):
+        for note in chip.notes():
+            out.append("it %s (POKEY at $%04X)" % (note, base))
     return out
 
 
