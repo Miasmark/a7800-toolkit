@@ -332,6 +332,12 @@ class Screen(object):
         # display lists, character lists and graphics may be in RAM or in ROM
         # (several zones of a real game keep their lists in the fixed bank)
         self.src = type("Mem", (), {"byte": staticmethod(self.byte)})
+        # ... but not display lists in the cartridge (bankset): the spec says they must be in console RAM,
+        # and MARIA reads such a list as empty (the a7800 port of MAME, the simulator)
+        self.dl_in_cart_ram = 0
+        starts = [r[0] for r in getattr(c, "_region", []) if r[2] != "ram"]
+        self.list_floor = min([0x4000] + starts) if c.bankset else None
+        self.lsrc = type("Mem", (), {"byte": staticmethod(self.list_byte)})
 
     def byte(self, addr):
         addr = self.dlwalk.unmirror(addr)
@@ -341,6 +347,12 @@ class Screen(object):
             return self.mram[addr - 0x4000]
         sp = self.c.space_of(addr, bank=self.d.get("bank"))
         return self.c.byte(sp, addr) if sp else 0
+
+    def list_byte(self, addr):
+        if self.list_floor is not None and self.dlwalk.unmirror(addr) >= self.list_floor:
+            self.dl_in_cart_ram += 1
+            return 0
+        return self.byte(addr)
 
     def rgb(self, palette, colour, st=None):
         import palette as pal
@@ -372,7 +384,7 @@ class Screen(object):
     def zones(self):
         total = 0
         for i in range(40):
-            z = self.dlwalk.decode_dll_entry(self.src, self.d["dll"] + 3 * i)
+            z = self.dlwalk.decode_dll_entry(self.lsrc, self.d["dll"] + 3 * i)
             if z["dl"] == 0 or total >= 242:
                 break
             yield total, z
@@ -411,7 +423,7 @@ class Screen(object):
         seen, found = set(), []
         for _y, z in self.zones():
             try:
-                entries = self.dlwalk.walk_dl(self.src, z["dl"])
+                entries = self.dlwalk.walk_dl(self.lsrc, z["dl"])
             except IndexError:
                 continue
             for e in entries:
@@ -442,7 +454,7 @@ class Screen(object):
                 for x in range(320):
                     px[x, y + ln] = bg
             try:
-                entries = self.dlwalk.walk_dl(self.src, z["dl"])
+                entries = self.dlwalk.walk_dl(self.lsrc, z["dl"])
             except IndexError:
                 continue
             for e in entries:
@@ -883,6 +895,10 @@ def main(argv=None):
                 rep.notes.append("The program ran a KIL opcode at $%04X and stopped itself "
                                  "(an error trap), so the run ends there."
                                  % sim_engine.bus.jammed)
+            import sim as _sim
+            for note in (_sim.rule_break_notes(getattr(sim_engine, "bus", None))
+                         + _sim.pokey_notes(getattr(sim_engine, "bus", None))):
+                rep.notes.append(note[0].upper() + note[1:] + ".")
             runs = [
                 ("music", "What it sounds like", lambda: sim_engine.music(out, rep)),
                 ("screens", "What it looks like", lambda: sim_engine.screens(out, rep)),

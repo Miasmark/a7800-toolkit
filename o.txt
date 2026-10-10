@@ -1,0 +1,7 @@
+error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+c300558-001a.u7 WRONG CHECKSUMS:
+    EXPECTED: CRC(a0e10edf) SHA1(14584b1eafe9721804782d4b1ac3a4a7313e455f)
+       FOUND: CRC(52b82d8a) SHA1(3b79b823fdeb249bdcc2a460a316b08b8ffba02b)
+WARNING: the machine might not run correctly.
+Unable to load image '.a78': No such file or directory (generic:2)
+Fatal error: Device Atari 7800 Cartridge Slot load (-cartridge .a78) failed: No such file or directory (generic:2)

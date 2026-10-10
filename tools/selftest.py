@@ -450,6 +450,10 @@ def t_sim_random():
     bus = sim.Bus(FakeCart())
     cyc = [0]
     bus.cpu_cycles = lambda: cyc[0]
+    # the chip powers up in reset, where RANDOM is held at one value, as on MAME and the fork
+    cyc[0] = 100
+    assert len({bus.read(0x400A) for _ in range(4)}) == 1
+    bus.write(0x400F, 0x03)                  # SKCTL: out of reset
     seen = set()
     for step in range(64):
         cyc[0] += 37
@@ -1932,6 +1936,12 @@ def t_bankset_ram():
         assert bus.bank == 3
         bus.write(0xC123, 0x5A)                                # ... and writes MARIA's RAM
         assert bus.bank == 3 and bus.mram[0x123] == 0x5A, "a write to $C000+ switched or was lost"
+        # the disassembler's view agrees: only $8000-$BFFF selects a bank with bank RAM, and a
+        # store to $C000-$FFFF is MARIA's RAM, not a bank switch (it is, without the RAM)
+        assert c.map.switch == (0x8000, 0xBFFF) and c.map.bank_from_write(0xC123, 3) is None
+        assert c.map.bank_from_write(0x8000, 3) is not None
+        plain = cart_module.Cart(image("sg1.a78", 0x2002, 0x40000))
+        assert plain.map.switch == (0x8000, 0xFFFF) and plain.map.bank_from_write(0xC000, 3) is not None
         bus.write(0x4123, 0x77)                                # the CPU's own RAM
         assert bus.read(0x4123) == 0x77 and bus.mem(0x4123) == 0x5A, "the two RAMs are one"
         m = cart_module.Cart(c.path, side="maria")
@@ -1955,6 +1965,245 @@ def t_bankset_ram():
     finally:
         shutil.rmtree(work, True)
     return "bank RAM per chip, CPU writes through $C000, MARIA's half and bank, ROM over POKEY at $4000"
+
+
+def t_bankset_rules():
+    """The two things the Bankset spec rules out for a bank-RAM cartridge are refused as the
+    a7800 port of MAME refuses them, and said so: a display list in the cartridge, RAM or ROM
+    ("Your DL must be stored in console ram"), reads as empty, and the CPU running code from its own cart RAM
+    ("execution from Sally's cart-ram isn't supported") reads $FF. Checked against that MAME build
+    with a cartridge of each (the warnings, and the library's bank-RAM images unchanged)."""
+    import random
+    import cart as cart_module
+    import sim
+    rng = random.Random(5)
+    work = tempfile.mkdtemp(prefix="selftest-bsrules-")
+
+    def image(name, mapper, size):
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = size.to_bytes(4, "big")
+        hdr[53], hdr[54] = mapper >> 8, mapper & 0xFF
+        hdr[55] = 1
+        path = os.path.join(work, name)
+        io.open(path, "wb").write(bytes(hdr) + bytes(rng.randrange(256) for _ in range(size)))
+        return path
+    try:
+        c = cart_module.Cart(image("ram.a78", 0x6000, 0x10000))
+        bus = sim.Bus(c)
+        bus.write(0x3C, 0x40)                                   # DMA on
+        # a list of lists in console RAM, pointing at a display list in the cart RAM
+        for z in range(3):
+            for i, v in enumerate((0x0F, 0x41, 0x00)):
+                bus.write(0x1800 + 3 * z + i, v)
+        bus.write(0x2C, 0x18)
+        bus.write(0x30, 0x00)
+        bus.write(0xC100, 0x00)                                 # MARIA's RAM: an object header
+        bus.write(0xC101, 0x20)
+        zones = bus.zones()
+        assert zones and bus.rule_breaks.get("dl", [0])[0] > 0, "a list in the cart RAM was read"
+        assert bus.rule_breaks["dl"][1] == 0x4101
+        assert zones[0][2] == bus.zone_cost(0x4100, 16) and bus.mem(0x4101) == 0x20
+        assert "console ram" in sim.rule_break_notes(bus)[0]
+        # the list of lists itself in the cart RAM
+        b2 = sim.Bus(c)
+        b2.write(0x3C, 0x40)
+        b2.write(0x2C, 0x40)
+        b2.write(0x30, 0x00)
+        b2.write(0xC000, 0x8F)
+        got = b2.zones()
+        assert b2.rule_breaks["dl"][1] == 0x4000 and got and not got[0][1], "a DLL entry was read"
+        # the CPU running from its cart RAM
+        b3 = sim.Bus(c)
+        b3.write(0x4000, 0xEA)
+        cpu = sim.CPU(b3)
+        cpu.pc = 0x4000
+        cpu.step()
+        assert b3.rule_breaks["exec"] == [1, 0x4000], b3.rule_breaks
+        assert "not supported" in sim.rule_break_notes(b3)[0]
+        # ... while reads of it as data, and code anywhere else, are not breaks
+        b4 = sim.Bus(c)
+        b4.write(0x4000, 0xEA)
+        b4.write(0x80, 0xEA)
+        cpu4 = sim.CPU(b4)
+        cpu4.pc = 0x80
+        cpu4.step()
+        assert b4.read(0x4000) == 0xEA and not b4.rule_breaks and not sim.rule_break_notes(b4)
+        # a bankset without bank RAM has no RAM to run code from, but its ROM is no place for a list
+        # either; and a cartridge that is not a bankset keeps its lists in ROM if it likes
+        n = sim.Bus(cart_module.Cart(image("plain.a78", 0x2000, 0x10000)))
+        assert n.mram is None and n.mem_dl(0x1800) == n.mem(0x1800) and not n.rule_breaks
+        assert n.mem_dl(0xC123) == 0 and n.rule_breaks["dl"] == [1, 0xC123]
+        flat = sim.Bus(cart_module.Cart(image("nobank.a78", 0x0000, 0x8000)))
+        assert flat.mem_dl(0xC123) == flat.mem(0xC123) and not flat.rule_breaks
+        # probes/bankset-rules-cart.py: the three test cartridges, run through simprobe
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "bsrc", os.path.join(ROOT, "probes", "bankset-rules-cart.py"))
+        bsrc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bsrc)
+        seen = {}
+        for mode in ("ok", "dl", "rom", "exec"):
+            rom = os.path.join(work, "rules-%s.a78" % mode)
+            bsrc.build(rom, mode)
+            out = subprocess.run([sys.executable, os.path.join(HERE, "simprobe.py"), rom,
+                                  "-o", os.path.join(work, "o-" + mode), "--frames", "30"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 universal_newlines=True).stdout
+            seen[mode] = ("MARIA fetched a display list" in out, "the CPU ran code" in out)
+        assert seen == {"ok": (False, False), "dl": (True, False), "rom": (True, False),
+                        "exec": (False, True)}, seen
+    finally:
+        shutil.rmtree(work, True)
+    return "a list in bank RAM reads as empty, code run from it reads $FF, both noted; nothing else is"
+
+
+def t_pokeychip():
+    """POKEY as the 6502 sees it (tools/pokeychip.py): the chip's own polynomial tables, reset
+    holding RANDOM and the timers still, the poly9 switch, timer periods, IRQST and its
+    acknowledgement -- and, against the a7800 fork's own counts, a RANDOM stream and timer
+    interrupt counts that match it, which is how the model was checked (MAME's agree)."""
+    import importlib.util
+    import cart as cart_module
+    import pokeychip
+    import sim
+    import tracker
+    # the tables are the chip's: their output bit is the recovered polynomial, inverted
+    for table, ref in ((pokeychip.poly17(), tracker.poly17()), (pokeychip.poly9(), tracker.poly9())):
+        bits = "".join(str(x & 1) for x in table)
+        inv = "".join("1" if c == "0" else "0" for c in bits[:200])
+        both = "".join(map(str, ref)) * 2
+        assert inv in both and len(table) == len(ref)
+    # reset: powered up in reset, RANDOM sits at the table's start; released, it counts clocks
+    t17 = pokeychip.poly17()
+    chip = pokeychip.PokeyChip()
+    assert chip.read(0x0A, 500) == t17[0] >> 8 & 0xFF == 0xFF
+    chip.write(0x0F, 0x03, 100)
+    assert chip.read(0x0A, 100) == 0xFF and chip.read(0x0A, 114) == (t17[14] >> 8) & 0xFF
+    assert chip.read(0x0A, 100 + 131071 + 14) == (t17[14] >> 8) & 0xFF
+    chip.write(0x08, 0x80, 114)
+    assert chip.read(0x0A, 120) == pokeychip.poly9()[20] & 0xFF
+    chip.write(0x0F, 0x00, 200)                              # back into reset
+    assert chip.read(0x0A, 300) == 0xFF and chip.release is None
+    # timers on the 64 kHz clock: AUDF 20 -> one every 21 * 28 clocks, first on the 21st tick
+    chip = pokeychip.PokeyChip()
+    chip.write(0x0F, 0x03, 100)
+    chip.write(0x00, 20, 100)
+    chip.write(0x0E, 0x01, 100)
+    chip.write(0x09, 0, 1000)                               # step 900
+    first = (900 // 28 + 1) * 28 + 20 * 28
+    assert chip.read(0x0E, 100 + first - 1) == 0xF7             # SEROC is set at power-up
+    assert chip.read(0x0E, 100 + first) == 0xF6, "IRQST bit 0 low once the timer has fired"
+    chip.write(0x0E, 0x00, 100 + first + 1)                  # acknowledge ...
+    chip.write(0x0E, 0x01, 100 + first + 2)                  # ... and re-enable
+    assert chip.read(0x0E, 100 + first + 3) == 0xF7
+    assert chip.read(0x0E, 100 + first + 588) == 0xF6
+    # the 1.79 MHz clock: AUDF + 4 clocks a period, AUDF16 + 7 for a joined pair
+    assert chip._timer(0x01, 0x40, [100, 0, 0, 0]) == (101, 104, True)
+    assert chip._timer(0x02, 0x50, [0, 1, 0, 0]) == (257, 263, True)
+    assert chip._timer(0x04, 0x01, [0, 0, 0, 9]) == (10, 10 * 114, False)
+    # a program that enables the interrupt and never polls, or sets two-tone, is told so
+    chip = pokeychip.PokeyChip()
+    chip.write(0x0F, 0x03, 0)
+    chip.write(0x0E, 0x04, 1)
+    chip.write(0x0F, 0x0B, 2)
+    assert len(chip.notes()) == 2
+    chip.read(0x0E, 3)
+    assert len(chip.notes()) == 1
+    work = tempfile.mkdtemp(prefix="selftest-pokey-")
+    try:
+        def load(name):
+            spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, "probes", name + ".py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        # RANDOM, sampled every 14 cycles: the fork's own stream (probes/pokey-polyoracle.py's
+        # cartridge, read from RAM at frame 90) is ours shifted one sample, up to its first eight
+        oracle = load("pokey-polyoracle")
+        fork = {0: "ff0f7cff07ffc3ec", 1: "ff0f1f3f8ce0cf73"}
+        for pad in (0, 1):
+            rom = os.path.join(work, "oracle%d.a78" % pad)
+            oracle.build(rom, pad_nops=pad)
+            bus = sim.run(cart_module.Cart(rom), 4)
+            got = bytes(bus.read(0x1800 + i) for i in range(7)).hex()
+            assert got == fork[pad][2:], (pad, got, fork[pad])
+        # timer interrupts counted by polling IRQST: the fork's counts at frame 130 (a 64 kHz
+        # timer, the 1.79 MHz timer, and a joined pair on it; one count of slack in the busiest)
+        irq = load("pokey-irqcart")
+        cases = ((0x00, (20,) * 4, 0x01, 6599, 0), (0x40, (100,) * 4, 0x01, 37311, 1),
+                 (0x50, (0, 1, 0, 0), 0x02, 14754, 0))
+        for audctl, audf, irqen, want, slack in cases:
+            rom = os.path.join(work, "irq%02x.a78" % audctl)
+            irq.build(rom, audctl, audf, irqen, poll=True)
+            bus = sim.run(cart_module.Cart(rom), 130)
+            n = bus.read(0x80) + 256 * bus.read(0x81)
+            assert abs(n - want) <= slack, (audctl, n, want)
+            assert not sim.pokey_notes(bus)
+        rom = os.path.join(work, "irqmode.a78")
+        irq.build(rom, 0, (20,) * 4, 0x01)
+        assert "never polled IRQST" in " ".join(sim.pokey_notes(sim.run(cart_module.Cart(rom), 10)))
+    finally:
+        shutil.rmtree(work, True)
+    return "chip tables, reset, poly9, timers and IRQST; RANDOM and 3 timer counts equal the a7800 fork's"
+
+
+def t_mamemcp():
+    """tools/mamemcp.py without a MAME: the MCP handshake and tool list, a tool refusing
+    cleanly when MAME is not running, the live disassembler's decoding, and a trace line from a
+    window bank resolved to its bank by its bytes (MAME's trace does not record the bank), with
+    the executed addresses added to an annotations file disasm.py reads.
+    `python tools/mamemcp.py --selftest game.a78` exercises every tool against a real MAME."""
+    import random
+    import cart as cart_module
+    import mamemcp
+    r = mamemcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2025-03-26"}})["result"]
+    assert r["protocolVersion"] == "2025-03-26" and r["capabilities"] == {"tools": {}}
+    r = mamemcp.handle({"jsonrpc": "2.0", "id": 2, "method": "initialize",
+                        "params": {"protocolVersion": "1999-01-01"}})["result"]
+    assert r["protocolVersion"] == mamemcp.VERSIONS[0]
+    assert mamemcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    tools = mamemcp.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
+    assert len(tools) == 17 and all(t["inputSchema"]["type"] == "object" for t in tools)
+    got = mamemcp.call("mame_status", {})
+    assert got["isError"] and "mame_start" in got["content"][0]["text"]
+    assert mamemcp.handle({"jsonrpc": "2.0", "id": 4, "method": "nope"})["error"]["code"] == -32601
+    assert mamemcp.addr("$C000") == mamemcp.addr("0xc000") == mamemcp.addr(0xC000) == 0xC000
+    # decoding, with hardware names
+    assert mamemcp.decode(bytes([0xA9, 0x20, 0, 0]), 0x9000, 0)[1] == "LDA  #$20"
+    assert mamemcp.decode(bytes([0x85, 0x20, 0, 0]), 0x9000, 0)[1] == "STA  BACKGRND"
+    assert mamemcp.decode(bytes([0xD0, 0xFC, 0, 0]), 0xFCBE, 0)[1] == "BNE  $FCBC"
+    # a trace: bank 3's code at $8000 is told from the other banks' by its bytes
+    rng = random.Random(7)
+    work = tempfile.mkdtemp(prefix="selftest-mcp-")
+    try:
+        body = bytearray(rng.randrange(256) for _ in range(0x20000))
+        for b in range(8):
+            body[b * 0x4000:b * 0x4000 + 3] = bytes([0xEA, 0xEA, 0xEA])      # NOPs everywhere
+        body[3 * 0x4000:3 * 0x4000 + 2] = bytes([0xA9, 0x05])                # ... but bank 3
+        body[7 * 0x4000 + 0x10:7 * 0x4000 + 0x12] = bytes([0xA2, 0x01])
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = len(body).to_bytes(4, "big")
+        hdr[53], hdr[54] = 0x00, 0x02
+        rom = os.path.join(work, "sg.a78")
+        io.open(rom, "wb").write(bytes(hdr) + bytes(body))
+        mamemcp.M.cart = cart_module.Cart(rom)
+        trace = os.path.join(work, "t.log")
+        io.open(trace, "w").write("8000: lda #$05\nC010: ldx #$01\n8000: nop\n   (loops for 3 instructions)\n")
+        ann = os.path.join(work, "ann.json")
+        text = mamemcp.trace_summary(trace, ann)
+        assert "b3" in text and "f7" in text and "loops collapsed" in text, text
+        entries = json.load(io.open(ann))["entries"]
+        assert "b3:8000" in entries and "f7:C010" in entries, entries
+        mamemcp.trace_summary(trace, ann)                                    # merging adds nothing new
+        assert json.load(io.open(ann))["entries"] == entries
+    finally:
+        mamemcp.M.cart = None
+        shutil.rmtree(work, True)
+    return "handshake, 17 tools, clean refusal, decoding, a trace resolved to its bank and merged into annotations"
 
 
 def t_mamecheck():
@@ -5226,6 +5475,9 @@ def main():
     r.check("bankset round trip", t_bankset_roundtrip)
     r.check("bankset vs a7800 source", t_bankset_fork_model)
     r.check("bankset RAM", t_bankset_ram)
+    r.check("bankset rules", t_bankset_rules)
+    r.check("pokey chip", t_pokeychip)
+    r.check("MCP server", t_mamemcp)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)

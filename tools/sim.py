@@ -46,10 +46,15 @@ runs whose lengths were not recorded and could not be reproduced.)
 All five reproduce a commercial game's music from its own code, with the frame
 clock exact in every one. That is what this was built to do.
 
-**Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
-generates its music from POKEY's random register and cannot be scored by log
-comparison at all, and Commando -- the only other retail POKEY cartridge --
-emits 11 states against a capture's 424 for reasons not yet understood.
+**Treat this as a TIA tool.** POKEY is modelled as far as a program can see it
+(`tools/pokeychip.py`: RANDOM from the chip's own tables, SKCTL reset, the poly9
+switch, timers and IRQST -- RANDOM and the timer counts equal the a7800 fork's, to
+the integer), but its sound is not rendered here and its interrupt is not delivered
+(neither does MAME). Ballblazer generates its music from POKEY's random register and
+still cannot be scored by log comparison: the stream is exact but a read only lines
+up if the cycle does, and ours drifts from MAME's (36% agreement, 95% progress).
+Commando -- the only other retail POKEY cartridge -- emits 11 states against a
+capture's 424 for reasons not yet understood.
 
 ### The bug that made Donkey Kong silent
 
@@ -84,10 +89,15 @@ table across an address ending in `$28`, the simulator wrote values no AUDC can
 hold (`$1F`) and then fell silent for the rest of the run. With MSTAT answering
 only at `$28` and `$128`, both play through.
 
-**Treat this as a TIA tool.** The POKEY path is not validated: Ballblazer
-generates its music from POKEY's random register and cannot be scored by log
-comparison at all, and Commando -- the only other retail POKEY cartridge --
-emits 11 states against a capture's 424 for reasons not yet understood.
+**Treat this as a TIA tool.** POKEY is modelled as far as a program can see it
+(`tools/pokeychip.py`: RANDOM from the chip's own tables, SKCTL reset, the poly9
+switch, timers and IRQST -- RANDOM and the timer counts equal the a7800 fork's, to
+the integer), but its sound is not rendered here and its interrupt is not delivered
+(neither does MAME). Ballblazer generates its music from POKEY's random register and
+still cannot be scored by log comparison: the stream is exact but a read only lines
+up if the cycle does, and ours drifts from MAME's (36% agreement, 95% progress).
+Commando -- the only other retail POKEY cartridge -- emits 11 states against a
+capture's 424 for reasons not yet understood.
 
 ### Comparing like for like, which is most of the difficulty
 
@@ -138,8 +148,9 @@ and played silence -- which is why the failure looked like a player that
 stops, then like a missing interrupt, then like a display-list problem, and
 was none of those.
 
-`Bus.random` now implements the 17-bit polynomial counter, clocked at the CPU
-rate. The music plays: 428 of 429 logged states carry voice four, against one
+`Bus.random` implemented the 17-bit polynomial counter, clocked at the CPU
+rate (it is now `PokeyChip.read` in `tools/pokeychip.py`, with the chip's XNOR-fed
+tables; the first version here was a plain XOR register, which no chip has). The music plays: 428 of 429 logged states carry voice four, against one
 of 164 before, and it keeps playing to the end of the run instead of dying
 around frame 400.
 
@@ -270,6 +281,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cart as cart_module
 import m6502
+import pokeychip
 
 # Flags
 C, Z, I, D, B, U, V, N = 1, 2, 4, 8, 16, 32, 64, 128
@@ -353,8 +365,6 @@ class Bus(object):
         self.dppl = None                # hardware; the sim keeps its own copy
         self.ctrl = 0x00                # MARIA CTRL: DMA is OFF until a game
                                         # turns it on, and so are its interrupts
-        self.poly = 0x1FFFF             # POKEY's 17-bit polynomial counter
-        self.poly_at = 0                # ... and the cycle it was last advanced
         self.drive = drive
         self.obs = None                 # an observer, or None
         self.maria = {}                 # MARIA register -> last value written
@@ -370,6 +380,12 @@ class Bus(object):
         # $C000-$FFFF -- the a7800 fork's bankset.cpp
         self.mcart = cart.for_maria() if getattr(cart, "bankset", False) else None
         self.mram = bytearray(0x4000) if getattr(cart, "bankram", False) else None
+        # what a bankset cartridge cannot do: have MARIA read a display list from it ("Your DL must
+        # be stored in console ram, rather than bankset cart ram" -- and not from its ROM either),
+        # and, with bank RAM, have the CPU run code from its own ("execution from Sally's cart-ram
+        # isn't supported"). Each is refused as the a7800 port of MAME refuses it (the list reads
+        # as empty, the opcode as $FF) and counted here: {"dl": [count, first address], "exec": ...}
+        self.rule_breaks = {}
         # a flat bankset with POKEY at $4000 keeps its ROM readable there: the fork routes
         # only WRITES to the chip (bankset.h, a78_bankset_rom_p4000_device), and StoneAge
         # executes `JMP $4000` into that ROM
@@ -380,7 +396,9 @@ class Bus(object):
         self.timer = None               # the RIOT interval timer: (set at cycle, value, interval)
         self.timer_flag_cleared = False
         self.pokeys = set()
+        self.pk = {}                    # POKEY base address -> its PokeyChip
         for base in cart.pokeys():
+            self.pk[base] = pokeychip.PokeyChip()
             for r in range(16):
                 self.pokeys.add(base + r)
 
@@ -412,36 +430,11 @@ class Bus(object):
             self.timer_flag_cleared = True
         return value
 
-    def random(self, cycles):
-        """POKEY's RANDOM register: the top bits of a 17-bit LFSR.
-
-        This is not a detail. Ballblazer generates its music rather than
-        playing a score, and the generator asks POKEY for entropy --
-        `CMP $400A / BCS` at $B333, which skips the note when the comparison
-        fails. Return a constant zero, as this simulator did, and the
-        comparison always skips: the engine runs, emits nothing, and the game
-        plays silence through a player that is working perfectly.
-
-        The polynomial is x^17 + x^12 + 1, clocked at the CPU rate, so it is
-        advanced by however many cycles have passed since it was last asked.
-        """
-        # the cycle count is fractional once MARIA's DMA has taken its share of a line
-        step = int(cycles - self.poly_at)
-        self.poly_at += step
-        p = self.poly
-        for _ in range(min(step, 4096)):
-            p = ((p >> 1) | (((p ^ (p >> 5)) & 1) << 16)) & 0x1FFFF
-        self.poly = p
-        return (p >> 9) & 0xFF
-
     # -- reads
     def read(self, a):
         a &= 0xFFFF
         if a in self.pokeys and not (self.rom_over_pokey and self.cart.space_of(a, self.bank)):
-            reg = a & 0x0F
-            if reg == 0x0A:                       # RANDOM
-                return self.random(self.cpu_cycles())
-            return 0xFF
+            return self.pk[a & ~0x0F].read(a & 0x0F, self.cpu_cycles())
         if a >= self.rom_low:
             sp = self.cart.space_of(a, self.bank)
             if sp is not None:
@@ -517,6 +510,7 @@ class Bus(object):
             if a in self.pokeys:
                 self.audio[a] = v
                 self.writes.append((self.frame, a, v))
+                self.pk[a & ~0x0F].write(a & 0x0F, v, self.cpu_cycles())
                 return
             for lo, hi in self.cart_ram:
                 if lo <= a < hi:
@@ -554,6 +548,7 @@ class Bus(object):
         if a in self.pokeys:
             self.audio[a] = v
             self.writes.append((self.frame, a, v))
+            self.pk[a & ~0x0F].write(a & 0x0F, v, self.cpu_cycles())
             return
         if self.obs is not None:
             self.obs.data_write(a, v)
@@ -586,17 +581,17 @@ class Bus(object):
         holes = 0
         i = 0
         for _ in range(32):
-            b1 = self.mem((dl + i + 1) & 0xFFFF)
+            b1 = self.mem_dl((dl + i + 1) & 0xFFFF)
             if b1 == 0:
                 break
-            lo = self.mem((dl + i) & 0xFFFF)
+            lo = self.mem_dl((dl + i) & 0xFFFF)
             if (b1 & 0x1F) == 0:                      # five-byte entry
-                hi = self.mem((dl + i + 2) & 0xFFFF)
-                w = 32 - (self.mem((dl + i + 3) & 0xFFFF) & 0x1F)
+                hi = self.mem_dl((dl + i + 2) & 0xFFFF)
+                w = 32 - (self.mem_dl((dl + i + 3) & 0xFFFF) & 0x1F)
                 five, chars = True, bool(b1 & 0x20)
                 i += 5
             else:
-                hi = self.mem((dl + i + 2) & 0xFFFF)
+                hi = self.mem_dl((dl + i + 2) & 0xFFFF)
                 w = 32 - (b1 & 0x1F)
                 five, chars = False, False
                 i += 4
@@ -617,6 +612,19 @@ class Bus(object):
             per_line += self.DMA_HOLE_LINE + self.DMA_HOLE_OBJ * holes
         return (lines * min(per_line, self.DMA_LINE_CAP) + self.DMA_ZONE
                 + (self.DMA_DLI if (flags & 0x80) else 0))
+
+    def break_rule(self, rule, a):
+        n = self.rule_breaks.setdefault(rule, [0, a])
+        n[0] += 1
+
+    def mem_dl(self, a):
+        """A byte of a display list or the list of lists, as MARIA reads it: the same as `mem`,
+        except that a bankset cartridge may not hold one, in its ROM or its RAM: they belong in
+        console RAM."""
+        if self.mcart is not None and (a & 0xFFFF) >= self.rom_low:
+            self.break_rule("dl", a & 0xFFFF)
+            return 0
+        return self.mem(a)
 
     def mem(self, a):
         """A byte as MARIA reads it: RAM (through its mirrors), or the cartridge."""
@@ -665,9 +673,9 @@ class Bus(object):
             return []
         out, line = [], 0
         for z in range(self.MAX_ZONES):
-            b0 = self.mem((addr + z * 3) & 0xFFFF)
-            hi = self.mem((addr + z * 3 + 1) & 0xFFFF)
-            lo = self.mem((addr + z * 3 + 2) & 0xFFFF)
+            b0 = self.mem_dl((addr + z * 3) & 0xFFFF)
+            hi = self.mem_dl((addr + z * 3 + 1) & 0xFFFF)
+            lo = self.mem_dl((addr + z * 3 + 2) & 0xFFFF)
             n = (b0 & 0x0F) + 1
             line += n
             out.append((line, bool(b0 & 0x80),
@@ -675,6 +683,31 @@ class Bus(object):
             if line >= self.MAX_LINES:
                 break
         return out
+
+
+def rule_break_notes(bus):
+    """What a bank-RAM bankset cartridge did that the spec rules out (Bus.rule_breaks), in words."""
+    out = []
+    n = getattr(bus, "rule_breaks", {}) or {}
+    if "dl" in n:
+        out.append("MARIA fetched a display list from the bankset cartridge at $%04X (%d reads): "
+                   "it must be in console RAM (\"Your DL must be stored in console ram, rather "
+                   "than bankset cart ram\"; the ROM is no better), and the a7800 port of MAME "
+                   "reads it as empty; so does this run" % (n["dl"][1], n["dl"][0]))
+    if "exec" in n:
+        out.append("the CPU ran code from the bankset cart RAM at $%04X (%d instructions): the "
+                   "spec says execution from Sally's cart RAM is not supported, and the a7800 port "
+                   "of MAME reads $FF there; so does this run" % (n["exec"][1], n["exec"][0]))
+    return out
+
+
+def pokey_notes(bus):
+    """What the program asked of a POKEY that the simulator cannot give it, in words."""
+    out = []
+    for base, chip in sorted((getattr(bus, "pk", None) or {}).items()):
+        for note in chip.notes():
+            out.append("it %s (POKEY at $%04X)" % (note, base))
+    return out
 
 
 class CPU(object):
@@ -835,6 +868,9 @@ class CPU(object):
         obs = self.obs
         pc0 = self.pc
         op = b.read(pc0)
+        if b.mram is not None and 0x4000 <= pc0 < 0x8000:
+            b.break_rule("exec", pc0)
+            op = 0xFF
         entry = m6502.OPCODES.get(op)
         self.pc = (self.pc + 1) & 0xFFFF
         if obs is not None:

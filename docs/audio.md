@@ -617,6 +617,46 @@ tracker's "no accidental" filler, so that reads back as E2. Two-digit octaves
 now parse, negative ones fall back to the raw divider, and the round-trip check
 rejects anything that would not read back identically.
 
+## POKEY as the 6502 sees it
+
+`tracker.py` renders POKEY's *sound* from the register writes. What the program can *read* back is
+a different model, and `sim.py` had it wrong: every read answered `$FF` except RANDOM, which came
+from a plain XOR shift register that no chip has. `tools/pokeychip.py` is now the chip as MAME 0.289
+and the a7800 fork (POKEY 4.9) have it:
+
+* **Reset.** It powers up in reset (SKCTL bits 1-0 clear): the polynomial counters sit at zero, the
+  timers do not run, IRQEN is cleared. A write that releases it starts the counters.
+* **RANDOM** (`$0A`) is `poly17[p] >> 8`, or with AUDCTL bit 7 `poly9[p] & $FF`, where `p` counts
+  clocks since the release. The tables are XNOR-fed and built the way `pokey.cpp` builds them; their
+  output bit is the polynomial recovered from audio above, inverted. Checked on the fork with
+  `probes/pokey-polyoracle.py`: a loop sampling every 14 cycles reads `ff 0f 7c ff 07 ff c3 ec`, and
+  the simulator reads the same bytes one sample on (the fork's first read is at position 0, ours is
+  11 cycles in). Past about eight samples the fork's reads jitter by two cycles at each scanline
+  boundary and no model that counts whole cycles follows.
+* **Timers 1, 2 and 4 and IRQST** (`$0E`, active low, bit 3 set at power-up). A timer counts AUDF+1
+  ticks of its clock, and sets its bit if IRQEN has it enabled; writing IRQEN acknowledges. The period
+  is `(AUDF+1) * 28` or `* 114` clocks on the 64 kHz or 15 kHz clock, `AUDF + 4` on the 1.79 MHz clock
+  and `AUDF16 + 7` for a joined pair on it. `probes/pokey-irqcart.py --poll` builds a cartridge that
+  counts how often a timer fires; on the a7800 fork, 8 of 8 settings counted the same as the simulator
+  to the integer after 100 and 500 frames (a 64 kHz timer: 5,076 and 25,382; the 1.79 MHz one:
+  28,701 and 12,438 after wrapping), and MAME 0.289 agrees on the rates.
+
+**Neither emulator delivers POKEY's interrupt.** The cartridge POKEY's IRQ pin is wired to nothing in
+MAME or in the fork, so a game that runs its music from the timer interrupt cannot run on either, and
+the simulator does not pretend otherwise. `probes/pokey-irqcart.py` without `--poll` shows it: the
+handler never runs. `simprobe.py`, `firstlook.py` and `census.py` say so when a program enables a
+timer interrupt and never polls IRQST, and when it sets two-tone mode (SKCTL bit 3), which the render
+does not model either.
+
+Run over the library's 281 POKEY images for 200 frames each, 260 take the chip out of reset by then
+(Commando and the two POKEY Testers do not: Commando's music starts 17 seconds in), 23 set two-tone
+mode, and one enables a timer interrupt without ever polling IRQST: *Wond'ring Aloud (Covox Demo) (Via
+IRQ)*, which says so in its title and cannot run on either emulator.
+
+What it did for Ballblazer, which generates its music from RANDOM: agreement with a MAME capture went
+from 35.8% to 36.3%, and it now reaches 95% of the reference instead of 66%. Not more, because a read
+only matches if its cycle does, and the simulator's cycle count drifts from MAME's over a frame.
+
 ## Two POKEYs: eight voices, and MAME plays four
 
 Eighteen images declare a second POKEY at `$0440`. They are **not a stereo

@@ -626,8 +626,9 @@ class Emitter:
                     + cart.size_of(space) - 1))
         w.append(";   %d instructions reached by the tracer" % ncode)
         if getattr(self, "shift", 0):
-            w.append(";   MARIA's half of a bankset cartridge: what MARIA fetches, which the CPU")
-            w.append(";   never reads. Listed as data so the image rebuilds exactly.")
+            w.append(";   MARIA's half of a bankset cartridge: graphics. The CPU never reads this half and")
+            w.append(";   display lists are kept in console RAM, so nothing here is code or a list.")
+            w.append(";   Listed as data so the image rebuilds exactly.")
         if space in cfg.notes:
             for line in cfg.notes[space].splitlines():
                 w.append(";   " + line)
