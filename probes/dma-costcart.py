@@ -34,7 +34,7 @@ DLL        = 0xE000
 DLS        = 0xE100
 DL_STRIDE  = 64
 
-def build(path, nobj, width, zones_used=ZONES, dma_on=True, five_byte=False, nops=0, zlines=ZONE_LINES, nzones=ZONES, indirect=False, charwidth1=False):
+def build(path, nobj, width, zones_used=ZONES, dma_on=True, five_byte=False, nops=0, zlines=ZONE_LINES, nzones=ZONES, indirect=False, charwidth1=False, holey=False, dli=False):
     L=[]; a=L.append
     a("MSTAT = $28"); a("DPPH = $2C"); a("DPPL = $30"); a("CTRL = $3C")
     a("OFFSET = $38"); a("BACKGRND = $20"); a("P0C1 = $21"); a("P0C2 = $22")
@@ -70,6 +70,8 @@ def build(path, nobj, width, zones_used=ZONES, dma_on=True, five_byte=False, nop
     a("    LDA cnt_lo"); a("    STA res_lo")
     a("    LDA cnt_hi"); a("    STA res_hi")
     a("    JMP main")
+    a("nmi:")                                      # the display-interrupt handler: do nothing
+    a("    RTI")
     a("code_end:")
     a("    .res $D000-code_end,$00")
     a("gfx:")
@@ -77,7 +79,10 @@ def build(path, nobj, width, zones_used=ZONES, dma_on=True, five_byte=False, nop
     a("dll:")
     for z in range(nzones):
         dl = DLS + z*DL_STRIDE
-        a("    .byte $%02X,$%02X,$%02X" % (zlines-1, dl>>8, dl&0xFF))
+        # bit 7 raises a display interrupt, bit 6 makes MARIA's fetches from
+        # $D000 (address bit 12 set) "holey" -- suppressed
+        flags = (zlines-1) | (0x40 if holey else 0) | (0x80 if dli else 0)
+        a("    .byte $%02X,$%02X,$%02X" % (flags, dl>>8, dl&0xFF))
     a("dll_end:")
     a("    .res $E100-dll_end,$00")
     a("dls:")
@@ -103,7 +108,7 @@ def build(path, nobj, width, zones_used=ZONES, dma_on=True, five_byte=False, nop
     a("    .res $100,$41")
     a("dls_end:")
     a("    .res $FFFA-dls_end,$00")
-    a("    .word reset"); a("    .word reset"); a("    .word reset")
+    a("    .word nmi"); a("    .word reset"); a("    .word reset")
     src="\n".join(L)+"\n"
     data=asm.Assembler().assemble(src.splitlines())
     assert len(data)==0x4000, len(data)

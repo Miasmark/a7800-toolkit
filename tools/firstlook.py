@@ -322,11 +322,12 @@ def parse_regs_text(text):
 class Screen(object):
     """Rebuild what MARIA draws from a RAM dump, the registers, and the ROM."""
 
-    def __init__(self, c, ram, d):
+    def __init__(self, c, ram, d, mram=None):
         import dlwalk
-        # MARIA fetches lists and graphics from its own half of a bankset cartridge
+        # MARIA fetches lists and graphics from its own half of a bankset cartridge, and from
+        # its own 16K of RAM at $4000 when the cartridge has bank RAM
         self.c, self.d, self.dlwalk = c.for_maria(), d, dlwalk
-        self.ram = ram
+        self.ram, self.mram = ram, mram
         self.skipped = {}                   # (read mode, write mode) -> zone count
         # display lists, character lists and graphics may be in RAM or in ROM
         # (several zones of a real game keep their lists in the fixed bank)
@@ -336,6 +337,8 @@ class Screen(object):
         addr = self.dlwalk.unmirror(addr)
         if 0x1800 <= addr <= 0x27FF:
             return self.ram[addr - 0x1800]
+        if self.mram is not None and 0x4000 <= addr < 0x8000:
+            return self.mram[addr - 0x4000]
         sp = self.c.space_of(addr, bank=self.d.get("bank"))
         return self.c.byte(sp, addr) if sp else 0
 
@@ -696,7 +699,7 @@ class SimEngine(object):
         if bus.dpph is None or (bus.ctrl & 0x60) != 0x40:
             return
         d = parse_regs_text(self._simprobe.regs_text(bus.frame, bus, {}, []))
-        scr = Screen(self.c, self._simprobe.ram_bytes(bus), d)
+        scr = Screen(self.c, self._simprobe.ram_bytes(bus), d, bus.mram)
         try:
             objs = scr.objects()
         except Exception:                                    # noqa: BLE001
@@ -732,7 +735,7 @@ class SimEngine(object):
             d = parse_regs_text(snap["regs"])
             if "dll" not in d or d["dll"] is None:
                 continue
-            scr = Screen(self.c, snap["ram"], d)
+            scr = Screen(self.c, snap["ram"], d, snap.get("mram"))
             img, why = scr.image()
             if img is None:
                 continue
@@ -761,7 +764,10 @@ class SimEngine(object):
         d = parse_regs_text(snap["regs"])
         if d.get("dll") is None:
             return ["The simulated run never pointed MARIA at a display list."]
-        return describe_graphics(self.c, gdir, Screen(self.c, snap["ram"], d), d, rep)
+        mram = snap.get("mram")
+        if mram is not None:
+            io.open(os.path.join(gdir, "mram.bin"), "wb").write(mram)
+        return describe_graphics(self.c, gdir, Screen(self.c, snap["ram"], d, mram), d, rep)
 
     def sprites(self, out, rep):
         gdir = os.path.join(out, "graphics")

@@ -5,6 +5,7 @@ What MARIA leaves you: the 7800's cycle budget, for a given screen.
     python tools/dmabudget.py --uniform 12,16,4,8
     python tools/dmabudget.py --zone 16:2@8 --zone 16:6@16 --zone 16:0@0
     python tools/dmabudget.py --uniform 12,16,4,8 --afford
+    python tools/dmabudget.py --uniform 12,16,4,8 --timing mame0264
 
 MARIA draws by DMA and halts the 6502 while it does, so on the 7800 "how much
 can my game compute" is a question about how much it is drawing. Every other
@@ -64,6 +65,24 @@ ACCURACY
     by PREDICTING four shapes it had never seen. All four landed within 0.3%.
     Worst residual anywhere: 56 cycles, which is 0.2% of a frame.
 
+    TWO TIMINGS. The numbers above were measured on MAME 0.264. The a7800 fork (and now MAME
+    built with its MARIA work, see docs/emulation.md) changed MARIA's DMA: a 430-clock limit
+    (was 426), a 3-clock penalty for the first hole in each object's graphics, 8 clocks of
+    last-line shutdown (was 6), and DMA that is billed per scanline in whole CPU cycles.
+    `--timing fork` (the default) is that machine, measured with tools/dmameasure.py over 45
+    display shapes: worst residual 0.85%. `--timing mame0264` is the model as first fitted.
+    The two agree to within 1% on plain screens; they differ where it matters:
+        holey zones   the first fetch of each object still costs a hole penalty, so a holey
+                      zone is no longer "exactly the byte cost": +0.99 cycles a line and
+                      +0.51 a line per object
+        interrupts    a display interrupt costs 17.4, not 16.6
+        saturation    a scanline cannot cost MARIA more than 108.62 cycles on either machine:
+                      past that MARIA has hit its DMA limit and the 6502 gets what is left of
+                      the line (about 4.9 cycles) however much more you draw. The linear
+                      model alone over-states a screen of heavy lines by 8% (22,583 against
+                      the 20,855 measured for eight 16-byte objects per zone), so the cap
+                      is applied per scanline and a zone that reaches it is reported.
+
     These are MAME's timings. MAME's 7800 DMA model is good enough that the
     constants fall out as round numbers in MARIA colour clocks -- a graphics
     byte costs 2.98, which is the documented 3 -- but that is corroboration,
@@ -75,14 +94,42 @@ import sys
 # CPU cycles, NTSC, measured as described above. In MARIA colour clocks
 # (4 per CPU cycle) these are 22.5, 6.7, 8.3, 3.0 and 1.9 -- the graphics byte
 # landing on the documented 3 is the main reason to trust the rest.
-PER_LINE  = 5.633    # a scanline inside any zone, even an empty one
-PER_ZONE  = 1.678    # the DLL fetch at a zone boundary
-PER_OBJ   = 2.081    # reading one 4-byte display-list entry, per scanline
-PER_BYTE  = 0.744    # one graphics byte, per scanline
-FIVE_XTRA = 0.483    # a 5-byte entry costs this much more than a 4-byte one
-DLI_COST  = 16.6     # one display interrupt: MARIA's signal plus the 6502's
-                     # own entry and exit. Measured by toggling the bit on 24
-                     # zones and on 12, which agreed at 16.9 and 16.3.
+# The constants come in two sets, one per machine's timing (see TWO TIMINGS above). They
+# are module globals so the rest of the file reads them as before; `set_timing` switches.
+TIMINGS = {
+    # MAME 0.264: the model as first fitted
+    "mame0264": dict(PER_LINE=5.633,    # a scanline inside any zone, even an empty one
+                     PER_ZONE=1.678,    # the DLL fetch at a zone boundary
+                     PER_OBJ=2.081,     # reading one 4-byte display-list entry, per scanline
+                     PER_BYTE=0.744,    # one graphics byte, per scanline
+                     FIVE_XTRA=0.483,   # a 5-byte entry costs this much more than a 4-byte one
+                     DLI_COST=16.6,     # one display interrupt: MARIA's signal plus the 6502's
+                                        # own entry and exit (24 zones and 12 agreed, 16.9, 16.3)
+                     HOLE_LINE=0.0,     # holey zones: free pixels and nothing else
+                     HOLE_OBJ=0.0),
+    # the a7800 fork's MARIA (and MAME built with it): tools/dmameasure.py --fit, 45 shapes
+    "fork": dict(PER_LINE=5.624, PER_ZONE=1.888, PER_OBJ=1.990, PER_BYTE=0.755,
+                 FIVE_XTRA=0.483, DLI_COST=17.4,
+                 HOLE_LINE=0.988,       # a holey zone pays this each scanline ...
+                 HOLE_OBJ=0.510),       # ... and this per object: the first-hole penalty
+}
+LINE_CAP = 108.62    # the most one scanline can cost MARIA: its DMA limit (measured, the same
+                     # on both machines; the 6502 keeps the other ~4.9 cycles of the line)
+TIMING = None
+
+
+def set_timing(name):
+    """Make `name` ("fork" or "mame0264") the constants the model uses."""
+    global TIMING, PER_LINE, PER_ZONE, PER_OBJ, PER_BYTE, FIVE_XTRA, DLI_COST
+    global HOLE_LINE, HOLE_OBJ
+    k = TIMINGS[name]
+    TIMING = name
+    PER_LINE, PER_ZONE, PER_OBJ, PER_BYTE = k["PER_LINE"], k["PER_ZONE"], k["PER_OBJ"], k["PER_BYTE"]
+    FIVE_XTRA, DLI_COST = k["FIVE_XTRA"], k["DLI_COST"]
+    HOLE_LINE, HOLE_OBJ = k["HOLE_LINE"], k["HOLE_OBJ"]
+
+
+set_timing("fork")
 
 REGIONS = {                      # lines/frame, CPU Hz, frames/sec
     # 263 x 113.5 = 29,850.5 cycles: measured on MAME (a cartridge that never turns
@@ -108,7 +155,8 @@ class Zone(object):
         self.five, self.chars = five, chars
         self.holey, self.dli = holey, dli
 
-    def cycles(self):
+    def line_cycles(self):
+        """What one scanline of this zone costs MARIA, before the DMA limit."""
         bytes_per_obj = 0 if self.holey else self.width
         if self.chars:
             per_obj = (PER_OBJ + FIVE_XTRA
@@ -116,7 +164,15 @@ class Zone(object):
         else:
             per_obj = (PER_OBJ + bytes_per_obj * PER_BYTE
                        + (FIVE_XTRA if self.five else 0))
-        return (self.lines * (PER_LINE + per_obj * self.count) + PER_ZONE
+        hole = (HOLE_LINE + HOLE_OBJ * self.count) if self.holey and self.count else 0.0
+        return PER_LINE + per_obj * self.count + hole
+
+    def saturated(self):
+        """True if a scanline of this zone reaches MARIA's DMA limit."""
+        return self.line_cycles() >= LINE_CAP
+
+    def cycles(self):
+        return (self.lines * min(self.line_cycles(), LINE_CAP) + PER_ZONE
                 + (DLI_COST if self.dli else 0))
 
     def label(self):
@@ -189,9 +245,12 @@ def report(zones, region, afford):
         print("     four bits, so lines-1 must fit in 0-15. MARIA will draw")
         print("     something, but not what you asked for.")
         print("")
+    print("timing            %s" % TIMING)
+    print("")
     print("  %-34s %10s" % ("zone", "cycles"))
     for i, z in enumerate(zones):
-        print("  %2d  %-30s %10.0f" % (i, z.label(), z.cycles()))
+        print("  %2d  %-30s %10.0f%s" % (i, z.label(), z.cycles(),
+                                       "   at MARIA's DMA limit" if z.saturated() else ""))
     print("  %-34s %10.0f" % ("total DMA", dma))
     print("")
     print("drawn scanlines   %8d  of %d" % (drawn, lines_total))
@@ -200,6 +259,14 @@ def report(zones, region, afford):
     print("you get           %8.0f cycles  (%.1f%%)" % (left, 100.0 * left / frame))
     print("                  %8.0f cycles per scanline of game logic, averaged"
           % (left / lines_total))
+    full = [z for z in zones if z.saturated()]
+    if full:
+        print("")
+        print("  ** %d zone(s) reach MARIA's DMA limit (%.1f cycles a scanline): the 6502 gets"
+              % (len(full), LINE_CAP))
+        print("     about %.1f cycles on each of those scanlines, and anything more you"
+              % (113.5 - LINE_CAP))
+        print("     draw there is lost rather than slowing you further.")
     if left < 0:
         print("")
         print("OVER BUDGET. MARIA does not skip work to let the 6502 finish --")
@@ -243,10 +310,14 @@ def main():
     ap.add_argument("--uniform", metavar="ZONES,LINES,COUNT,WIDTH",
                     help="shorthand for identical zones, e.g. 12,16,4,8")
     ap.add_argument("--region", choices=sorted(REGIONS), default="ntsc")
+    ap.add_argument("--timing", choices=sorted(TIMINGS), default="fork",
+                    help="whose MARIA timing: the a7800 fork's (also current MAME with its work "
+                         "ported), or MAME 0.264's")
     ap.add_argument("--afford", action="store_true",
                     help="also report how many more objects the leftover fits")
     args = ap.parse_args()
 
+    set_timing(args.timing)
     zones = [parse_zone(z) for z in args.zone]
     if args.uniform:
         try:

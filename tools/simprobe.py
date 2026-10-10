@@ -108,6 +108,8 @@ class Collector(sim.Observer):
         frame, start, writes, bank0 = self._cur
         self.snaps[frame] = {"ram": ram_bytes(self.bus), "bank": self.bus.bank,
                              "regs": regs_text(frame, self.bus, start, writes)}
+        if self.bus.mram is not None:
+            self.snaps[frame]["mram"] = bytes(self.bus.mram)     # MARIA's bank RAM at $4000
         self._cur = None
 
     def finish(self):
@@ -355,6 +357,9 @@ def write_dump(col, bus, ram_path, regs_path):
         f.write(snap["ram"])
     with open(regs_path, "w") as f:
         f.write(snap["regs"])
+    if "mram" in snap:
+        with open(os.path.join(os.path.dirname(ram_path), "mram.bin"), "wb") as f:
+            f.write(snap["mram"])
 
 
 def merge_into(col, other):

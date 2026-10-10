@@ -47,13 +47,23 @@ def bill(path):
             objs, in_ram = dlwalk.walk_dl(src, z["dl"]), True
         except IndexError:
             objs, in_ram = [], False
-        cyc = 0.0
+        cyc, holes = 0.0, 0
         for o in objs:
             if o["indirect"]:
                 cyc += B.PER_OBJ + B.FIVE_XTRA + o["width"] * (1 + chars) * B.PER_BYTE
+            elif z["holey16"] and o["gfx"] & 0x1000:
+                # holey DMA drops this object's graphics fetches (address bit 12 set) and
+                # charges a first-hole penalty instead
+                cyc += B.PER_OBJ + (B.FIVE_XTRA if o["bytes"] == 5 else 0) + B.HOLE_OBJ
+                holes += 1
             else:
                 cyc += B.PER_OBJ + o["width"] * B.PER_BYTE + (B.FIVE_XTRA if o["bytes"] == 5 else 0)
-        cost = z["lines"] * (B.PER_LINE + cyc) + B.PER_ZONE + (B.DLI_COST if z["dli"] else 0)
+        if holes:
+            cyc += B.HOLE_LINE
+        # a scanline cannot cost MARIA more than its DMA limit; a zone that reaches it is dropping
+        # objects (the cap is on both machines' timings, see dmabudget.py)
+        cost = (z["lines"] * min(B.PER_LINE + cyc, B.LINE_CAP) + B.PER_ZONE
+                + (B.DLI_COST if z["dli"] else 0))
         zones.append((z, objs, cost, in_ram))
         lines += z["lines"]
     return zones, ctrl

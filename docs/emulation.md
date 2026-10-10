@@ -246,6 +246,67 @@ Turmoil (a KIL at `$D4A7` stops the program at frame 55; undiagnosed). Display-i
 timing disagrees on 15 images, mostly where one side has no live list. Rerun it on a new MAME
 before trusting any of this: `python tools/mamecheck.py /path/to/roms --sample 60 --cache c`.
 
+### MAME with the fork's work: bankset, POKEY at $0800, and the fork's MARIA timing
+
+The fork's cartridge and MARIA work can be ported onto a current MAME (0.289 development here), which keeps
+what the fork cannot give: the Lua taps every probe here uses. The port is a patch kept outside this
+repository (all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-clock first-hole penalty,
+8 clocks of last-line shutdown, and each line shown a pixel at a time so a mid-scanline register write
+appears mid-scanline); current MAME's POKEY already has the fork's POKEY work. Run with
+`-bios a7800pr -rompath <folder>` like any MAME here (0.289 wants `7800.u7` for the plain `a7800` BIOS).
+
+What it changes, measured with `mamecheck.py` on the same 278-image sample as above:
+
+| | MAME 0.264 | MAME with the port |
+|---|---|---|
+| both run it | 256 (92.8%) | 266 (96.4%) |
+| simulator only | 15 (5.4%) | 6 (2.2%) |
+| MAME only | 2 (0.7%) | 2 (0.7%) |
+| neither | 3 (1.1%) | 2 (0.7%) |
+
+Of the 15 bankset images, 14 now run in MAME with live display lists (4 before). What is left of
+"simulator only" is five Activision images in the usual (AM) block order, which MAME has never run (it runs
+the (OM) order), and Sexy Six's header. Every probe in the toolkit runs on it (the self-test passes in full
+under it), which is what makes bankset cartridges observable without the fork. MARIA's DMA cost on it
+matches the fork's exactly on all 14 shapes `tools/dmameasure.py` compared; against MAME 0.264 it differs on
+holey zones, display interrupts and one-byte objects (docs/hardware.md has the second timing).
+
+### Running the fork, and what it showed about bankset cartridges
+
+The fork's source is at <https://github.com/7800-devtools/a7800>. It is a MAME tree from
+2019, so a current toolchain (GCC 13, Python 3.13, GNU make 4.3) needs a handful of patches
+to build; none touches the 7800 code, and the build is about fifteen minutes on four cores
+with `make -j4 NOWERROR=1 TOOLS=0 USE_QTDEBUG=0 NO_USE_MIDI=1 NO_USE_PORTAUDIO=1 OPTIMIZE=1
+SYMBOLS=0` (it builds only the 7800 driver; the binary is `mame64`):
+
+* `scripts/build/msgfmt.py`: `array.tostring()` was removed in Python 3.9 -- `tobytes()`.
+* `src/devices/cpu/*/*make.py` (m6502, m6809, mcs96, tms57002): `open(f, "rU")` is gone in
+  Python 3.11 -- `"r"`.
+* `3rdparty/sol2/sol/stack_push.hpp`: the three `stack::push<const wchar_t*>(L, str, str + sz)`
+  calls (and the `char16_t`, `char32_t` ones) are ambiguous under GCC 13 -- cast `str`.
+* `src/osd/modules/render/bgfx/effect.h`: add `#include <string>`.
+* the generated `build/projects/sdl/mame/gmake-linux/*.make`: GNU make 4.3 drops the space
+  `max_args` relied on, so `ar -qc libemu.a../../obj/...` -- put a space in
+  `$1$(_args)`, then build again with `REGENIE=` so the files are not regenerated.
+
+Run it headless with `-video none -sound none -nothrottle -str N`; `probes/a7800-snap.lua`
+takes a snapshot at a chosen frame, and `tools/forkshot.py` does both and sets the picture
+beside the simulator's. The BIOS is optional (it warns and runs).
+
+What that showed, on 15 bankset images (the ten Bankset Test demos, Attack of the Petscii
+Robots, Bubble Bobble, StoneAge and Pit Fighter's two prototypes):
+the simulator and the fork draw the same screens on the demos -- the text, the plasma
+background, Attack of the Petscii Robots down to its "GAME START TIMER 191" -- except that
+the demos' bank counters differ with the frame reached. The checks found and fixed two things
+the simulator got wrong: **bank RAM** (the CPU's writes to `$C000-$FFFF` land in MARIA's 16K
+at `$4000`; the "BANKRAM 1" line on the 2x128K RAM demo is text written there, and it was
+blank before) and **ROM at `$4000` on a flat bankset with POKEY at `$4000`** (the fork routes
+only writes to the chip; StoneAge executes `JMP $4000` and the simulator stopped on a KIL).
+Still different: Pit Fighter (Alt 1) shows stripes on the fork and the simulator never gets
+a display list; Bubble Bobble's title screen on the fork is gameplay on the simulator (it
+holds fire; the fork was not driven); and one Pit Fighter frame colours its ground
+differently. Those are not diagnosed.
+
 ### Neither emulates the second POKEY
 
 Both instantiate one chip for a dual-POKEY cartridge:
@@ -320,6 +381,7 @@ proved goes here once its addresses have become parameters.
 | `watch.lua` | See what a running game does: write taps and logging. |
 | `audio.lua` | Log audio register writes for `tracker.py` (`A7800_POKEY=<base>` for cartridge POKEY). |
 | `a7800-frames.lua` | Frame markers for the `a7800` fork, alongside a debugger watchpoint log. |
+| `a7800-snap.lua` | A screenshot at a chosen frame, for the `a7800` fork (`tools/forkshot.py` runs it). |
 | `dumpdl.lua` | Find the display list list and dump RAM so `dlwalk.py` can decode it. |
 | `liveslots.lua` | Every ROM address the live display lists reference over a whole run, with the widest object seen -- confirms candidate sprite sheets on evidence. |
 | `dumpgfx.lua` | Dump a live game's graphics and MARIA register writes (`dumpgfx_regs.txt`) for `spritedump.py`. |
