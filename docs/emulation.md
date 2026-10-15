@@ -326,7 +326,7 @@ game writes to both chips whether or not anything is listening, and
 ## Driving MAME from an assistant (`mamemcp.py`)
 
 `tools/mamemcp.py` is a Model Context Protocol server: an MCP client (Claude Code, Claude Desktop,
-...) starts it over stdio and gets seventeen tools that drive a live MAME on a cartridge -- start
+...) starts it over stdio and gets twenty-five tools that drive a live MAME on a cartridge -- start
 it, run frames, step instructions, read and write memory and registers, disassemble what is in
 memory now (the bank switched in, with register names), screenshots, breakpoints and watchpoints,
 inputs, save states, and two that are aimed at disassembly:
@@ -340,6 +340,30 @@ inputs, save states, and two that are aimed at disassembly:
   had not reached (805 to 847).
 * **`mame_watch_writes`** runs some frames with a write tap on a range and reports, per address,
   how many writes, from which PCs, with which values: who owns a variable or a table.
+* **`mame_exectrace`** is `probes/exectrace.lua` live: every instruction fetched from the
+  cartridge with the bank it ran in (the bank-select stores are watched, named as cart.py names
+  them), every indirect jump's target and every bank switch, in that probe's log format. With
+  `annotations` it runs `dyn.py` on the log. On Ballblazer two seconds of the title added the seven
+  targets of its NMI jump table (`JMP (ind)` at $DF90) as entry points.
+* **`mame_watch_reads`** logs data reads (not fetches, not an instruction's own bytes): which
+  instruction reads which table, by bank. MARIA's DMA goes through the same address space, so a
+  read the instruction at CURPC could not have made (a NOP, a store, an index out of its reach)
+  is counted as MARIA's: graphics and display lists. It writes simprobe's `dataread.log` format,
+  which `dyn.py --dataread` turns into data blocks (Ballblazer: 6 bytes at $B547 the listing had
+  as code). `romcoverage.lua` maps which bytes are read; this says by whom.
+* **`mame_who_wrote`** asks MAME's memory tracking (`trackmem`, on from the start of a session)
+  for the last writer of an address, without running again; `pcwrites.lua` logs every write in a
+  window. Ballblazer's voice cell $2123 comes back as `$B33B STA $2123`, the note-emit store
+  `sim.py`'s notes describe.
+* **`mame_history`**: the last instructions executed and the return addresses on the stack that
+  follow a JSR -- how the CPU got here (`whocalls.lua` does the second for one address).
+* **`mame_ram_search`**: remember RAM, play or run, keep the bytes that changed, did not, went
+  up or down, or equal a value -- each RAM byte once, not again through its mirrors.
+  (`diffwrites.lua` and `ramsnap.lua` do this by writes and over time.)
+* **`mame_step`** with `over` and `out`, **`mame_run_until`** an interrupt (an NMI or IRQ handler
+  reached through a RAM vector shows itself), vertical blank or a register condition,
+  watchpoints with a data condition (`wpdata==3`), **`mame_find`**, and **`mame_debugger`** for any
+  other MAME debugger command.
 
 ```
 claude mcp add a7800-mame -- python /path/to/a7800-toolkit/tools/mamemcp.py
