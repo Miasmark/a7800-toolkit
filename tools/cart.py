@@ -461,9 +461,10 @@ class Cart(object):
 
         Verified against a7800: for a correct dump, $4000 is 8K block 13,
         $8000 is block 15 and $E000 is block 14, and the vectors read back
-        sensibly. The "(OM)" dumps in circulation have blocks 14 and 15
+        sensibly. The "(OM)" dumps in circulation have every pair of 8K blocks
         the other way round, so read the usual way the vectors land in a block
-        full of zeros. MAME 0.264 runs them (Rampage and Double Dragon, vectors
+        full of zeros. They are the EPROM's order: MAME's software list has the
+        same CRCs, and MAME 0.264 runs them (Rampage and Double Dragon, vectors
         in cart code), so the layout is swapped for them -- when the vectors say
         so -- rather than reported as a bad image.
         """
@@ -484,7 +485,7 @@ class Cart(object):
             self.warnings.append(
                 "this is an \"(OM)\" Activision dump: its 8K blocks are in the other order "
                 "(each index XOR 1), so it is read in the usual order (RESET $%04X). "
-                "MAME 0.264 runs the (OM) order and does not run the usual one."
+                "Stock MAME runs only the (OM) order; with the a7800 patch it runs both."
                 % self.vectors().get("RESET", 0))
             return
         self.warnings.append(

@@ -66,6 +66,43 @@ measured leaves `SP = $16`, decimal set and hash bytes in `$40-$48`.
   without the signature's help, which is what its extra mirror tests are
   for.
 
+## Skipping the BIOS
+
+MAME with the a7800 patch (`bankset-full.patch`) has a BIOS choice called `skip` on
+both machines, `a7800` and `a7800p`:
+
+    mame a7800 -bios skip -cart game.a78        # no BIOS file needed
+
+There is no ROM behind it. The cartridge starts at frame 0 from its own reset
+vector, in the state Atari's NTSC BIOS leaves a signed cartridge (the table
+above):
+
+- INPTCTRL `$16`: MARIA on, BIOS off, not locked;
+- X = SP = `$16`, decimal set, interrupts masked;
+- MARIA's DMA off.
+
+A and Y are 0 (not measured on the Atari BIOS). RAM is left as MAME starts it,
+not as the self-test and hash leave it. The signature is not checked, so an
+unsigned cartridge boots as a 7800 game, as on OpenBIOS. A soft reset restarts
+the cartridge.
+
+Checked on the 110 retail images in Trebor's pack (59 NTSC, 51 PAL). Every one
+reaches its reset vector at frame 0 and gets to its title screen, and
+`mamecheck.py` finds MAME drawing from a live display list. The bankset rule
+checks behave as under a BIOS.
+
+What changes against a BIOS boot:
+
+- **Timing.** The game starts 204 frames sooner than on Atari's BIOS and 322
+  sooner than on OpenBIOS. Recordings and frame numbers therefore do not carry
+  over, as between BIOSes ("Recordings do not cross BIOSes").
+- **Leftover RAM.** A game that reads RAM before writing it can behave
+  differently.
+
+For disassembly, the MCP server's `mame_start` with `bios: "skip"` stops on the
+cartridge's first instruction instead of the BIOS's. The tools take
+`A7800_BIOS=skip` like any other BIOS name, and need no `A7800_ROMPATH` with it.
+
 ## Running OpenBIOS in MAME
 
 It builds with DASM (`dasm 7800openbios.asm -f3 -o7800openbios.bin`) to a

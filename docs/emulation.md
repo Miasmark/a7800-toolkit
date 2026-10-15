@@ -241,7 +241,7 @@ not counted as the cartridge):
 -- the OpenBIOS game runs instead), five Activision images in the usual (AM) block order (MAME
 runs the (OM) order and leaves the BIOS running on these), and one image whose header MAME
 rejects (SuperCart bit missing). On those MAME cannot be the reference; the `a7800` fork runs
-the bankset ones. *MAME only* is the simulator's gap: Bad Apple Demo (not drawn at all) and Turret
+the bankset ones, and MAME with the a7800 patch runs both (below). *MAME only* is the simulator's gap: Bad Apple Demo (not drawn at all) and Turret
 Turmoil (a KIL at `$D4A7` stops the program at frame 55; undiagnosed). Display-interrupt
 timing disagrees on 15 images, mostly where one side has no live list. Rerun it on a new MAME
 before trusting any of this: `python tools/mamecheck.py /path/to/roms --sample 60 --cache c`.
@@ -254,7 +254,8 @@ repository (all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-c
 8 clocks of last-line shutdown, and each line shown a pixel at a time so a mid-scanline register write
 appears mid-scanline; and two rules the Bankset spec sets, which warn once and refuse: a display list fetched from the
 cartridge (ROM or RAM) reads as empty, and an opcode fetched from bank RAM reads `$FF` -- docs/cartridges.md); current MAME's POKEY already has the fork's POKEY work. Run with
-`-bios a7800pr -rompath <folder>` like any MAME here (0.289 wants `7800.u7` for the plain `a7800` BIOS).
+`-bios a7800pr -rompath <folder>` like any MAME here (0.289 wants `7800.u7` for the plain `a7800` BIOS),
+or with `-bios skip`, which needs no BIOS file at all (below).
 
 What it changes, measured with `mamecheck.py` on the same 278-image sample as above:
 
@@ -266,8 +267,10 @@ What it changes, measured with `mamecheck.py` on the same 278-image sample as ab
 | neither | 3 (1.1%) | 2 (0.7%) |
 
 Of the 15 bankset images, 14 now run in MAME with live display lists (4 before). What is left of
-"simulator only" is five Activision images in the usual (AM) block order, which MAME has never run (it runs
-the (OM) order), and Sexy Six's header. Every probe in the toolkit runs on it (the self-test passes in full
+"simulator only" was five Activision images in the usual (AM) block order, which stock MAME has never run (it
+runs the (OM) order, the EPROM's), and Sexy Six's header. The patch now boots the AM order too
+(docs/cartridges.md): `mamecheck.py` on all eight Activision images in Trebor's pack, AM and OM, says
+"both" for every one. Every probe in the toolkit runs on it (the self-test passes in full
 under it), which is what makes bankset cartridges observable without the fork. MARIA's DMA cost on it
 matches the fork's exactly on all 14 shapes `tools/dmameasure.py` compared; against MAME 0.264 it differs on
 holey zones, display interrupts and one-byte objects (docs/hardware.md has the second timing).
@@ -426,6 +429,10 @@ of these notes were measured on, and every probe in `probes/` ran on it:
     cp 7800OpenBIOS/7800openbios.bin bios/a7800/c300558-001a.u7
 
     export A7800_MAME=/usr/games/mame A7800_ROMPATH=$PWD/bios A7800_BIOS=a7800pr
+
+With the patched MAME, `A7800_BIOS=skip` boots every cartridge straight into the game with no BIOS
+file (docs/bios.md, "Skipping the BIOS"); `A7800_ROMPATH` is then not needed either. The MCP server's
+`mame_start` takes `bios: "skip"` for one session.
 
 `A7800_BIOS` is passed to MAME as `-bios`; `capture.py`, `session.py`,
 `replay.py` and `regress.py` all honour it. MAME prints `c300558-001a.u7 WRONG

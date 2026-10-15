@@ -181,9 +181,16 @@ A write to **`$FF80-$FF8F`** selects the bank from the low three bits of the
 *address*, not the value: `STA $FF83` selects bank 3 whatever is in A. Unlike
 every other mapper here, where the value chooses.
 
-**The "(OM)" dumps have blocks 14 and 15 swapped**, which puts the vectors in a
-block full of zeros. That is the image being wrong, not the layout — a7800
-cannot boot them either. `cart.py` says so rather than laying them out quietly.
+**The "(OM)" dumps have every pair of 8K blocks exchanged** (block *n* of one is
+block *n* XOR 1 of the other), which read this way puts the vectors in a block
+full of zeros. They are the EPROM's own order: MAME's software list has Double
+Dragon and Rampage with the (OM) files' CRCs, and stock MAME's mapper reads that
+order, so stock MAME boots (OM) files and not the usual ones; a7800 is the other
+way round. `cart.py` recognises an (OM) file by its vectors and reads it in the
+usual order. MAME with the a7800 patch boots both: a headered image whose reset
+vector says it is in the usual order is put back in EPROM order at load
+(all eight in Trebor's pack, AM and OM, run; each AM image's screen matches its
+OM twin pixel for pixel).
 
 ## Bankset — 28 images
 
