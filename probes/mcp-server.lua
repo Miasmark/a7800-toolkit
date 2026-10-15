@@ -18,6 +18,9 @@
 -- every stop at once, so a breakpoint is over before a script can see it. Without -debug, `run`
 -- pauses and unpauses the machine instead and the debugger commands answer `err`.
 --
+-- A7800_MCP_REWIND (default 64) is how many states `rewind` keeps: one is saved each time the
+-- machine is set going from a stop.
+--
 -- The socket is opened through emu.file, as MAME's own gdbstub plugin does, and only on the
 -- loopback address. MAME's Lua has no other way to listen.
 
@@ -30,6 +33,12 @@ local dbg = MACHINE.debugger
 -- not in the CPU's space. On another MAME they go through the CPU's space and this is nil.
 local maria_dev = MACHINE.devices[":maria"]
 local mspace = maria_dev and maria_dev.spaces and maria_dev.spaces["dma"] or nil
+
+-- the screen's own frame count: a counter of frame_done calls would also count the redraws the
+-- debugger makes while it is stopped, and could not follow a state put back by `rewind`
+local screen = nil
+for _, sc in pairs(MACHINE.screens) do screen = sc; break end
+local function screen_frame() return screen and screen:frame_number() or 0 end
 
 local sock = emu.file("", 7)
 sock:open("socket.127.0.0.1:" .. PORT)
@@ -110,8 +119,35 @@ end
 
 function commands.status(id) reply(id, true, status()) end
 
+-- rewind: a state saved each time the machine is set going from a stop, so it can be put back
+-- (MAME's own rewind keeps states only for the debugger's single steps). Up to A7800_MCP_REWIND
+-- of them (default 64; a 7800 state is about 140 KB).
+local REWIND_MAX = tonumber(os.getenv("A7800_MCP_REWIND") or "64")
+local REW = {}
+
+local function checkpoint()
+  if REWIND_MAX <= 0 or not stopped() then return end
+  local ok, st = pcall(function() return MACHINE:buffer_save() end)
+  if ok and st then
+    REW[#REW + 1] = { state = st, frame = frames, pc = cpu.state["PC"].value }
+    if #REW > REWIND_MAX then table.remove(REW, 1) end
+  end
+end
+
+function commands.rewind(id, n)
+  n = num(n) or 1
+  if n < 1 or n > #REW then return reply(id, false, string.format("%d step(s) kept to go back to", #REW)) end
+  local cp = REW[#REW - n + 1]
+  local ok, e = pcall(function() return MACHINE:buffer_load(cp.state) end)
+  if not ok then return reply(id, false, "could not load the state: " .. tostring(e)) end
+  for _ = 1, n do table.remove(REW) end                               -- it, and what came after it
+  frames = screen_frame()
+  reply(id, true, string.format("back %d: ", n) .. status())
+end
+
 function commands.run(id, n)
   n = num(n) or 1
+  checkpoint()
   pending = { id = id, kind = "run", target = frames + n }
   go()
 end
@@ -119,6 +155,7 @@ end
 function commands.step(id, n)
   if not dbg then return reply(id, false, "stepping needs MAME started with -debug") end
   n = num(n) or 1
+  checkpoint()
   pending = { id = id, kind = "step" }
   we_stopped = true
   dbg:command("step " .. n)
@@ -318,33 +355,91 @@ end
 
 -- every instruction fetched from the cartridge, with its bank; indirect jumps; bank switches --
 -- probes/exectrace.lua's log, for tools/dyn.py
+-- One fetch, from the cartridge or from RAM: what static analysis cannot know. Kept for the log:
+--   X <space>:<addr>          a cartridge instruction ran here (exectrace.lua's line, for dyn.py)
+--   J <from> <to>             a JMP (indirect) went there (both in the cartridge)
+--   S <from> <bank> xN        a bank-select store
+--   C <from> <to> xN          a JSR: its site and target, cartridge or RAM, with how often
+--   G <routine> <to> xN       the same JSR by the routine it was made from (the call graph)
+--   I <vector> <to> xN        an interrupt entered its handler (vector $FFFA NMI, $FFFE IRQ/BRK)
+--   M ram:<addr> <op>         an instruction ran from RAM, and the opcode it had then
+--   JR <from> <to>            a JMP (indirect) to or from RAM
+local function rkey(addr) return string.format("ram:%04X", addr) end
+
+local function on_fetch(k, data, in_ram)
+  if X.pending_j then
+    local line = X.pending_j .. " " .. k
+    if in_ram or X.pending_j:sub(1, 4) == "ram:" then X.jr[line] = true else X.j[line] = true end
+    X.pending_j = nil
+  end
+  -- the routine running is the top of a call stack kept from what runs: a JSR pushes its target,
+  -- an interrupt its handler, RTS and RTI pop. A game that drops a return address (PLA PLA) or
+  -- jumps out of a routine leaves it wrong until the stack unwinds; "?" is code entered before
+  -- the trace began.
+  local top = X.stack[#X.stack] or "?"
+  if X.pending_c then
+    local line = X.pending_c .. " " .. k
+    X.c[line] = (X.c[line] or 0) + 1
+    local g = top .. " " .. k
+    X.g[g] = (X.g[g] or 0) + 1
+    if #X.stack < 64 then X.stack[#X.stack + 1] = k end
+    X.pending_c = nil
+  end
+  if X.pending_i then
+    local line = X.pending_i .. " " .. k
+    X.i[line] = (X.i[line] or 0) + 1
+    if #X.stack < 64 then X.stack[#X.stack + 1] = k end
+    X.pending_i = nil
+  end
+  if data == 0x6C then X.pending_j = k end                            -- JMP (ind): the next fetch is its target
+  if data == 0x20 then X.pending_c = k end                            -- JSR: likewise
+  if data == 0x60 or data == 0x40 then X.stack[#X.stack] = nil end    -- RTS, RTI
+end
+
 function commands.xtrace(id, op, file)
   if op == "on" then
-    X.on, X.x, X.j, X.s, X.pending_j, X.file = true, {}, {}, {}, nil, unpct(file or "exectrace.log")
+    X.on, X.x, X.j, X.s, X.c, X.i, X.m, X.jr, X.g, X.stack = true, {}, {}, {}, {}, {}, {}, {}, {}, {}
+    X.pending_j, X.pending_c, X.pending_i, X.file = nil, nil, nil, unpct(file or "exectrace.log")
     if not TAPS.xfetch then
       TAPS.xfetch = space:install_read_tap(0x4000, 0xFFFF, "mcp-xtrace", function(offset, data)
         if not X.on or R.busy then return data end
-        if cpu.state["PC"].value ~= offset then return data end      -- data, not a fetch
+        if cpu.state["PC"].value ~= offset then
+          -- an interrupt reads its vector without a fetch: the next fetch is the handler
+          if offset == 0xFFFA or offset == 0xFFFE then X.pending_i = string.format("$%04X", offset) end
+          return data
+        end
         local k = key(offset)
-        if X.pending_j then X.j[X.pending_j .. " " .. k] = true; X.pending_j = nil end
+        on_fetch(k, data, false)
         X.x[k] = true
-        if data == 0x6C then X.pending_j = k end                      -- JMP (ind): next is its target
+        return data
+      end)
+      TAPS.xram = space:install_read_tap(0x0040, 0x27FF, "mcp-xtrace-ram", function(offset, data)
+        if not X.on or R.busy then return data end
+        if cpu.state["PC"].value ~= offset then return data end
+        local k = rkey(offset)
+        on_fetch(k, data, true)
+        if not X.m[k] then X.m[k] = data end
         return data
       end)
     end
     return reply(id, true, "tracing to " .. X.file)
   end
   X.on = false
-  local lines, nx = {}, 0
+  local lines, nx, nm = {}, 0, 0
   for k in pairs(X.x) do lines[#lines + 1] = "X " .. k; nx = nx + 1 end
   for k in pairs(X.j) do lines[#lines + 1] = "J " .. k end
+  for k in pairs(X.jr) do lines[#lines + 1] = "JR " .. k end
   for k, n in pairs(X.s) do lines[#lines + 1] = string.format("S %s x%d", k, n) end
+  for k, n in pairs(X.c) do lines[#lines + 1] = string.format("C %s x%d", k, n) end
+  for k, n in pairs(X.i) do lines[#lines + 1] = string.format("I %s x%d", k, n) end
+  for k, n in pairs(X.g) do lines[#lines + 1] = string.format("G %s x%d", k, n) end
+  for k, op in pairs(X.m) do lines[#lines + 1] = string.format("M %s %02X", k, op); nm = nm + 1 end
   table.sort(lines)
   local f = io.open(X.file, "w")
   if not f then return reply(id, false, "cannot write " .. X.file) end
   for _, l in ipairs(lines) do f:write(l, "\n") end
   f:close()
-  reply(id, true, string.format("%d instructions, %d lines in %s", nx, #lines, X.file))
+  reply(id, true, string.format("%d cartridge instructions, %d in RAM, %d lines in %s", nx, nm, #lines, X.file))
 end
 
 -- data reads: who reads which bytes (the reading instruction is CURPC, its first three bytes kept so
@@ -410,8 +505,12 @@ function commands.console(id, cmd, limit)
   if not dbg then return reply(id, false, "the debugger commands need MAME started with -debug") end
   local n0 = #dbg.consolelog
   local was = stopped()
+  local c = unpct(cmd)
+  if c:match("^%s*g") or c:match("^%s*over") or c:match("^%s*out") or c:match("^%s*o%s") or c:match("^%s*n") then
+    checkpoint()                                                       -- a command that sets it going
+  end
   we_stopped = true
-  dbg:command(unpct(cmd))
+  dbg:command(c)
   if was and not stopped() then
     pending = { id = id, kind = "cmd", n0 = n0, limit = frames + (num(limit) or 600) }
     return
@@ -466,10 +565,6 @@ local function pump()
   end
 end
 
--- the screen's own frame count: a counter of frame_done calls would also count the redraws the
--- debugger makes while it is stopped
-local screen = nil
-for _, s in pairs(MACHINE.screens) do screen = s; break end
 
 emu.register_frame_done(function()
   frames = screen and screen:frame_number() or (frames + 1)

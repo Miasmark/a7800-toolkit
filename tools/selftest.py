@@ -2165,7 +2165,7 @@ def t_mamemcp():
     assert r["protocolVersion"] == mamemcp.VERSIONS[0]
     assert mamemcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     tools = mamemcp.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(tools) == 25 and all(t["inputSchema"]["type"] == "object" for t in tools)
+    assert len(tools) == 26 and all(t["inputSchema"]["type"] == "object" for t in tools)
     got = mamemcp.call("mame_status", {})
     assert got["isError"] and "mame_start" in got["content"][0]["text"]
     assert mamemcp.handle({"jsonrpc": "2.0", "id": 4, "method": "nope"})["error"]["code"] == -32601
@@ -2209,10 +2209,24 @@ def t_mamemcp():
         assert "b3:8000" in entries and "f7:C010" in entries, entries
         mamemcp.trace_summary(trace, ann)                                    # merging adds nothing new
         assert json.load(io.open(ann))["entries"] == entries
+        # the live exectrace log: parsed, merged across runs (sets united, counts summed), and its
+        # call graph drawn from the routine that made each call
+        run1 = "X b3:8000\nC b3:8000 f7:C010 x2\nG ? f7:C010 x2\nI $FFFA ram:00F0 x5\nM ram:00F0 4C\n"
+        run2 = "X b3:8000\nX f7:C010\nC b3:8000 f7:C010 x3\nG ram:00F0 f7:C010 x3\n"
+        cum = os.path.join(work, "cum.log")
+        assert "2 of them new" in mamemcp.merge_trace(mamemcp.parse_xtrace(run1), cum)   # X and RAM
+        assert "1 of them new" in mamemcp.merge_trace(mamemcp.parse_xtrace(run2), cum)
+        d = mamemcp.parse_xtrace(io.open(cum).read())
+        assert d["C"]["b3:8000 f7:C010"] == 5 and len(d["X"]) == 2 and d["M"]["ram:00F0"] == "4C"
+        dot = os.path.join(work, "calls.dot")
+        text = mamemcp.callgraph_summary(d, dot)
+        got = io.open(dot).read()
+        assert '"NMI" -> "ram:00F0"' in got and '"entered before the trace" -> "f7:C010"' in got
+        assert '"ram:00F0" -> "f7:C010" [label="3"]' in got and "f7:C010" in text
     finally:
         mamemcp.M.cart = None
         shutil.rmtree(work, True)
-    return "handshake, 25 tools, clean refusal, decoding, read attribution, a trace resolved to its bank and merged into annotations"
+    return "handshake, 26 tools, clean refusal, decoding, read attribution, a trace resolved to its bank and merged into annotations, traces merged, a call graph"
 
 
 def t_mamecheck():
