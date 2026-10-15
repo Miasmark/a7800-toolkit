@@ -26,6 +26,10 @@ local PORT = tonumber(os.getenv("A7800_MCP_PORT") or "2461")
 local cpu = MACHINE.devices[":maincpu"]
 local space = cpu.spaces["program"]
 local dbg = MACHINE.debugger
+-- MARIA's own address space, on a MAME built with the a7800 patch: its DMA fetches are there and
+-- not in the CPU's space. On another MAME they go through the CPU's space and this is nil.
+local maria_dev = MACHINE.devices[":maria"]
+local mspace = maria_dev and maria_dev.spaces and maria_dev.spaces["dma"] or nil
 
 local sock = emu.file("", 7)
 sock:open("socket.127.0.0.1:" .. PORT)
@@ -87,8 +91,9 @@ local function regs()
 end
 
 local function status()
-  return string.format("frame=%d state=%s %s debugger=%s", frames,
-                       stopped() and "stopped" or "running", regs(), dbg and "yes" or "no")
+  return string.format("frame=%d state=%s %s debugger=%s maria_space=%s", frames,
+                       stopped() and "stopped" or "running", regs(), dbg and "yes" or "no",
+                       mspace and "yes" or "no")
 end
 
 local function num(s)
@@ -171,11 +176,16 @@ function commands.bp(id, op, a, cond)
   end
 end
 
-function commands.wp(id, op, kind, a, n, cond)
+function commands.wp(id, op, kind, a, n, cond, which)
   if not dbg then return reply(id, false, "watchpoints need MAME started with -debug") end
   local d = cpu.debug
   if op == "set" then
-    local i = d:wpset(space, kind or "w", num(a), num(n) or 1, cond and unpct(cond) or nil)
+    local sp = space
+    if which == "maria" then
+      if not mspace then return reply(id, false, "this MAME has no separate MARIA address space") end
+      sp = mspace                                  -- MARIA's fetches; the stop is the CPU's debugger's
+    end
+    local i = d:wpset(sp, kind or "w", num(a), num(n) or 1, (cond and cond ~= "-") and unpct(cond) or nil)
     reply(id, true, "watchpoint " .. i)
   elseif op == "clear" then
     d:wpclear()
@@ -183,8 +193,9 @@ function commands.wp(id, op, kind, a, n, cond)
   else
     local t = {}
     for k, w in pairs(d:wplist(space)) do
-      t[#t + 1] = string.format("%d %04X+%X %s", k, w.address, w.length, w.type == 1 and "r"
-                                or (w.type == 2 and "w" or "rw"))
+      local ty = w.type
+      if type(ty) ~= "string" then ty = (ty == 1 and "r") or (ty == 2 and "w") or "rw" end
+      t[#t + 1] = string.format("%d %04X+%X %s", k, w.address, w.length, ty)
     end
     reply(id, true, table.concat(t, "\n"))
   end
@@ -360,14 +371,28 @@ function commands.rtap(id, lo, hi, limit)
     end
     return data
   end)
-  reply(id, true, "tapping reads of " .. lo .. "-" .. hi)
+  -- MARIA's fetches, when they have their own space: no attribution needed, they are MARIA's
+  R.mhits = {}
+  if TAPS.mtap then TAPS.mtap:remove(); TAPS.mtap = nil end
+  if mspace then
+    TAPS.mtap = mspace:install_read_tap(num(lo), num(hi), "mcp-maria-reads", function(offset, data)
+      if R.on then
+        local k = key(offset)
+        R.mhits[k] = (R.mhits[k] or 0) + 1
+      end
+      return data
+    end)
+  end
+  reply(id, true, "tapping reads of " .. lo .. "-" .. hi .. (mspace and " (CPU and MARIA apart)" or ""))
 end
 
 function commands.untap_reads(id)
   R.on = false
   if TAPS.rtap then TAPS.rtap:remove(); TAPS.rtap = nil end
+  if TAPS.mtap then TAPS.mtap:remove(); TAPS.mtap = nil end
   local t = {}
   for k, n in pairs(R.hits) do t[#t + 1] = k .. " " .. n end
+  for k, n in pairs(R.mhits or {}) do t[#t + 1] = "M " .. k .. " " .. n end
   for at, b in pairs(R.insn) do t[#t + 1] = string.format("I %04X %s", at, b) end
   table.sort(t)
   reply(id, true, table.concat(t, "\n"))

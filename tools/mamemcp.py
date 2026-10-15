@@ -557,9 +557,8 @@ def t_wp(a):
         raise ToolError("watchpoints need the patched MAME's -debugger script")
     act = a.get("action", "list")
     if act == "set":
-        args = ["set", a.get("kind", "w"), "0x%04X" % addr(a.get("address")), int(a.get("length", 1))]
-        if a.get("condition"):
-            args.append(a["condition"])
+        args = ["set", a.get("kind", "w"), "0x%04X" % addr(a.get("address")), int(a.get("length", 1)),
+                a.get("condition") or "-", a.get("space", "cpu")]
         return M.ask("wp", *args)
     if act == "clear":
         return M.ask("wp", "clear")
@@ -697,14 +696,23 @@ def t_reads(a):
         status = M.ask("run", n, timeout=120 + n / 2.0)
     finally:
         got = M.ask("untap_reads", timeout=120)
-    insn, rows = {}, []
+    insn, rows, mrows = {}, [], []
     for line in got.splitlines():
         p = line.split()
         if len(p) == 3 and p[0] == "I":
             insn[int(p[1], 16)] = p[2]
+        elif len(p) == 3 and p[0] == "M":
+            mrows.append((p[1], int(p[2])))
         elif len(p) == 3:
             rows.append((p[0], int(p[1], 16), int(p[2])))
+    # on the a7800 patch MARIA has its own address space and its reads are counted there; the CPU's
+    # tap then sees only the CPU. Elsewhere MARIA's fetches come through the CPU's space and are
+    # told apart by what the instruction at CURPC could have read.
+    exact = "maria_space=yes" in status
     cpu, maria = {}, {}
+    for loc, cnt in mrows:
+        e = maria.setdefault(loc, [0, {}])
+        e[0] += cnt
     for loc, at, cnt in rows:
         sp, _, ad = loc.partition(":")
         target = int(ad, 16)
@@ -719,14 +727,20 @@ def t_reads(a):
         n = m6502.LENGTH.get(int(ib[:2], 16), 1)
         if 0 <= (target - at) & 0xFFFF < n + 1:
             continue                                       # the instruction's own bytes, or a dummy read after them
-        mine = classify_read(target, ib)
+        op = m6502.OPCODES.get(int(ib[:2], 16))
+        if op and op[0] in ("RTS", "RTI", "JSR", "BRK"):
+            continue                                       # the stack's and the return address's own reads
+        if 0xFFFA <= target <= 0xFFFF and not (op and op[1] == "abs" and int(ib[4:6] + ib[2:4], 16) == target):
+            continue                                       # an interrupt fetching its vector mid-instruction
+        mine = True if exact else classify_read(target, ib)
         d = cpu if mine else maria
         e = d.setdefault(loc, [0, {}])
         e[0] += cnt
         if mine:
             e[1][at] = e[1].get(at, 0) + cnt
-    out = [status, "%d bytes read as data by the CPU, %d by MARIA's DMA (graphics, display lists)"
-           % (len(cpu), len(maria))]
+    out = [status, "%d bytes read as data by the CPU, %d by MARIA's DMA (graphics, display lists)%s"
+           % (len(cpu), len(maria), " -- MARIA's own address space, so exact" if exact
+              else " -- told apart by the reading instruction (this MAME has no MARIA address space)")]
     byreader = {}
     for loc, (cnt, pcs) in cpu.items():
         for at in pcs:
@@ -894,7 +908,9 @@ TOOLS = [
      {"action": {"type": "string", "enum": ["set", "clear", "list"]}, "address": ADDR,
       "length": {"type": "integer"}, "kind": {"type": "string", "enum": ["r", "w", "rw"]},
       "condition": {"type": "string", "description": "a MAME expression, e.g. \"wpdata==3\" to stop only "
-                    "when 3 is written"}}, []),
+                    "when 3 is written"},
+      "space": {"type": "string", "enum": ["cpu", "maria"], "description": "whose accesses to watch: the "
+                "CPU's (default) or MARIA's DMA (needs the a7800 patch's separate MARIA space)"}}, []),
     ("mame_trace", t_trace, "Run some frames with MAME's own instruction trace, and summarise which code "
      "ran, per cartridge bank (told from the bytes, since MAME's trace does not record it; "
      "mame_exectrace knows the bank). "
@@ -913,7 +929,8 @@ TOOLS = [
      []),
     ("mame_watch_reads", t_reads, "Run some frames and log every DATA read (not instruction fetches) of a "
      "range, by bank: which instruction reads which table, and which bytes MARIA's DMA reads (graphics, "
-     "display lists). Writes a dataread log that tools/dyn.py --dataread uses to mark tables as data.",
+     "display lists) -- exactly, on the a7800 patch's MAME, where MARIA has its own address space. "
+     "Writes a dataread log that tools/dyn.py --dataread uses to mark tables as data.",
      {"start": ADDR, "end": ADDR, "frames": {"type": "integer"}, "limit": {"type": "integer"},
       "dataread": {"type": "string"}}, []),
     ("mame_who_wrote", t_who_wrote, "The PC of the last instruction that wrote an address, any time since "
