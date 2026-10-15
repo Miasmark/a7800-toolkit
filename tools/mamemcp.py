@@ -102,7 +102,7 @@ class Mame(object):
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, rom, debug=True, boot_frames=0):
+    def start(self, rom, debug=True, boot_frames=0, record=None, playback=None):
         self.stop()
         rom = os.path.abspath(os.path.expanduser(rom))
         if not os.path.isfile(rom):
@@ -135,6 +135,14 @@ class Mame(object):
                 "-autoboot_script", LUA]
             if attempt:
                 cmd += ["-debug", "-debugger", "script"]
+            if record:
+                rec = os.path.abspath(os.path.expanduser(record))
+                cmd += ["-input_directory", os.path.dirname(rec), "-record", os.path.basename(rec)]
+            elif playback:
+                pb = os.path.abspath(os.path.expanduser(playback))
+                if not os.path.isfile(pb):
+                    raise ToolError("no such recording: %s" % pb)
+                cmd += ["-input_directory", os.path.dirname(pb), "-playback", os.path.basename(pb)]
             env = dict(os.environ, A7800_MCP_PORT=str(port))
             env.setdefault("XDG_RUNTIME_DIR", self.work)
             env.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -411,7 +419,8 @@ def ranges(addrs, gap=3):
 
 # ----------------------------------------------------------------------------- tools
 def t_start(a):
-    hello, notes = M.start(a["rom"], debug=a.get("debug", True), boot_frames=a.get("boot_frames", 0))
+    hello, notes = M.start(a["rom"], debug=a.get("debug", True), boot_frames=a.get("boot_frames", 0),
+                           record=a.get("record"), playback=a.get("playback"))
     c = M.cart
     desc = c.describe() if c is not None and hasattr(c, "describe") else ""
     text = "started MAME on %s\n%s" % (os.path.basename(M.rom), hello)
@@ -620,6 +629,34 @@ def t_load(a):
     return M.ask("load", a.get("name", "mcp"))
 
 
+def parse_xtrace(text):
+    """An exectrace log -> {kind: {key: value}}: sets for X/J/JR/M (M keeps the opcode), counts for
+    S/C/I."""
+    d = {k: {} for k in ("X", "J", "JR", "M", "S", "C", "I", "G")}
+    for line in text.splitlines():
+        p = line.split()
+        if not p or p[0] not in d:
+            continue
+        if p[0] in ("S", "C", "I", "G") and p[-1].startswith("x"):
+            k = " ".join(p[1:-1])
+            d[p[0]][k] = d[p[0]].get(k, 0) + int(p[-1][1:])
+        elif p[0] == "M":
+            d["M"].setdefault(p[1], p[2] if len(p) > 2 else "")
+        else:
+            d[p[0]][" ".join(p[1:])] = True
+    return d
+
+
+def write_xtrace(d, path):
+    lines = []
+    for kind in ("X", "J", "JR"):
+        lines += ["%s %s" % (kind, k) for k in d[kind]]
+    lines += ["M %s %s" % (k, v) for k, v in d["M"].items()]
+    lines += ["%s %s x%d" % (kind, k, n) for kind in ("S", "C", "I", "G") for k, n in d[kind].items()]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(lines)) + "\n")
+
+
 def t_exectrace(a):
     need_debug("tracing")
     n = int(a.get("frames", 60))
@@ -629,30 +666,130 @@ def t_exectrace(a):
         status = M.ask("run", n, timeout=120 + n / 2.0)
     finally:
         done = M.ask("xtrace", "off")
-    text = open(path, encoding="utf-8").read()
-    xs, js, ss = {}, [], []
-    for line in text.splitlines():
-        p = line.split()
-        if p and p[0] == "X":
-            sp, _, ad = p[1].partition(":")
-            xs.setdefault(sp, []).append(int(ad, 16))
-        elif p and p[0] == "J":
-            js.append("%s -> %s" % (p[1], p[2]))
-        elif p and p[0] == "S":
-            ss.append(" ".join(p[1:]))
+    d = parse_xtrace(open(path, encoding="utf-8").read())
     out = [status, done]
+    xs = {}
+    for k in d["X"]:
+        sp, _, ad = k.partition(":")
+        xs.setdefault(sp, []).append(int(ad, 16))
     for sp in sorted(xs):
         out.append("  %-5s %5d instructions: %s" % (sp, len(xs[sp]), ranges(xs[sp])))
-    if js:
-        out.append("indirect jumps taken: " + "; ".join(js[:30]) + (" ..." if len(js) > 30 else ""))
-    if ss:
-        out.append("bank switches: " + "; ".join(ss[:30]) + (" ..." if len(ss) > 30 else ""))
+    if d["J"] or d["JR"]:
+        js = sorted(list(d["J"]) + list(d["JR"]))
+        out.append("indirect jumps taken: " + "; ".join(j.replace(" ", " -> ") for j in js[:30])
+                   + (" ..." if len(js) > 30 else ""))
+    if d["S"]:
+        out.append("bank switches: " + "; ".join("%s x%d" % kv for kv in sorted(d["S"].items())[:30]))
+    if d["I"]:
+        out.append("interrupts: " + "; ".join("%s -> %s x%d" % (k.split()[0], k.split()[1], v)
+                                              for k, v in sorted(d["I"].items())))
+    out.append(callgraph_summary(d, a.get("callgraph")))
+    if d["M"]:
+        out.append(ram_code(d, a.get("ram_dump")))
+    if a.get("merge_into"):
+        out.append(merge_trace(d, a["merge_into"]))
     if a.get("annotations"):
         out.append(run_dyn(path, a["annotations"], a.get("dataread")))
     else:
         out.append("python tools/dyn.py %s %s -c annotations.json  turns this into entry points and "
                    "bank pins" % (M.rom, path))
     return "\n".join(out)
+
+
+def callgraph_summary(d, dot=None):
+    """Who called whom (JSR), how often: per callee, its callers."""
+    callers = {}
+    for k, n in d["C"].items():
+        frm, to = k.split()
+        callers.setdefault(to, []).append((n, frm))
+    if not callers:
+        return "no JSR ran"
+    lines = ["call graph: %d routines called from %d sites (JSR, as run)" % (
+        len(callers), len({k.split()[0] for k in d["C"]}))]
+    for to in sorted(callers, key=lambda t: -sum(n for n, _ in callers[t]))[:25]:
+        cs = sorted(callers[to], reverse=True)
+        lines.append("  %-11s x%-6d from %s" % (to, sum(n for n, _ in cs),
+                                                 ", ".join("%s x%d" % (f, n) for n, f in cs[:5])
+                                                 + (" and %d more" % (len(cs) - 5) if len(cs) > 5 else "")))
+    if dot:
+        dot = os.path.abspath(dot)
+        with open(dot, "w", encoding="utf-8") as f:
+            f.write("digraph calls {\n  node [shape=box, fontname=monospace];\n")
+            for k, n in sorted(d["I"].items()):
+                vec, to = k.split()
+                f.write('  "%s" -> "%s" [label="%d"];\n' % ("IRQ/BRK" if vec == "$FFFE" else "NMI", to, n))
+            for k, n in sorted(d["G"].items()):
+                frm, to = k.split()
+                frm = "entered before the trace" if frm == "?" else frm
+                f.write('  "%s" -> "%s" [label="%d"];\n' % (frm, to, n))
+            f.write("}\n")
+        lines.append("wrote %s (Graphviz: dot -Tsvg %s -o calls.svg); each call is drawn from the routine "
+                     "that made it, as the run's own call stack had it" % (dot, os.path.basename(dot)))
+    return "\n".join(lines)
+
+
+def ram_code(d, dump=None):
+    """Code that ran from RAM: where, disassembled as it is now, and whether it has changed since."""
+    addrs = sorted(int(k.split(":")[1], 16) for k in d["M"])
+    lines = ["code ran from RAM: %d instructions, %s" % (len(addrs), ranges(addrs))]
+    blocks = []
+    for lo, hi in _runs(addrs):
+        data = read_bytes(lo, hi - lo + 3)
+        blocks.append((lo, data))
+        changed = [a for a in addrs if lo <= a <= hi and
+                   "%02X" % data[a - lo] != d["M"]["ram:%04X" % a].upper()]
+        lines.append("  $%04X-$%04X%s:" % (lo, hi, "  (changed since it ran at %s)"
+                                           % ", ".join("$%04X" % a for a in changed[:8]) if changed else ""))
+        i = 0
+        while lo + i <= hi:
+            nb, text, _v = decode(data + b"\0\0", lo + i, i)
+            mark = "" if ("ram:%04X" % (lo + i)) in d["M"] else "   ; not seen to run"
+            lines.append("    %04X  %-9s %s%s" % (lo + i, " ".join("%02X" % b for b in data[i:i + nb]), text, mark))
+            i += nb
+    if dump:
+        dump = os.path.abspath(dump)
+        with open(dump, "w", encoding="utf-8") as f:
+            for lo, data in blocks:
+                f.write("$%04X: %s\n" % (lo, data.hex(" ").upper()))
+        lines.append("wrote the bytes to %s" % dump)
+    return "\n".join(lines)
+
+
+def _runs(addrs, gap=3):
+    out, lo, hi = [], None, None
+    for a in sorted(addrs):
+        if lo is None:
+            lo = hi = a
+        elif a - hi <= gap:
+            hi = a
+        else:
+            out.append((lo, hi))
+            lo = hi = a
+    if lo is not None:
+        out.append((lo, hi))
+    return out
+
+
+def merge_trace(d, path):
+    """Fold this run into a cumulative log, so coverage builds up across runs and sessions."""
+    path = os.path.abspath(path)
+    old = parse_xtrace(open(path, encoding="utf-8").read()) if os.path.isfile(path) else parse_xtrace("")
+    before = len(old["X"]) + len(old["M"])
+    for kind in ("X", "J", "JR"):
+        old[kind].update(d[kind])
+    for k, v in d["M"].items():
+        old["M"].setdefault(k, v)
+    for kind in ("S", "C", "I", "G"):
+        for k, n in d[kind].items():
+            old[kind][k] = old[kind].get(k, 0) + n
+    write_xtrace(old, path)
+    after = len(old["X"]) + len(old["M"])
+    return "merged into %s: %d instructions known, %d of them new from this run" % (path, after, after - before)
+
+
+def t_rewind(a):
+    need_debug("rewinding")
+    return M.ask("rewind", int(a.get("steps", 1)), timeout=60)
 
 
 def run_dyn(log, ann, dataread=None):
@@ -870,7 +1007,10 @@ TOOLS = [
      "the BIOS. Any MAME already started is stopped first.",
      {"rom": {"type": "string", "description": "path to the .a78 image"},
       "boot_frames": {"type": "integer", "description": "frames to run before returning (default 0)"},
-      "debug": {"type": "boolean", "description": "use the debugger (default true; needs the patched MAME)"}},
+      "debug": {"type": "boolean", "description": "use the debugger (default true; needs the patched MAME)"},
+      "record": {"type": "string", "description": "record the session's input to this .inp file, to replay later"},
+      "playback": {"type": "string", "description": "replay a recorded .inp file: the same play, again, "
+                   "so a run can be traced (or traced more) without playing it twice"}},
      ["rom"]),
     ("mame_stop", t_stop, "Stop MAME.", {}, []),
     ("mame_status", t_status, "Frame, whether it is stopped, and the CPU registers.", {}, []),
@@ -922,11 +1062,20 @@ TOOLS = [
      {"start": ADDR, "end": ADDR, "frames": {"type": "integer"}, "limit": {"type": "integer"}}, ["start"]),
     ("mame_exectrace", t_exectrace, "Run some frames recording every cartridge instruction fetched WITH THE "
      "BANK it ran in (the bank-select stores are watched), every indirect jump's target and every bank "
-     "switch: probes/exectrace.lua's log. `annotations` runs tools/dyn.py on it, adding entry points and "
-     "bank pins to that annotations file and re-running the disassembler.",
+     "switch (probes/exectrace.lua's log), plus the call graph (every JSR, with counts), which handler "
+     "each interrupt entered, and code that ran from RAM, disassembled. `annotations` runs tools/dyn.py "
+     "on it, adding entry points and bank pins and re-running the disassembler.",
      {"frames": {"type": "integer"}, "log": {"type": "string"}, "annotations": {"type": "string"},
-      "dataread": {"type": "string", "description": "a dataread log (mame_watch_reads) to pass to dyn.py too"}},
+      "dataread": {"type": "string", "description": "a dataread log (mame_watch_reads) to pass to dyn.py too"},
+      "merge_into": {"type": "string", "description": "a cumulative log this run is folded into, so "
+                     "coverage builds up across runs and sessions (dyn.py reads it like any other)"},
+      "callgraph": {"type": "string", "description": "write the call graph (JSRs and interrupts, with "
+                    "counts) here as a Graphviz .dot file"},
+      "ram_dump": {"type": "string", "description": "write the bytes of the code that ran from RAM here"}},
      []),
+    ("mame_rewind", t_rewind, "Put the machine back as it was before one of the last runs or steps (a "
+     "state is kept each time it is set going from a stop, up to 64).",
+     {"steps": {"type": "integer"}}, []),
     ("mame_watch_reads", t_reads, "Run some frames and log every DATA read (not instruction fetches) of a "
      "range, by bank: which instruction reads which table, and which bytes MARIA's DMA reads (graphics, "
      "display lists) -- exactly, on the a7800 patch's MAME, where MARIA has its own address space. "
@@ -1052,7 +1201,9 @@ def selftest(rom):
         t("mame_run", frames=60)
         t("mame_watchpoint", action="clear")
         t("mame_trace", frames=10)
-        t("mame_exectrace", frames=10)
+        t("mame_exectrace", frames=10, callgraph=os.path.join(M.work, "calls.dot"),
+          merge_into=os.path.join(M.work, "cumulative.log"))
+        t("mame_rewind", steps=1)
         t("mame_watch_reads", frames=10)
         t("mame_history", count=5)
         t("mame_who_wrote", address="$0040")

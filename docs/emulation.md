@@ -326,7 +326,7 @@ game writes to both chips whether or not anything is listening, and
 ## Driving MAME from an assistant (`mamemcp.py`)
 
 `tools/mamemcp.py` is a Model Context Protocol server: an MCP client (Claude Code, Claude Desktop,
-...) starts it over stdio and gets twenty-five tools that drive a live MAME on a cartridge -- start
+...) starts it over stdio and gets twenty-six tools that drive a live MAME on a cartridge -- start
 it, run frames, step instructions, read and write memory and registers, disassemble what is in
 memory now (the bank switched in, with register names), screenshots, breakpoints and watchpoints,
 inputs, save states, and two that are aimed at disassembly:
@@ -345,6 +345,21 @@ inputs, save states, and two that are aimed at disassembly:
   them), every indirect jump's target and every bank switch, in that probe's log format. With
   `annotations` it runs `dyn.py` on the log. On Ballblazer two seconds of the title added the seven
   targets of its NMI jump table (`JMP (ind)` at $DF90) as entry points.
+* **What `mame_exectrace` adds to exectrace.lua's log**, in lines `dyn.py` passes over: the call
+  graph (`C site target` for every JSR, and `G routine target` by the routine that made it, from a
+  call stack kept as the run goes -- a JSR or an interrupt pushes, RTS and RTI pop), which handler
+  each interrupt entered (`I $FFFA ram:00F0`), and code that ran from RAM (`M ram:00F0 4C`, with
+  the opcode it had then), which it disassembles and marks where the byte has since changed.
+  `callgraph` writes a Graphviz file; on Ikari Warriors the NMI goes through `JMP $9A74` at $00F0
+  in RAM, and that handler is what calls $8000 and $8003, which no listing of the cartridge shows.
+  `merge_into` folds each run into one cumulative log, so coverage builds up across runs and
+  sessions (Ikari: 252 instructions from the title, 57 more once fire was held).
+* **`mame_start` with `record` or `playback`** keeps a session's input in an `.inp` file and plays
+  it back, so the same play can be traced again, or traced further, without playing it twice; a
+  replay of Ikari reaches the same registers at the same frame as the session it recorded.
+* **`mame_rewind`** puts the machine back as it was before one of the last runs or steps: a state
+  is kept each time it is set going from a stop, up to 64 (`A7800_MCP_REWIND`). MAME's own
+  `-rewind` keeps states only for its debugger's single steps.
 * **`mame_watch_reads`** logs data reads (not fetches, not an instruction's own bytes, not a
   stack pull's or an interrupt vector's): which instruction reads which table, by bank, and
   which bytes MARIA's DMA reads -- graphics and display lists. On the patched MAME MARIA has its
