@@ -26,6 +26,10 @@ local PORT = tonumber(os.getenv("A7800_MCP_PORT") or "2461")
 local cpu = MACHINE.devices[":maincpu"]
 local space = cpu.spaces["program"]
 local dbg = MACHINE.debugger
+-- MARIA's own address space, on a MAME built with the a7800 patch: its DMA fetches are there and
+-- not in the CPU's space. On another MAME they go through the CPU's space and this is nil.
+local maria_dev = MACHINE.devices[":maria"]
+local mspace = maria_dev and maria_dev.spaces and maria_dev.spaces["dma"] or nil
 
 local sock = emu.file("", 7)
 sock:open("socket.127.0.0.1:" .. PORT)
@@ -87,8 +91,9 @@ local function regs()
 end
 
 local function status()
-  return string.format("frame=%d state=%s %s debugger=%s", frames,
-                       stopped() and "stopped" or "running", regs(), dbg and "yes" or "no")
+  return string.format("frame=%d state=%s %s debugger=%s maria_space=%s", frames,
+                       stopped() and "stopped" or "running", regs(), dbg and "yes" or "no",
+                       mspace and "yes" or "no")
 end
 
 local function num(s)
@@ -171,11 +176,16 @@ function commands.bp(id, op, a, cond)
   end
 end
 
-function commands.wp(id, op, kind, a, n)
+function commands.wp(id, op, kind, a, n, cond, which)
   if not dbg then return reply(id, false, "watchpoints need MAME started with -debug") end
   local d = cpu.debug
   if op == "set" then
-    local i = d:wpset(space, kind or "w", num(a), num(n) or 1)
+    local sp = space
+    if which == "maria" then
+      if not mspace then return reply(id, false, "this MAME has no separate MARIA address space") end
+      sp = mspace                                  -- MARIA's fetches; the stop is the CPU's debugger's
+    end
+    local i = d:wpset(sp, kind or "w", num(a), num(n) or 1, (cond and cond ~= "-") and unpct(cond) or nil)
     reply(id, true, "watchpoint " .. i)
   elseif op == "clear" then
     d:wpclear()
@@ -183,8 +193,9 @@ function commands.wp(id, op, kind, a, n)
   else
     local t = {}
     for k, w in pairs(d:wplist(space)) do
-      t[#t + 1] = string.format("%d %04X+%X %s", k, w.address, w.length, w.type == 1 and "r"
-                                or (w.type == 2 and "w" or "rw"))
+      local ty = w.type
+      if type(ty) ~= "string" then ty = (ty == 1 and "r") or (ty == 2 and "w") or "rw" end
+      t[#t + 1] = string.format("%d %04X+%X %s", k, w.address, w.length, ty)
     end
     reply(id, true, table.concat(t, "\n"))
   end
@@ -256,6 +267,158 @@ function commands.untap(id)
   taplog = {}
 end
 
+-- ---------------------------------------------------------------- banks, as exectrace.lua has them
+-- The window's bank is the last value stored to the bank-select range, read the way
+-- probes/exectrace.lua reads it (cart.py's probe_env gives the numbers), so a trace or a read log
+-- here names spaces exactly as that probe, dyn.py and the disassembler do: f<bank> for the fixed
+-- part, b<N> for window bank N. `banks` must be sent before `xtrace` or `rtap` mean anything for a
+-- banked cartridge; tools/mamemcp.py sends it when it starts MAME.
+local B = { sel_lo = 0x8000, sel_hi = 0xBFFF, win_lo = 0x8000, win_hi = 0xBFFF, nbanks = 1,
+            first = 0, wbanks = 1, lowbank = nil, bank = 0 }
+local X = { on = false, x = {}, j = {}, s = {}, pending_j = nil, file = nil }
+local R = { on = false, n = 0, limit = 0, hits = {}, insn = {}, busy = false }
+TAPS = TAPS or {}            -- globals: a tap held only in a local is collected (docs/pitfalls.md)
+
+local function key(addr)
+  if B.nbanks > 1 and addr >= B.win_lo and addr <= B.win_hi then
+    return string.format("b%d:%04X", B.bank, addr)
+  end
+  if B.lowbank and addr < 0x8000 then return string.format("f%d:%04X", B.lowbank, addr) end
+  if B.fixed then return string.format("%s:%04X", B.fixed, addr) end      -- a linear cart: "rom"
+  return string.format("f%d:%04X", B.nbanks - 1, addr)
+end
+
+local function hexrange(s)
+  local lo, hi = s:match("^(%x+)%-(%x+)$")
+  return tonumber(lo, 16), tonumber(hi, 16)
+end
+
+function commands.banks(id, sel, win, nbanks, first, wbanks, lowbank, fixed)
+  B.sel_lo, B.sel_hi = hexrange(sel)
+  B.win_lo, B.win_hi = hexrange(win)
+  B.nbanks, B.first, B.wbanks = tonumber(nbanks), tonumber(first), tonumber(wbanks)
+  B.lowbank = (lowbank and lowbank ~= "-") and tonumber(lowbank) or nil
+  B.fixed = (fixed and fixed ~= "-") and fixed or nil
+  B.bank = B.first
+  if TAPS.banksel then TAPS.banksel:remove() end
+  if B.nbanks > 1 then
+    TAPS.banksel = space:install_write_tap(B.sel_lo, B.sel_hi, "mcp-banksel", function(offset, data)
+      local v = B.first + (data % B.wbanks)
+      if X.on then
+        local k = string.format("%s %d", key(cpu.state["PC"].value), v)
+        X.s[k] = (X.s[k] or 0) + 1
+      end
+      B.bank = v
+      return data
+    end)
+  end
+  reply(id, true, string.format("%d banks, select %04X-%04X, window %04X-%04X", B.nbanks,
+                                B.sel_lo, B.sel_hi, B.win_lo, B.win_hi))
+end
+
+-- every instruction fetched from the cartridge, with its bank; indirect jumps; bank switches --
+-- probes/exectrace.lua's log, for tools/dyn.py
+function commands.xtrace(id, op, file)
+  if op == "on" then
+    X.on, X.x, X.j, X.s, X.pending_j, X.file = true, {}, {}, {}, nil, unpct(file or "exectrace.log")
+    if not TAPS.xfetch then
+      TAPS.xfetch = space:install_read_tap(0x4000, 0xFFFF, "mcp-xtrace", function(offset, data)
+        if not X.on or R.busy then return data end
+        if cpu.state["PC"].value ~= offset then return data end      -- data, not a fetch
+        local k = key(offset)
+        if X.pending_j then X.j[X.pending_j .. " " .. k] = true; X.pending_j = nil end
+        X.x[k] = true
+        if data == 0x6C then X.pending_j = k end                      -- JMP (ind): next is its target
+        return data
+      end)
+    end
+    return reply(id, true, "tracing to " .. X.file)
+  end
+  X.on = false
+  local lines, nx = {}, 0
+  for k in pairs(X.x) do lines[#lines + 1] = "X " .. k; nx = nx + 1 end
+  for k in pairs(X.j) do lines[#lines + 1] = "J " .. k end
+  for k, n in pairs(X.s) do lines[#lines + 1] = string.format("S %s x%d", k, n) end
+  table.sort(lines)
+  local f = io.open(X.file, "w")
+  if not f then return reply(id, false, "cannot write " .. X.file) end
+  for _, l in ipairs(lines) do f:write(l, "\n") end
+  f:close()
+  reply(id, true, string.format("%d instructions, %d lines in %s", nx, #lines, X.file))
+end
+
+-- data reads: who reads which bytes (the reading instruction is CURPC, its first three bytes kept so
+-- the bridge can tell a CPU read from MARIA's DMA, which goes through the same address space)
+function commands.rtap(id, lo, hi, limit)
+  if TAPS.rtap then TAPS.rtap:remove(); TAPS.rtap = nil end
+  R.hits, R.insn, R.n, R.limit, R.on = {}, {}, 0, num(limit) or 20000, true
+  TAPS.rtap = space:install_read_tap(num(lo), num(hi), "mcp-reads", function(offset, data)
+    if not R.on or R.busy then return data end
+    if cpu.state["PC"].value == offset then return data end           -- a fetch or an operand
+    local at = cpu.state["CURPC"].value
+    local k = key(offset) .. " " .. string.format("%04X", at)
+    local n = R.hits[k]
+    if n then R.hits[k] = n + 1
+    elseif R.n < R.limit then
+      R.hits[k] = 1
+      R.n = R.n + 1
+      if not R.insn[at] then
+        R.busy = true                                                  -- our own reads are not logged
+        R.insn[at] = string.format("%02X%02X%02X", space:read_u8(at), space:read_u8((at + 1) & 0xFFFF),
+                                   space:read_u8((at + 2) & 0xFFFF))
+        R.busy = false
+      end
+    end
+    return data
+  end)
+  -- MARIA's fetches, when they have their own space: no attribution needed, they are MARIA's
+  R.mhits = {}
+  if TAPS.mtap then TAPS.mtap:remove(); TAPS.mtap = nil end
+  if mspace then
+    TAPS.mtap = mspace:install_read_tap(num(lo), num(hi), "mcp-maria-reads", function(offset, data)
+      if R.on then
+        local k = key(offset)
+        R.mhits[k] = (R.mhits[k] or 0) + 1
+      end
+      return data
+    end)
+  end
+  reply(id, true, "tapping reads of " .. lo .. "-" .. hi .. (mspace and " (CPU and MARIA apart)" or ""))
+end
+
+function commands.untap_reads(id)
+  R.on = false
+  if TAPS.rtap then TAPS.rtap:remove(); TAPS.rtap = nil end
+  if TAPS.mtap then TAPS.mtap:remove(); TAPS.mtap = nil end
+  local t = {}
+  for k, n in pairs(R.hits) do t[#t + 1] = k .. " " .. n end
+  for k, n in pairs(R.mhits or {}) do t[#t + 1] = "M " .. k .. " " .. n end
+  for at, b in pairs(R.insn) do t[#t + 1] = string.format("I %04X %s", at, b) end
+  table.sort(t)
+  reply(id, true, table.concat(t, "\n"))
+end
+
+-- any debugger console command, with what it printed. One that sets the machine going (over, out,
+-- gint, gvblank, go...) is answered when it has stopped again, or after `limit` frames.
+local function console_since(n0)
+  local log, t = dbg.consolelog, {}
+  for i = n0 + 1, #log do t[#t + 1] = log[i] end
+  return table.concat(t, "\n")
+end
+
+function commands.console(id, cmd, limit)
+  if not dbg then return reply(id, false, "the debugger commands need MAME started with -debug") end
+  local n0 = #dbg.consolelog
+  local was = stopped()
+  we_stopped = true
+  dbg:command(unpct(cmd))
+  if was and not stopped() then
+    pending = { id = id, kind = "cmd", n0 = n0, limit = frames + (num(limit) or 600) }
+    return
+  end
+  reply(id, true, console_since(n0))
+end
+
 function commands.quit(id)
   reply(id, true, "bye")
   MACHINE:exit()
@@ -285,6 +448,10 @@ local function pump()
     local why = ""
     if p.kind == "run" and frames < p.target then
       why = string.format(" (stopped early at %04X: a breakpoint or watchpoint)", pc())
+    elseif p.kind == "cmd" then
+      local out = console_since(p.n0)
+      if p.timed_out then out = out .. (#out > 0 and "\n" or "") .. "(not reached; stopped after the frame limit)" end
+      return reply(p.id, true, (#out > 0 and (out .. "\n") or "") .. status())
     end
     reply(p.id, true, status() .. why)
   end
@@ -307,6 +474,10 @@ for _, s in pairs(MACHINE.screens) do screen = s; break end
 emu.register_frame_done(function()
   frames = screen and screen:frame_number() or (frames + 1)
   if pending and pending.kind == "run" and frames >= pending.target and not stopped() then
+    halt()
+  end
+  if pending and pending.kind == "cmd" and pending.limit and frames >= pending.limit and not stopped() then
+    pending.timed_out = true
     halt()
   end
 end)

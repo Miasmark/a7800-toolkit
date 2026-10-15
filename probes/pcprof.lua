@@ -63,7 +63,11 @@ TAPS[2] = mem:install_write_tap(SEL_LO, SEL_HI, "banksel", function(offset, data
   bank = FIRST + (data % WBANKS)
   return data
 end)
-TAPS[3] = mem:install_read_tap(0x1800, 0x27FF, "dll", function(offset, data)
+-- MARIA reads the list of lists; on a MAME built with the a7800 patch it does so in its own
+-- address space ("dma" on :maria), elsewhere through the CPU's
+local maria_dev = MACHINE.devices[":maria"]
+local dmaspace = (maria_dev and maria_dev.spaces and maria_dev.spaces["dma"]) or mem
+TAPS[3] = dmaspace:install_read_tap(0x1800, 0x27FF, "dll", function(offset, data)
   if dpph and dppl and F >= FROM and F <= TO then
     local dll = dpph * 256 + dppl
     local d = offset - dll

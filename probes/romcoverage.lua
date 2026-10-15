@@ -40,6 +40,16 @@ ROMCOVERAGE_TAPS = {
     return d
   end),
 }
+-- on a MAME built with the a7800 patch MARIA's DMA has its own address space, and its reads are
+-- not in the CPU's: tap that too (elsewhere the CPU's tap above already sees them)
+local maria_dev = M.devices[":maria"]
+local dmaspace = maria_dev and maria_dev.spaces and maria_dev.spaces["dma"]
+if dmaspace then
+  ROMCOVERAGE_TAPS[3] = dmaspace:install_read_tap(FROM, TO, "romcov-maria", function(a, d)
+    if armed then hit[a] = true end
+    return d
+  end)
+end
 
 emu.register_frame_done(function()
   f = f + 1

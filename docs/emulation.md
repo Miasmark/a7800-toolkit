@@ -326,7 +326,7 @@ game writes to both chips whether or not anything is listening, and
 ## Driving MAME from an assistant (`mamemcp.py`)
 
 `tools/mamemcp.py` is a Model Context Protocol server: an MCP client (Claude Code, Claude Desktop,
-...) starts it over stdio and gets seventeen tools that drive a live MAME on a cartridge -- start
+...) starts it over stdio and gets twenty-five tools that drive a live MAME on a cartridge -- start
 it, run frames, step instructions, read and write memory and registers, disassemble what is in
 memory now (the bank switched in, with register names), screenshots, breakpoints and watchpoints,
 inputs, save states, and two that are aimed at disassembly:
@@ -340,6 +340,32 @@ inputs, save states, and two that are aimed at disassembly:
   had not reached (805 to 847).
 * **`mame_watch_writes`** runs some frames with a write tap on a range and reports, per address,
   how many writes, from which PCs, with which values: who owns a variable or a table.
+* **`mame_exectrace`** is `probes/exectrace.lua` live: every instruction fetched from the
+  cartridge with the bank it ran in (the bank-select stores are watched, named as cart.py names
+  them), every indirect jump's target and every bank switch, in that probe's log format. With
+  `annotations` it runs `dyn.py` on the log. On Ballblazer two seconds of the title added the seven
+  targets of its NMI jump table (`JMP (ind)` at $DF90) as entry points.
+* **`mame_watch_reads`** logs data reads (not fetches, not an instruction's own bytes, not a
+  stack pull's or an interrupt vector's): which instruction reads which table, by bank, and
+  which bytes MARIA's DMA reads -- graphics and display lists. On the patched MAME MARIA has its
+  own address space (`dma`, on `:maria`), so the two are counted apart exactly. On another MAME
+  MARIA's fetches come through the CPU's space, and a read the instruction at CURPC could not
+  have made (a NOP, a store, an index out of its reach) is counted as MARIA's instead. It writes simprobe's `dataread.log` format,
+  which `dyn.py --dataread` turns into data blocks (Ballblazer: 6 bytes at $B547 the listing had
+  as code). `romcoverage.lua` maps which bytes are read; this says by whom.
+* **`mame_who_wrote`** asks MAME's memory tracking (`trackmem`, on from the start of a session)
+  for the last writer of an address, without running again; `pcwrites.lua` logs every write in a
+  window. Ballblazer's voice cell $2123 comes back as `$B33B STA $2123`, the note-emit store
+  `sim.py`'s notes describe.
+* **`mame_history`**: the last instructions executed and the return addresses on the stack that
+  follow a JSR -- how the CPU got here (`whocalls.lua` does the second for one address).
+* **`mame_ram_search`**: remember RAM, play or run, keep the bytes that changed, did not, went
+  up or down, or equal a value -- each RAM byte once, not again through its mirrors.
+  (`diffwrites.lua` and `ramsnap.lua` do this by writes and over time.)
+* **`mame_step`** with `over` and `out`, **`mame_run_until`** an interrupt (an NMI or IRQ handler
+  reached through a RAM vector shows itself), vertical blank or a register condition,
+  watchpoints with a data condition (`wpdata==3`), **`mame_find`**, and **`mame_debugger`** for any
+  other MAME debugger command.
 
 ```
 claude mcp add a7800-mame -- python /path/to/a7800-toolkit/tools/mamemcp.py
@@ -349,6 +375,18 @@ python tools/mamemcp.py --selftest game.a78      # every tool once, against a re
 MAME, the BIOS and the rompath are found from `A7800_MAME`, `A7800_ROMPATH` and `A7800_BIOS` as
 everywhere else. Inside MAME it is `probes/mcp-server.lua`, an autoboot script listening on
 127.0.0.1 only (through `emu.file`'s socket, as MAME's own gdbstub plugin does).
+
+**MARIA's reads are its own on the patched MAME.** Stock MAME has MARIA fetch through the CPU's
+address space, so every tap or watchpoint on it sees MARIA's DMA as well as the CPU's reads: a read
+watchpoint on a sprite fires when MARIA draws it, and a "who reads this table" list mixes the two.
+The a7800 patch gives MARIA its own address space -- `manager.machine.devices[":maria"].spaces["dma"]`
+in Lua, the same memory map and the same (shared) RAM, BIOS view and cartridge handlers -- and
+points its DMA there. A tap on the CPU's space now sees only the CPU, one on MARIA's only MARIA.
+On Ikari Warriors a second of play is 241,440 cartridge reads by MARIA and none of them in the
+CPU's space; a read watchpoint on its graphics at $9300 fires on MARIA's space and not on the
+CPU's. `mame_watchpoint` takes `space: maria`; `romcoverage.lua` and `pcprof.lua` tap MARIA's space
+when it is there, so they count what they did before. The screens and `mamecheck.py`'s bankset
+results are unchanged.
 
 **Breakpoints, watchpoints, stepping and tracing need the patched MAME.** Stock MAME's
 `-debugger none` resumes the machine the moment it stops -- its `wait_for_debugger` calls `go()`

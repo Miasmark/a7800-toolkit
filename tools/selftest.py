@@ -2165,7 +2165,7 @@ def t_mamemcp():
     assert r["protocolVersion"] == mamemcp.VERSIONS[0]
     assert mamemcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     tools = mamemcp.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(tools) == 17 and all(t["inputSchema"]["type"] == "object" for t in tools)
+    assert len(tools) == 25 and all(t["inputSchema"]["type"] == "object" for t in tools)
     got = mamemcp.call("mame_status", {})
     assert got["isError"] and "mame_start" in got["content"][0]["text"]
     assert mamemcp.handle({"jsonrpc": "2.0", "id": 4, "method": "nope"})["error"]["code"] == -32601
@@ -2174,6 +2174,15 @@ def t_mamemcp():
     assert mamemcp.decode(bytes([0xA9, 0x20, 0, 0]), 0x9000, 0)[1] == "LDA  #$20"
     assert mamemcp.decode(bytes([0x85, 0x20, 0, 0]), 0x9000, 0)[1] == "STA  BACKGRND"
     assert mamemcp.decode(bytes([0xD0, 0xFC, 0, 0]), 0xFCBE, 0)[1] == "BNE  $FCBC"
+    # a data read is the CPU's only if the instruction at CURPC could have made it; else MARIA's DMA
+    assert mamemcp.classify_read(0x92D0, "BDCE92")             # LDA $92CE,X
+    assert not mamemcp.classify_read(0x9400, "BDCE92")         # out of the indexed reach
+    assert not mamemcp.classify_read(0x9400, "8D0094")         # a store reads nothing
+    assert mamemcp.classify_read(0x9400, "B161EA")             # LDA ($61),Y: through a pointer
+    assert not mamemcp.classify_read(0x9400, "EA0000")         # NOP
+    # the RAM search sees each RAM byte once, not again through its mirrors
+    seen = [a for lo, hi in mamemcp.RAM_RANGES for a in range(lo, hi + 1)]
+    assert len(seen) == len(set(seen)) == 0x1000
     # a trace: bank 3's code at $8000 is told from the other banks' by its bytes
     rng = random.Random(7)
     work = tempfile.mkdtemp(prefix="selftest-mcp-")
@@ -2203,7 +2212,7 @@ def t_mamemcp():
     finally:
         mamemcp.M.cart = None
         shutil.rmtree(work, True)
-    return "handshake, 17 tools, clean refusal, decoding, a trace resolved to its bank and merged into annotations"
+    return "handshake, 25 tools, clean refusal, decoding, read attribution, a trace resolved to its bank and merged into annotations"
 
 
 def t_mamecheck():

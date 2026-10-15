@@ -3,9 +3,10 @@
 
 Model Context Protocol, over stdio: an MCP client (Claude Code, Claude Desktop, ...) starts this
 and calls its tools. They start MAME on a cartridge, run it a frame or an instruction at a time,
-read and write memory and registers, set breakpoints and watchpoints, trace which code runs,
-log who writes where, press buttons, save and load states, and take screenshots -- the questions a
-static disassembly cannot answer, asked of the machine itself.
+read and write memory and registers, set breakpoints and watchpoints, trace which code runs (with
+its bank) and which bytes are read as data (and by whom), ask who last wrote an address and how
+the CPU got where it is, find RAM variables by how they change, press buttons, save and load states,
+and take screenshots -- the questions a static disassembly cannot answer, asked of the machine.
 
     claude mcp add a7800-mame -- python /path/to/a7800-toolkit/tools/mamemcp.py
 
@@ -152,9 +153,34 @@ class Mame(object):
             self.debug = attempt
             break
         self.rom = rom
+        self.ram_snap = None
+        self.setup_banks(notes)
+        if self.debug:
+            self.ask("console", "trackmem 1")            # so mame_who_wrote can answer later
         if boot_frames:
             hello = self.ask("run", int(boot_frames), timeout=60 + boot_frames / 20.0)
         return hello, notes
+
+    def setup_banks(self, notes):
+        """Tell the Lua side how this cartridge's banks are named and switched, the way
+        probes/exectrace.lua is told (cart.py's probe_env), so its logs name spaces as cart.py does."""
+        c = self.cart
+        if c is None:
+            return
+        name = getattr(c.map, "name", "")
+        if name == "supergame" and c.nbanks > 1:
+            env = c.probe_env()
+            sw = c.map.switch or (0x8000, 0xBFFF)
+            win = next(((r[0], r[1] - 1) for r in c._region if r[2] == "window"), (0x8000, 0xBFFF))
+            self.ask("banks", "%04X-%04X" % sw, "%04X-%04X" % win, env["A7800_XT_BANKS"],
+                     env.get("A7800_XT_FIRST", "0"), env.get("A7800_XT_WBANKS", env["A7800_XT_BANKS"]),
+                     env.get("A7800_XT_LOWBANK", "-"), "-")
+        elif name == "linear":
+            self.ask("banks", "8000-BFFF", "8000-BFFF", "1", "0", "1", "-", "rom")
+        else:
+            self.ask("banks", "8000-BFFF", "8000-BFFF", "1", "0", "1", "-", "-")
+            notes.append("bank tracking follows SuperGame-style carts; this one (%s) is traced "
+                         "without banks" % (name or "unknown"))
 
     @staticmethod
     def _free_port():
@@ -418,10 +444,45 @@ def t_run(a):
             M.ask("input", h["port"], h["field"], 0)
 
 
-def t_step(a):
+def need_debug(what):
     if not M.debug:
-        raise ToolError("stepping needs the patched MAME's -debugger script")
-    return M.ask("step", int(a.get("instructions", 1)))
+        raise ToolError("%s needs the patched MAME's -debugger script" % what)
+
+
+def console(cmd, limit=600, timeout=120):
+    return M.ask("console", cmd, int(limit), timeout=timeout)
+
+
+def t_step(a):
+    need_debug("stepping")
+    mode = a.get("mode", "into")
+    n = int(a.get("instructions", 1))
+    if mode == "over":
+        return console("over %d" % n)                    # a JSR counts as one instruction
+    if mode == "out":
+        return console("out")                            # to the RTS/RTI that leaves this routine
+    return M.ask("step", n)
+
+
+def t_until(a):
+    need_debug("running to an event")
+    ev = a.get("event", "interrupt")
+    limit = int(a.get("frames_limit", 600))
+    if ev == "interrupt":
+        return console("gint", limit)
+    if ev == "vblank":
+        return console("gvblank", limit)
+    if ev == "condition":
+        cond = a.get("condition")
+        if not cond:
+            raise ToolError("a condition is needed, e.g. \"a==3\" or \"pc==C000 && x>2\"")
+        console("rpclear")
+        console("rp {%s}" % cond)
+        try:
+            return console("go", limit)
+        finally:
+            console("rpclear")
+    raise ToolError("event is interrupt, vblank or condition")
 
 
 def t_regs(a):
@@ -496,8 +557,9 @@ def t_wp(a):
         raise ToolError("watchpoints need the patched MAME's -debugger script")
     act = a.get("action", "list")
     if act == "set":
-        return M.ask("wp", "set", a.get("kind", "w"), "0x%04X" % addr(a.get("address")),
-                     int(a.get("length", 1)))
+        args = ["set", a.get("kind", "w"), "0x%04X" % addr(a.get("address")), int(a.get("length", 1)),
+                a.get("condition") or "-", a.get("space", "cpu")]
+        return M.ask("wp", *args)
     if act == "clear":
         return M.ask("wp", "clear")
     return M.ask("wp", "list") or "no watchpoints"
@@ -558,6 +620,250 @@ def t_load(a):
     return M.ask("load", a.get("name", "mcp"))
 
 
+def t_exectrace(a):
+    need_debug("tracing")
+    n = int(a.get("frames", 60))
+    path = os.path.abspath(a.get("log") or os.path.join(M.work, "trace", "exectrace-%d.log" % (M.seq + 1)))
+    M.ask("xtrace", "on", path)
+    try:
+        status = M.ask("run", n, timeout=120 + n / 2.0)
+    finally:
+        done = M.ask("xtrace", "off")
+    text = open(path, encoding="utf-8").read()
+    xs, js, ss = {}, [], []
+    for line in text.splitlines():
+        p = line.split()
+        if p and p[0] == "X":
+            sp, _, ad = p[1].partition(":")
+            xs.setdefault(sp, []).append(int(ad, 16))
+        elif p and p[0] == "J":
+            js.append("%s -> %s" % (p[1], p[2]))
+        elif p and p[0] == "S":
+            ss.append(" ".join(p[1:]))
+    out = [status, done]
+    for sp in sorted(xs):
+        out.append("  %-5s %5d instructions: %s" % (sp, len(xs[sp]), ranges(xs[sp])))
+    if js:
+        out.append("indirect jumps taken: " + "; ".join(js[:30]) + (" ..." if len(js) > 30 else ""))
+    if ss:
+        out.append("bank switches: " + "; ".join(ss[:30]) + (" ..." if len(ss) > 30 else ""))
+    if a.get("annotations"):
+        out.append(run_dyn(path, a["annotations"], a.get("dataread")))
+    else:
+        out.append("python tools/dyn.py %s %s -c annotations.json  turns this into entry points and "
+                   "bank pins" % (M.rom, path))
+    return "\n".join(out)
+
+
+def run_dyn(log, ann, dataread=None):
+    ann = os.path.abspath(ann)
+    if not os.path.exists(ann):
+        with open(ann, "w", encoding="utf-8") as f:
+            f.write("{}\n")                                # dyn.py adds to a file; start one
+    cmd = [sys.executable, os.path.join(HERE, "dyn.py"), M.rom, log, "-c", ann]
+    if dataread:
+        cmd += ["--dataread", dataread]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       universal_newlines=True, timeout=1800)
+    return "dyn.py: " + "\n".join(p.stdout.strip().splitlines()[-12:])
+
+
+READ_MODES = {"abs", "abx", "aby", "izx", "izy", "ind", "zp", "zpx", "zpy"}
+
+
+def classify_read(target, insn_hex):
+    """Was the instruction at CURPC able to read `target`? If not, the read was MARIA's DMA (it goes
+    through the CPU's address space while the CPU is held)."""
+    b = bytes.fromhex(insn_hex)
+    e = m6502.OPCODES.get(b[0])
+    if not e or e[1] not in READ_MODES or e[0] in ("STA", "STX", "STY", "JMP", "JSR") and e[1] != "ind":
+        return False
+    mode, op16 = e[1], b[1] | (b[2] << 8)
+    if mode == "abs":
+        return target == op16
+    if mode in ("abx", "aby"):
+        return 0 <= (target - op16) & 0xFFFF <= 0xFF
+    if mode in ("zp", "zpx", "zpy"):
+        return target < 0x100
+    return True                                           # through a pointer: cannot tell, believe it
+
+
+def t_reads(a):
+    lo, hi = addr(a.get("start", "$4000"), "start"), addr(a.get("end", "$FFFF"), "end")
+    n = int(a.get("frames", 60))
+    M.ask("rtap", "0x%04X" % lo, "0x%04X" % hi, int(a.get("limit", 20000)))
+    try:
+        status = M.ask("run", n, timeout=120 + n / 2.0)
+    finally:
+        got = M.ask("untap_reads", timeout=120)
+    insn, rows, mrows = {}, [], []
+    for line in got.splitlines():
+        p = line.split()
+        if len(p) == 3 and p[0] == "I":
+            insn[int(p[1], 16)] = p[2]
+        elif len(p) == 3 and p[0] == "M":
+            mrows.append((p[1], int(p[2])))
+        elif len(p) == 3:
+            rows.append((p[0], int(p[1], 16), int(p[2])))
+    # on the a7800 patch MARIA has its own address space and its reads are counted there; the CPU's
+    # tap then sees only the CPU. Elsewhere MARIA's fetches come through the CPU's space and are
+    # told apart by what the instruction at CURPC could have read.
+    exact = "maria_space=yes" in status
+    cpu, maria = {}, {}
+    for loc, cnt in mrows:
+        e = maria.setdefault(loc, [0, {}])
+        e[0] += cnt
+    for loc, at, cnt in rows:
+        sp, _, ad = loc.partition(":")
+        target = int(ad, 16)
+        c = M.cart
+        if c is not None:
+            try:
+                if not c.in_space(sp, target):             # cart RAM, or a region the map lacks
+                    continue
+            except Exception:                              # noqa: BLE001 -- a space cart.py lacks
+                continue
+        ib = insn.get(at, "000000")
+        n = m6502.LENGTH.get(int(ib[:2], 16), 1)
+        if 0 <= (target - at) & 0xFFFF < n + 1:
+            continue                                       # the instruction's own bytes, or a dummy read after them
+        op = m6502.OPCODES.get(int(ib[:2], 16))
+        if op and op[0] in ("RTS", "RTI", "JSR", "BRK"):
+            continue                                       # the stack's and the return address's own reads
+        if 0xFFFA <= target <= 0xFFFF and not (op and op[1] == "abs" and int(ib[4:6] + ib[2:4], 16) == target):
+            continue                                       # an interrupt fetching its vector mid-instruction
+        mine = True if exact else classify_read(target, ib)
+        d = cpu if mine else maria
+        e = d.setdefault(loc, [0, {}])
+        e[0] += cnt
+        if mine:
+            e[1][at] = e[1].get(at, 0) + cnt
+    out = [status, "%d bytes read as data by the CPU, %d by MARIA's DMA (graphics, display lists)%s"
+           % (len(cpu), len(maria), " -- MARIA's own address space, so exact" if exact
+              else " -- told apart by the reading instruction (this MAME has no MARIA address space)")]
+    byreader = {}
+    for loc, (cnt, pcs) in cpu.items():
+        for at in pcs:
+            byreader.setdefault(at, []).append(loc)
+    for at in sorted(byreader, key=lambda k: -len(byreader[k]))[:25]:
+        locs = byreader[at]
+        sp = locs[0].split(":")[0]
+        out.append("  $%04X  %-12s reads %4d bytes  %s: %s" % (
+            at, disassemble_one(at, insn.get(at)), len(locs), sp,
+            ranges([int(l.split(":")[1], 16) for l in locs if l.startswith(sp + ":")])))
+    if maria:
+        bysp = {}
+        for loc in maria:
+            sp, _, ad = loc.partition(":")
+            bysp.setdefault(sp, []).append(int(ad, 16))
+        for sp in sorted(bysp):
+            out.append("  MARIA %-5s %5d bytes: %s" % (sp, len(bysp[sp]), ranges(bysp[sp])))
+    path = os.path.abspath(a.get("dataread") or os.path.join(M.work, "trace", "dataread-%d.log" % M.seq))
+    with open(path, "w", encoding="utf-8") as f:
+        for loc in sorted(set(cpu) | set(maria)):
+            f.write("D %s x%d\n" % (loc, (cpu.get(loc) or maria.get(loc))[0]))
+    out.append("wrote %s (dataread.log format, CPU and MARIA reads: tools/dyn.py --dataread)" % path)
+    return "\n".join(out)
+
+
+def disassemble_one(at, insn_hex):
+    if not insn_hex:
+        return "?"
+    return decode(bytes.fromhex(insn_hex) + b"\0\0", at, 0)[1]
+
+
+def t_who_wrote(a):
+    need_debug("who-wrote")
+    ad = addr(a["address"])
+    got = console("pcatmem 0x%04X" % ad).strip()
+    m = re.fullmatch(r"([0-9A-Fa-f]{1,4})", got)
+    if not m:
+        return got or "MAME has no record of a write to $%04X since the session started" % ad
+    pc = int(m.group(1), 16)
+    return "$%04X was last written by the instruction at $%04X (as the bank now switched in has it: %s)" % (
+        ad, pc, disassemble(pc, 1).split("  ", 1)[1].strip())
+
+
+def t_history(a):
+    need_debug("the history")
+    n = int(a.get("count", 20))
+    out = ["the last %d instructions, oldest first:" % n, console("history :maincpu,%d" % n).strip()]
+    regs = dict(kv.split("=") for kv in M.ask("regs").split())
+    sp = int(regs.get("SP", "1FF"), 16) & 0xFF
+    stack = read_bytes(0x0100 + ((sp + 1) & 0xFF), 0xFF - sp) if sp < 0xFF else b""
+    calls = []
+    for i in range(len(stack) - 1):
+        ret = stack[i] | (stack[i + 1] << 8)
+        site = (ret - 2) & 0xFFFF
+        try:
+            if read_bytes(site, 1)[0] == 0x20:                   # JSR: this is a return address
+                tgt = read_bytes((site + 1) & 0xFFFF, 2)
+                calls.append("$%04X: JSR $%04X" % (site, tgt[0] | (tgt[1] << 8)))
+        except ToolError:
+            pass
+    out.append("return addresses on the stack (innermost first): " + ("; ".join(calls) or "none that follow a JSR"))
+    return "\n".join(out)
+
+
+# the 7800's RAM once each: $0040-$00FF and $0140-$01FF are the same bytes as $2040-$20FF and
+# $2140-$21FF, which are left out
+RAM_RANGES = ((0x0040, 0x00FF), (0x0140, 0x01FF), (0x1800, 0x203F), (0x2100, 0x213F), (0x2200, 0x27FF))
+
+
+def ram_now():
+    out = {}
+    for lo, hi in RAM_RANGES:
+        data = read_bytes(lo, hi - lo + 1)
+        for i, v in enumerate(data):
+            out[lo + i] = v
+    return out
+
+
+def t_ram_search(a):
+    act = a.get("action", "start")
+    if act == "start" or M.ram_snap is None:
+        M.ram_snap = ram_now()
+        M.ram_cand = set(M.ram_snap)
+        M.ram_hist = {k: [v] for k, v in M.ram_snap.items()}
+        return "remembered %d bytes of RAM; now change something in the game and compare" % len(M.ram_cand)
+    now = ram_now()
+    op = a.get("op", "changed")
+    want = a.get("value")
+    keep = set()
+    for ad in M.ram_cand:
+        old, new = M.ram_snap[ad], now[ad]
+        ok = {"changed": new != old, "unchanged": new == old, "increased": new > old,
+              "decreased": new < old, "equal": want is not None and new == int(want),
+              "by": want is not None and ((new - old) & 0xFF) == (int(want) & 0xFF)}.get(op)
+        if ok is None:
+            raise ToolError("op is changed, unchanged, increased, decreased, equal (value) or by (value)")
+        if ok:
+            keep.add(ad)
+    M.ram_cand = keep
+    for ad in keep:
+        M.ram_hist[ad].append(now[ad])
+    M.ram_snap = now
+    lines = ["%d candidates" % len(keep)]
+    for ad in sorted(keep)[:40]:
+        lines.append("  $%04X  %s" % (ad, " ".join("%02X" % v for v in M.ram_hist[ad][-8:])))
+    return "\n".join(lines)
+
+
+def t_find(a):
+    need_debug("searching memory")
+    lo, hi = addr(a.get("start", "$0000"), "start"), addr(a.get("end", "$FFFF"), "end")
+    data = re.sub(r"[\s,$]", "", a["bytes"])
+    if not re.fullmatch(r"([0-9A-Fa-f]{2})+", data):
+        raise ToolError("bytes must be hex, e.g. \"8D 00 80\"")
+    args = ",".join("0x" + data[i:i + 2] for i in range(0, len(data), 2))
+    return console("find 0x%04X,0x%X,%s" % (lo, hi - lo + 1, args)).strip() or "not found"
+
+
+def t_debugger(a):
+    need_debug("the debugger console")
+    return console(a["command"], int(a.get("frames_limit", 600))).strip() or "(no output)"
+
+
 ADDR = {"type": ["string", "integer"], "description": "an address: \"$C000\", \"0xC000\", \"C000\" or a number"}
 TOOLS = [
     ("mame_start", t_start, "Start MAME on a 7800 cartridge (.a78), stopped at the first instruction of "
@@ -573,8 +879,14 @@ TOOLS = [
      {"frames": {"type": "integer"},
       "hold": {"type": "array", "items": {"type": "object", "properties": {
           "port": {"type": "string"}, "field": {"type": "string"}, "value": {"type": "integer"}}}}}, []),
-    ("mame_step", t_step, "Execute some instructions and stop.",
-     {"instructions": {"type": "integer"}}, []),
+    ("mame_step", t_step, "Execute some instructions and stop. mode \"over\" treats a JSR as one "
+     "instruction; \"out\" runs to the RTS or RTI that leaves the current routine.",
+     {"instructions": {"type": "integer"}, "mode": {"type": "string", "enum": ["into", "over", "out"]}}, []),
+    ("mame_run_until", t_until, "Run until the next interrupt is taken (finds NMI/IRQ handlers, including "
+     "ones reached through RAM vectors), the next vertical blank, or a register condition holds (a MAME "
+     "debugger expression: \"a==3\", \"pc==C000 && x>2\"); gives up after frames_limit frames.",
+     {"event": {"type": "string", "enum": ["interrupt", "vblank", "condition"]},
+      "condition": {"type": "string"}, "frames_limit": {"type": "integer"}}, ["event"]),
     ("mame_registers", t_regs, "Read the 6502's registers, or set some first (e.g. {\"PC\": \"$C000\"}).",
      {"set": {"type": "object"}}, []),
     ("mame_read_memory", t_read, "Hex dump of the CPU's address space as it is now (RAM, TIA/MARIA/RIOT, the "
@@ -594,15 +906,49 @@ TOOLS = [
     ("mame_watchpoint", t_wp, "Set, clear or list memory watchpoints; the machine stops when the range is "
      "read or written.",
      {"action": {"type": "string", "enum": ["set", "clear", "list"]}, "address": ADDR,
-      "length": {"type": "integer"}, "kind": {"type": "string", "enum": ["r", "w", "rw"]}}, []),
-    ("mame_trace", t_trace, "Run some frames logging every instruction executed, and summarise which code "
-     "ran, per cartridge bank (a bank is told from the bytes, since MAME's trace does not record it). "
+      "length": {"type": "integer"}, "kind": {"type": "string", "enum": ["r", "w", "rw"]},
+      "condition": {"type": "string", "description": "a MAME expression, e.g. \"wpdata==3\" to stop only "
+                    "when 3 is written"},
+      "space": {"type": "string", "enum": ["cpu", "maria"], "description": "whose accesses to watch: the "
+                "CPU's (default) or MARIA's DMA (needs the a7800 patch's separate MARIA space)"}}, []),
+    ("mame_trace", t_trace, "Run some frames with MAME's own instruction trace, and summarise which code "
+     "ran, per cartridge bank (told from the bytes, since MAME's trace does not record it; "
+     "mame_exectrace knows the bank). "
      "`entries_file` adds the executed addresses as entry points to an annotations file for "
      "tools/disasm.py -c.",
      {"frames": {"type": "integer"}, "entries_file": {"type": "string"}}, []),
     ("mame_watch_writes", t_writes, "Run some frames and report every write to an address range: how many, "
      "from which PCs, with which values. Finds who owns a variable or a table in RAM.",
      {"start": ADDR, "end": ADDR, "frames": {"type": "integer"}, "limit": {"type": "integer"}}, ["start"]),
+    ("mame_exectrace", t_exectrace, "Run some frames recording every cartridge instruction fetched WITH THE "
+     "BANK it ran in (the bank-select stores are watched), every indirect jump's target and every bank "
+     "switch: probes/exectrace.lua's log. `annotations` runs tools/dyn.py on it, adding entry points and "
+     "bank pins to that annotations file and re-running the disassembler.",
+     {"frames": {"type": "integer"}, "log": {"type": "string"}, "annotations": {"type": "string"},
+      "dataread": {"type": "string", "description": "a dataread log (mame_watch_reads) to pass to dyn.py too"}},
+     []),
+    ("mame_watch_reads", t_reads, "Run some frames and log every DATA read (not instruction fetches) of a "
+     "range, by bank: which instruction reads which table, and which bytes MARIA's DMA reads (graphics, "
+     "display lists) -- exactly, on the a7800 patch's MAME, where MARIA has its own address space. "
+     "Writes a dataread log that tools/dyn.py --dataread uses to mark tables as data.",
+     {"start": ADDR, "end": ADDR, "frames": {"type": "integer"}, "limit": {"type": "integer"},
+      "dataread": {"type": "string"}}, []),
+    ("mame_who_wrote", t_who_wrote, "The PC of the last instruction that wrote an address, any time since "
+     "MAME started (MAME's memory tracking): where a value came from, without running again.",
+     {"address": ADDR}, ["address"]),
+    ("mame_history", t_history, "How the CPU got here: the last instructions it executed, and the return "
+     "addresses on the stack that follow a JSR.", {"count": {"type": "integer"}}, []),
+    ("mame_ram_search", t_ram_search, "Find a RAM variable by how it changes: `start` remembers RAM, then "
+     "`compare` with op changed/unchanged/increased/decreased, equal (value) or by (value, the "
+     "difference) keeps the bytes that did, after you play or run frames in between.",
+     {"action": {"type": "string", "enum": ["start", "compare"]},
+      "op": {"type": "string", "enum": ["changed", "unchanged", "increased", "decreased", "equal", "by"]},
+      "value": {"type": "integer"}}, []),
+    ("mame_find", t_find, "Search memory as the CPU sees it now (RAM, the switched-in bank) for a byte string.",
+     {"start": ADDR, "end": ADDR, "bytes": {"type": "string"}}, ["bytes"]),
+    ("mame_debugger", t_debugger, "Any MAME debugger console command, with what it printed (e.g. \"map 4000\", "
+     "\"symlist\", \"dasm file,8000,100\"). One that sets the machine running is answered when it stops.",
+     {"command": {"type": "string"}, "frames_limit": {"type": "integer"}}, ["command"]),
     ("mame_input", t_input, "List the inputs, or set one (value 1 pressed, 0 released) until changed.",
      {"action": {"type": "string", "enum": ["list", "set"]}, "port": {"type": "string"},
       "field": {"type": "string"}, "value": {"type": "integer"}}, []),
@@ -706,6 +1052,18 @@ def selftest(rom):
         t("mame_run", frames=60)
         t("mame_watchpoint", action="clear")
         t("mame_trace", frames=10)
+        t("mame_exectrace", frames=10)
+        t("mame_watch_reads", frames=10)
+        t("mame_history", count=5)
+        t("mame_who_wrote", address="$0040")
+        t("mame_step", mode="over", instructions=2)
+        t("mame_run_until", event="vblank")
+        t("mame_run_until", event="condition", condition="a==0", frames_limit=30)
+        t("mame_ram_search", action="start")
+        t("mame_run", frames=10)
+        t("mame_ram_search", action="compare", op="changed")
+        t("mame_find", start="$C000", end="$FFFF", bytes="60")
+        t("mame_debugger", command="map 8000")
         t("mame_watch_writes", start="$0040", end="$00FF", frames=10)
         t("mame_input", action="set", port=":BUTTONS", field="P1 Button 1", value=1)
         t("mame_run", frames=5, hold=[{"port": ":JOYSTICKS", "field": "P1 Up"}])
