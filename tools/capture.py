@@ -54,22 +54,42 @@ def find_mame(explicit=None):
     return None
 
 
-def bios_args():
-    """`-bios NAME` when A7800_BIOS is set, else nothing.
+def bios_args(name=None):
+    """`-bios NAME` for `name`, else for A7800_BIOS when that is set, else nothing.
 
     MAME's a7800 has a second NTSC BIOS slot, `a7800pr`, which is where an
     open BIOS goes when Atari's is not to hand (docs/bios.md, "Running
-    OpenBIOS in MAME").
+    OpenBIOS in MAME"). MAME with the a7800 patch also has `skip`, on both
+    machines: no BIOS at all, the cartridge started as Atari's NTSC BIOS
+    hands over (docs/bios.md, "Skipping the BIOS").
     """
-    name = os.environ.get("A7800_BIOS")
+    name = name or os.environ.get("A7800_BIOS")
     return ["-bios", name] if name else []
 
 
-def machine_setup(machine, rompath):
+def playback_args(offset=None, force=None):
+    """`-playback_offset N` / `-playback_force` (MAME with the a7800 patch), for `offset`
+    and `force`, else for A7800_PLAYBACK_OFFSET and A7800_PLAYBACK_FORCE, else nothing.
+
+    A recording plays back on a game that starts on another frame (another BIOS, `-bios
+    skip`, a re-signed or patched build) when it is shifted by the difference in hand-over
+    frames: N > 0 drops its first N frames, N < 0 waits N frames first. tools/inpoffset.py
+    measures N. Force alone keeps playing past "Out of sync" (a file from another machine).
+    """
+    if offset is None:
+        offset = int(os.environ.get("A7800_PLAYBACK_OFFSET") or 0)
+    if force is None:
+        force = os.environ.get("A7800_PLAYBACK_FORCE", "") not in ("", "0")
+    out = ["-playback_offset", str(int(offset))] if int(offset) else []
+    return out + (["-playback_force"] if force and not out else [])
+
+
+def machine_setup(machine, rompath, bios_name=None):
     """(the -bios arguments, the rompath) for a machine. The PAL machine has no -bios
-    a7800pr, so with the open BIOS selected it gets pal_overlay's folder instead."""
-    bios = bios_args()
-    if machine == "a7800p" and bios and rompath:
+    a7800pr, so with the open BIOS selected it gets pal_overlay's folder instead;
+    `skip` is on both machines and needs no files."""
+    bios = bios_args(bios_name)
+    if machine == "a7800p" and bios and bios[1] != "skip" and rompath:
         return [], pal_overlay(rompath)
     return bios, rompath
 
@@ -105,11 +125,12 @@ def pal_overlay(rompath):
     return d
 
 
-def find_rompath(rom, explicit=None):
+def find_rompath(rom, explicit=None, bios_name=None):
     """Where the 7800 BIOS images live.
 
     MAME needs them to boot the machine at all, and they are not part of the
-    cartridge, so this has to come from somewhere outside it.
+    cartridge, so this has to come from somewhere outside it. With `-bios skip`
+    (the a7800 patch) it needs none, so then the cartridge's own folder does.
     """
     for c in [explicit, os.environ.get("A7800_ROMPATH")]:
         if c and os.path.isdir(c):
@@ -121,6 +142,8 @@ def find_rompath(rom, explicit=None):
     for c in near:
         if os.path.isdir(c):
             return os.path.normpath(c)
+    if (bios_name or os.environ.get("A7800_BIOS")) == "skip":
+        return os.path.dirname(os.path.abspath(rom))
     return None
 
 

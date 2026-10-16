@@ -2148,6 +2148,57 @@ def t_pokeychip():
     return "chip tables, reset, poly9, timers and IRQST; RANDOM and 3 timer counts equal the a7800 fork's"
 
 
+def t_bios_skip():
+    """`-bios skip` (the a7800 patch: no BIOS, the cartridge started as Atari's NTSC BIOS hands
+    over) is passed on both machines, needs no PAL overlay, and needs no BIOS folder: the
+    cartridge's own folder is the rompath. Other names behave as before."""
+    import capture
+    keep = os.environ.pop("A7800_BIOS", None)
+    try:
+        assert capture.bios_args() == [] and capture.bios_args("skip") == ["-bios", "skip"]
+        assert capture.machine_setup("a7800p", "/x", "skip") == (["-bios", "skip"], "/x")
+        assert capture.machine_setup("a7800", "/x", "skip") == (["-bios", "skip"], "/x")
+        os.environ["A7800_BIOS"] = "skip"
+        assert capture.bios_args() == ["-bios", "skip"]
+        with tempfile.TemporaryDirectory() as d:
+            rom = os.path.join(d, "sub", "g.a78")
+            got = capture.find_rompath(rom, explicit=os.path.join(d, "missing"))
+            assert got in (os.path.join(d, "sub"), os.environ.get("A7800_ROMPATH")), got
+        os.environ["A7800_BIOS"] = "a7800pr"
+        assert capture.machine_setup("a7800", "/x") == (["-bios", "a7800pr"], "/x")
+        return "both machines, no PAL overlay, the cartridge's folder as rompath"
+    finally:
+        os.environ.pop("A7800_BIOS", None)
+        if keep is not None:
+            os.environ["A7800_BIOS"] = keep
+
+
+def t_playback_args():
+    """-playback_offset / -playback_force (the a7800 patch): from arguments or the environment;
+    an offset implies force in MAME, so it is passed alone; nothing when neither is asked for."""
+    import capture
+    keep = {k: os.environ.pop(k, None) for k in ("A7800_PLAYBACK_OFFSET", "A7800_PLAYBACK_FORCE")}
+    try:
+        assert capture.playback_args() == []
+        assert capture.playback_args(322) == ["-playback_offset", "322"]
+        assert capture.playback_args(-322, True) == ["-playback_offset", "-322"]
+        assert capture.playback_args(0, True) == ["-playback_force"]
+        os.environ["A7800_PLAYBACK_OFFSET"] = "-6"
+        assert capture.playback_args() == ["-playback_offset", "-6"]
+        assert capture.playback_args(0) == []
+        del os.environ["A7800_PLAYBACK_OFFSET"]
+        os.environ["A7800_PLAYBACK_FORCE"] = "1"
+        assert capture.playback_args() == ["-playback_force"]
+        os.environ["A7800_PLAYBACK_FORCE"] = "0"
+        assert capture.playback_args() == []
+        return "offset and force, from arguments and the environment"
+    finally:
+        for k, v in keep.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
 def t_mamemcp():
     """tools/mamemcp.py without a MAME: the MCP handshake and tool list, a tool refusing
     cleanly when MAME is not running, the live disassembler's decoding, and a trace line from a
@@ -5501,6 +5552,8 @@ def main():
     r.check("bankset rules", t_bankset_rules)
     r.check("pokey chip", t_pokeychip)
     r.check("MCP server", t_mamemcp)
+    r.check("BIOS skip", t_bios_skip)
+    r.check("playback offset", t_playback_args)
     r.check("mamecheck", t_mamecheck)
     r.check("EXROM layout", t_exrom_layout)
     r.check("dispatch tables", t_dispatch_tables)

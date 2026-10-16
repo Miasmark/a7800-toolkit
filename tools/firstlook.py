@@ -204,7 +204,7 @@ class Mame(object):
         if self.playback:
             pb = os.path.abspath(self.playback)
             cmd += ["-input_directory", os.path.dirname(pb), "-playback",
-                    os.path.basename(pb), "-exit_after_playback"]
+                    os.path.basename(pb), "-exit_after_playback"] + capture.playback_args()
         cmd += ["-autoboot_script", os.path.join(PROBES, probe)] + list(extra)
         e = dict(os.environ)
         e.setdefault("XDG_RUNTIME_DIR", workdir)

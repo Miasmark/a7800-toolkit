@@ -102,7 +102,8 @@ class Mame(object):
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, rom, debug=True, boot_frames=0, record=None, playback=None):
+    def start(self, rom, debug=True, boot_frames=0, record=None, playback=None, bios=None,
+              playback_offset=None, playback_force=None):
         self.stop()
         rom = os.path.abspath(os.path.expanduser(rom))
         if not os.path.isfile(rom):
@@ -110,12 +111,12 @@ class Mame(object):
         exe = capture.find_mame()
         if not exe:
             raise ToolError("MAME was not found: set A7800_MAME (docs/emulation.md)")
-        roms = capture.find_rompath(rom)
+        roms = capture.find_rompath(rom, bios_name=bios)
         if not roms:
             raise ToolError("the 7800 BIOS was not found: set A7800_ROMPATH, and A7800_BIOS=a7800pr "
-                            "for the open BIOS (docs/emulation.md)")
+                            "for the open BIOS, or start with bios \"skip\" (docs/emulation.md)")
         machine = capture.inspect(rom)["machine"]
-        bios, roms = capture.machine_setup(machine, roms)
+        bios, roms = capture.machine_setup(machine, roms, bios)
         try:
             self.cart = cartlib.Cart(rom)
         except Exception:                                        # noqa: BLE001
@@ -143,6 +144,7 @@ class Mame(object):
                 if not os.path.isfile(pb):
                     raise ToolError("no such recording: %s" % pb)
                 cmd += ["-input_directory", os.path.dirname(pb), "-playback", os.path.basename(pb)]
+                cmd += capture.playback_args(playback_offset, playback_force)
             env = dict(os.environ, A7800_MCP_PORT=str(port))
             env.setdefault("XDG_RUNTIME_DIR", self.work)
             env.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -420,7 +422,8 @@ def ranges(addrs, gap=3):
 # ----------------------------------------------------------------------------- tools
 def t_start(a):
     hello, notes = M.start(a["rom"], debug=a.get("debug", True), boot_frames=a.get("boot_frames", 0),
-                           record=a.get("record"), playback=a.get("playback"))
+                           record=a.get("record"), playback=a.get("playback"), bios=a.get("bios"),
+                           playback_offset=a.get("playback_offset"), playback_force=a.get("playback_force"))
     c = M.cart
     desc = c.describe() if c is not None and hasattr(c, "describe") else ""
     text = "started MAME on %s\n%s" % (os.path.basename(M.rom), hello)
@@ -1004,13 +1007,19 @@ def t_debugger(a):
 ADDR = {"type": ["string", "integer"], "description": "an address: \"$C000\", \"0xC000\", \"C000\" or a number"}
 TOOLS = [
     ("mame_start", t_start, "Start MAME on a 7800 cartridge (.a78), stopped at the first instruction of "
-     "the BIOS. Any MAME already started is stopped first.",
+     "the BIOS (with bios \"skip\", of the cartridge). Any MAME already started is stopped first.",
      {"rom": {"type": "string", "description": "path to the .a78 image"},
+      "bios": {"type": "string", "description": "MAME -bios name, overriding A7800_BIOS: \"skip\" (the patched "
+               "MAME) boots straight into the cartridge, with no BIOS files and no BIOS frames"},
       "boot_frames": {"type": "integer", "description": "frames to run before returning (default 0)"},
       "debug": {"type": "boolean", "description": "use the debugger (default true; needs the patched MAME)"},
       "record": {"type": "string", "description": "record the session's input to this .inp file, to replay later"},
       "playback": {"type": "string", "description": "replay a recorded .inp file: the same play, again, "
-                   "so a run can be traced (or traced more) without playing it twice"}},
+                   "so a run can be traced (or traced more) without playing it twice"},
+      "playback_offset": {"type": "integer", "description": "shift the playback for a game that starts on another "
+                          "frame (another BIOS, bios \"skip\", a re-signed build): N > 0 drops the recording's first N "
+                          "frames, N < 0 waits N frames; tools/inpoffset.py measures N (the patched MAME)"},
+      "playback_force": {"type": "boolean", "description": "keep playing past \"Out of sync\" (the patched MAME)"}},
      ["rom"]),
     ("mame_stop", t_stop, "Stop MAME.", {}, []),
     ("mame_status", t_status, "Frame, whether it is stopped, and the CPU registers.", {}, []),

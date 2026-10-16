@@ -114,7 +114,7 @@ def cmd_play(args):
         sys.exit("no such recording: %s (try `list`)" % path)
     print("P pauses, Esc quits. When the recording runs out the game carries "
           "on under your control.")
-    launch(args, ["-playback", name + ".inp"])
+    launch(args, ["-playback", name + ".inp"] + capture.playback_args(args.offset, args.force or None))
 
 
 def cmd_list(args):
@@ -140,6 +140,11 @@ def main(argv=None):
     p = sub.add_parser("play", help="watch a recording play back")
     p.add_argument("rom")
     p.add_argument("name")
+    p.add_argument("--offset", type=int, default=None,
+                   help="frames to shift it by, for a game that starts on another frame "
+                        "(tools/inpoffset.py; the patched MAME; or A7800_PLAYBACK_OFFSET)")
+    p.add_argument("--force", action="store_true",
+                   help="keep playing past \"Out of sync\" (the patched MAME; or A7800_PLAYBACK_FORCE=1)")
     p.set_defaults(fn=cmd_play)
     l = sub.add_parser("list", help="list recordings beside a cartridge")
     l.add_argument("rom")

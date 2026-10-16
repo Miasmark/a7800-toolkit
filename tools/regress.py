@@ -100,6 +100,11 @@ def mame_line(job, cfg):
            "-input_directory", cfg["input_dir"]]
     if job.get("playback"):
         cmd += ["-playback", job["playback"]]
+        off = int(os.environ.get("A7800_PLAYBACK_OFFSET") or 0)     # the patched MAME
+        if off:
+            cmd += ["-playback_offset", str(off)]
+        elif os.environ.get("A7800_PLAYBACK_FORCE", "") not in ("", "0"):
+            cmd += ["-playback_force"]
     cmd += ["-autoboot_script", job["script"], "-window", "-nomax",
             "-nothrottle", "-sound", "none", "-video", job.get("video", "none")]
     return cmd + list(job.get("mame_args", []))

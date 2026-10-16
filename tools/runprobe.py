@@ -114,7 +114,7 @@ def run(rom, probe, out, seconds=30, env=None, playback=None, mame=None,
     if playback:
         pb = os.path.abspath(playback)
         cmd += ["-input_directory", os.path.dirname(pb), "-playback",
-                os.path.basename(pb), "-exit_after_playback"]
+                os.path.basename(pb), "-exit_after_playback"] + capture.playback_args()
     cmd += ["-autoboot_script", path]
     e = dict(os.environ)
     runtime = tempfile.mkdtemp(prefix="runprobe-")
