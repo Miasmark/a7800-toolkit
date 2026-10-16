@@ -328,11 +328,10 @@ def capture(rom, out=None, seconds=40, frames=None, skip=0, drive=True,
             " at " + ", ".join("$%04X" % b for b in info["pokeys"])))
         if len(info["pokeys"]) > 1:
             print("             (two POKEYs, both captured -- eight voices. "
-                  "MAME plays only the")
-            print("              first, so its own audio will be missing half "
-                  "of this; the")
-            print("              toolkit renders from the registers and does "
-                  "not care.)")
+                  "Stock MAME plays only")
+            print("              the first (the a7800 patch plays both); the "
+                  "toolkit renders")
+            print("              from the registers and does not care.)")
         print("  machine    %s (%s)%s"
               % (info["machine"], info["region"].upper(),
                  "  [a7800 fork: debugger watchpoints]"

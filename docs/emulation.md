@@ -311,7 +311,7 @@ a display list; Bubble Bobble's title screen on the fork is gameplay on the simu
 holds fire; the fork was not driven); and one Pit Fighter frame colours its ground
 differently. Those are not diagnosed.
 
-### Neither emulates the second POKEY
+### Neither emulates the second POKEY (the a7800 patch does)
 
 Both instantiate one chip for a dual-POKEY cartridge:
 
@@ -325,6 +325,11 @@ mapper, but the `$0440` chip is still not there. This is why the toolkit
 captures POKEY from the **CPU bus** instead of the device: it records what the
 game writes to both chips whether or not anything is listening, and
 `tracker.py` renders all eight voices from that. See `docs/audio.md`.
+
+MAME with the a7800 patch does add the `$0440` chip (cart types `a78_p440_*`, both chips at half gain
+on the cart's speaker). In a `-wavwrite` recording from this MAME, the console's TIA is the left
+channel and the cartridge's speaker (any POKEY) the right. Read the right channel when measuring a
+POKEY tone (`tools/mktone.py`).
 
 ## Driving MAME from an assistant (`mamemcp.py`)
 

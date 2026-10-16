@@ -657,7 +657,7 @@ What it did for Ballblazer, which generates its music from RANDOM: agreement wit
 from 35.8% to 36.3%, and it now reaches 95% of the reference instead of 66%. Not more, because a read
 only matches if its cycle does, and the simulator's cycle count drifts from MAME's over a frame.
 
-## Two POKEYs: eight voices, and MAME plays four
+## Two POKEYs: eight voices, and stock MAME plays four
 
 Eighteen images declare a second POKEY at `$0440`. They are **not a stereo
 pair**. Tapping both chips on Byzex and Acidjazzed:
@@ -672,7 +672,7 @@ cartridge is eight independent voices and reading one chip loses half the music.
 All eight of Byzex's voices sound, with 125, 42, 18, 8, 8, 18, 92 and 39
 distinct settings each.
 
-### The emulator does not help here
+### Stock MAME does not help here
 
 MAME v0.287 has no cartridge type for the second chip:
 
@@ -685,7 +685,22 @@ It loads these as single-POKEY carts and **discards** the `$0440` writes. (An
 earlier note here said `$0440` mirrored `$0450`. It does not -- that reading
 came from CPU-bus taps catching writes MAME then threw away.)
 
-That turns out not to matter, because `probes/audio.lua` taps the **CPU bus**,
+MAME with the a7800 patch (`bankset-full.patch`) now plays both chips. Header
+bit `$0400` beside `$0040`, which is A78 v4 audio field `3`, gives a second POKEY
+at `$0440`: cart types `a78_p440_t0`, `t6`, `ta` and `vb`. All nine such images
+in the library get both chips, and the warning is gone. Measured:
+
+- On a test cart, a tone set on `$0440` alone sounds at 491.5 Hz (AUDF `$40`,
+  expected 491.7); one on `$0450` alone at 329.5 Hz (AUDF `$60`, expected 329.5);
+  both together, at both pitches.
+- A single-POKEY cart still ignores `$0440` and plays at its old level.
+- On each demo, the second chip adds as much again as the first. Portal's music
+  is on `$0440` alone and was silent before.
+- Both chips go to the cart's speaker at half gain, as MAME's two-POKEY arcade
+  machines do. At full gain each, the pair clipped: up to 58,671 samples in
+  19 seconds on OutRun 3. At half, none clip.
+
+The toolkit does not depend on it either way, because `probes/audio.lua` taps the **CPU bus**,
 not the chip, and the renderer works from the register stream rather than from
 MAME's audio. So the second chip's music is fully recoverable even though the
 emulator will not play it. Nothing extra is needed:

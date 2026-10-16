@@ -17,7 +17,8 @@ recording is the thing under test:
     mame a7800 -cart t.a78 -sound none -wavwrite t.wav -video none -str 4
 
 Measure the fundamental in `t.wav` and compare it with
-`tracker.pokey_rate(...) / 2`. That is how the 16-bit pairs were confirmed to
+`tracker.pokey_rate(...) / 2`. (In MAME 0.289's two-channel `-wavwrite`, the
+cartridge's POKEY is the right channel and the console's TIA the left.) That is how the 16-bit pairs were confirmed to
 0.00 cents and the high-pass filters peak for peak; see docs/audio.md.
 
 `--tia` does the same for one TIA channel (AUDC, AUDF, volume 8 on channel 0,
