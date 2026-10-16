@@ -102,7 +102,8 @@ class Mame(object):
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, rom, debug=True, boot_frames=0, record=None, playback=None, bios=None):
+    def start(self, rom, debug=True, boot_frames=0, record=None, playback=None, bios=None,
+              playback_offset=None, playback_force=None):
         self.stop()
         rom = os.path.abspath(os.path.expanduser(rom))
         if not os.path.isfile(rom):
@@ -143,6 +144,7 @@ class Mame(object):
                 if not os.path.isfile(pb):
                     raise ToolError("no such recording: %s" % pb)
                 cmd += ["-input_directory", os.path.dirname(pb), "-playback", os.path.basename(pb)]
+                cmd += capture.playback_args(playback_offset, playback_force)
             env = dict(os.environ, A7800_MCP_PORT=str(port))
             env.setdefault("XDG_RUNTIME_DIR", self.work)
             env.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -420,7 +422,8 @@ def ranges(addrs, gap=3):
 # ----------------------------------------------------------------------------- tools
 def t_start(a):
     hello, notes = M.start(a["rom"], debug=a.get("debug", True), boot_frames=a.get("boot_frames", 0),
-                           record=a.get("record"), playback=a.get("playback"), bios=a.get("bios"))
+                           record=a.get("record"), playback=a.get("playback"), bios=a.get("bios"),
+                           playback_offset=a.get("playback_offset"), playback_force=a.get("playback_force"))
     c = M.cart
     desc = c.describe() if c is not None and hasattr(c, "describe") else ""
     text = "started MAME on %s\n%s" % (os.path.basename(M.rom), hello)
@@ -1012,7 +1015,11 @@ TOOLS = [
       "debug": {"type": "boolean", "description": "use the debugger (default true; needs the patched MAME)"},
       "record": {"type": "string", "description": "record the session's input to this .inp file, to replay later"},
       "playback": {"type": "string", "description": "replay a recorded .inp file: the same play, again, "
-                   "so a run can be traced (or traced more) without playing it twice"}},
+                   "so a run can be traced (or traced more) without playing it twice"},
+      "playback_offset": {"type": "integer", "description": "shift the playback for a game that starts on another "
+                          "frame (another BIOS, bios \"skip\", a re-signed build): N > 0 drops the recording's first N "
+                          "frames, N < 0 waits N frames; tools/inpoffset.py measures N (the patched MAME)"},
+      "playback_force": {"type": "boolean", "description": "keep playing past \"Out of sync\" (the patched MAME)"}},
      ["rom"]),
     ("mame_stop", t_stop, "Stop MAME.", {}, []),
     ("mame_status", t_status, "Frame, whether it is stopped, and the CPU registers.", {}, []),

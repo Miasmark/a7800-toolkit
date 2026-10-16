@@ -67,6 +67,23 @@ def bios_args(name=None):
     return ["-bios", name] if name else []
 
 
+def playback_args(offset=None, force=None):
+    """`-playback_offset N` / `-playback_force` (MAME with the a7800 patch), for `offset`
+    and `force`, else for A7800_PLAYBACK_OFFSET and A7800_PLAYBACK_FORCE, else nothing.
+
+    A recording plays back on a game that starts on another frame (another BIOS, `-bios
+    skip`, a re-signed or patched build) when it is shifted by the difference in hand-over
+    frames: N > 0 drops its first N frames, N < 0 waits N frames first. tools/inpoffset.py
+    measures N. Force alone keeps playing past "Out of sync" (a file from another machine).
+    """
+    if offset is None:
+        offset = int(os.environ.get("A7800_PLAYBACK_OFFSET") or 0)
+    if force is None:
+        force = os.environ.get("A7800_PLAYBACK_FORCE", "") not in ("", "0")
+    out = ["-playback_offset", str(int(offset))] if int(offset) else []
+    return out + (["-playback_force"] if force and not out else [])
+
+
 def machine_setup(machine, rompath, bios_name=None):
     """(the -bios arguments, the rompath) for a machine. The PAL machine has no -bios
     a7800pr, so with the open BIOS selected it gets pal_overlay's folder instead;

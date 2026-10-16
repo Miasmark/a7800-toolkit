@@ -55,7 +55,8 @@ measured leaves `SP = $16`, decimal set and hash bytes in `$40-$48`.
   "Re-signing a cartridge moves the start of the game".
 - **Recordings do not cross BIOSes.** The hand-over frame differs by more
   than a hundred frames, so an `.inp` recorded under one BIOS is a different
-  run under the other.
+  run under the other, unless it is shifted by that difference
+  (`tools/inpoffset.py`, `-playback_offset` in the patched MAME).
 - **Games that trust the BIOS's leftovers.** A game that never sets its
   stack pointer, never clears decimal mode, or reads RAM before writing it
   will behave differently under the two. Pole Position II does not: its
@@ -79,7 +80,9 @@ above):
 
 - INPTCTRL `$16`: MARIA on, BIOS off, not locked;
 - X = SP = `$16`, decimal set, interrupts masked;
-- MARIA's DMA off.
+- MARIA's DMA off;
+- the first instruction 972 cycles into frame 0 (1,653 on PAL), the point in
+  the frame where OpenBIOS hands over.
 
 A and Y are 0 (not measured on the Atari BIOS). RAM is left as MAME starts it,
 not as the self-test and hash leave it. The signature is not checked, so an
@@ -95,7 +98,11 @@ What changes against a BIOS boot:
 
 - **Timing.** The game starts 204 frames sooner than on Atari's BIOS and 322
   sooner than on OpenBIOS. Recordings and frame numbers therefore do not carry
-  over, as between BIOSes ("Recordings do not cross BIOSes").
+  over as they are, as between BIOSes ("Recordings do not cross BIOSes").
+  The patched MAME can shift a recording (`-playback_offset`;
+  `tools/inpoffset.py` measures the shift). Within the frame, skip starts
+  where OpenBIOS hands over: exactly on PAL, 0.31 of a cycle off on NTSC
+  (docs/pitfalls.md has what that does and does not keep in sync).
 - **Leftover RAM.** A game that reads RAM before writing it can behave
   differently.
 

@@ -434,6 +434,12 @@ With the patched MAME, `A7800_BIOS=skip` boots every cartridge straight into the
 file (docs/bios.md, "Skipping the BIOS"); `A7800_ROMPATH` is then not needed either. The MCP server's
 `mame_start` takes `bios: "skip"` for one session.
 
+A recording made under one BIOS plays on another, or with `skip`, when shifted by the difference in
+hand-over frames: `A7800_PLAYBACK_OFFSET=N` (from `tools/inpoffset.py`) passes `-playback_offset N`
+to the patched MAME, and `A7800_PLAYBACK_FORCE=1` passes `-playback_force`. What that does and does
+not keep in sync is measured in docs/pitfalls.md ("A recording can be forced onto a game that starts
+elsewhere").
+
 `A7800_BIOS` is passed to MAME as `-bios`; `capture.py`, `session.py`,
 `replay.py` and `regress.py` all honour it. MAME prints `c300558-001a.u7 WRONG
 CHECKSUMS` and runs it anyway. With those three variables set, `selftest.py`

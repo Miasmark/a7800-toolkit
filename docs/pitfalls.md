@@ -703,6 +703,59 @@ dozens of builds from one set of recordings. A signed build replaying a
 recording made unsigned gives a playable, plausible race that is quietly
 not the one asked for, which is worse than a crash.
 
+## A recording can be forced onto a game that starts elsewhere, and how far that holds
+
+The two entries above say a recording made on one build does not line up with
+another. Neither does one made under a different BIOS: Atari's NTSC BIOS hands
+over around frame 204, 7800OpenBIOS at 322, and `-bios skip` at 0. MAME with
+the a7800 patch can shift a playback to make up the difference:
+
+- `-playback_offset N`: N > 0 drops the recording's first N frames; N < 0
+  waits N frames before playing it.
+- `-playback_force`: keep playing when the frame times differ (a file from
+  another machine), instead of stopping with "Out of sync". An offset
+  implies it.
+
+`tools/inpoffset.py` measures N: it runs both sides with
+`probes/handover.lua` and subtracts the hand-over frames. The tools pass the
+options from `A7800_PLAYBACK_OFFSET` and `A7800_PLAYBACK_FORCE`;
+`session.py play` and the MCP server's `mame_start` take them too.
+
+Measured: 3,000 frames of scripted play were recorded under OpenBIOS, then
+played back with `-bios skip -playback_offset 322`. The comparison is zero
+page and the screen at the same game frame. Played back under OpenBIOS
+itself, every run was byte-identical.
+
+| | skip, offset 322 | skip, no offset |
+|---|---|---|
+| Joust NTSC, Joust PAL | identical, all RAM | diverged |
+| Centipede and Galaga, NTSC and PAL | same zero page and screen (RAM differs only where the BIOS left bytes the game never clears) | diverged |
+| Pole Position II NTSC | same screen; 3 zero-page bytes differ | diverged |
+| Robotron NTSC | **diverged** from game frame 309 | diverged |
+
+The other way round (recorded with skip, played under OpenBIOS with
+`-playback_offset -322`): Joust NTSC identical; Centipede PAL the same zero
+page and screen.
+
+Robotron shows the limit. Its interrupt handler saves A at `$D56B`. At game
+frame 309 the interrupt lands on a different instruction, and the game goes
+its own way from there. The hand-over frame was right, but not the hand-over
+*cycle*. `-bios skip` starts where OpenBIOS hands over within the frame:
+
+- On PAL that is exact, 1,653 cycles in.
+- On NTSC it is 972 cycles against OpenBIOS's 971.69. MAME holds the NTSC CPU
+  clock as a whole 1,789,772 Hz, so the CPU's cycles drift against the frame,
+  and frame 0 cannot sit where frame 322 does.
+
+Starting at frame 23 instead, where the CPU's cycles line up to 0.007 of a
+cycle, only moved the divergence to game frame 338. A game timed to the cycle
+needs the same BIOS, or a recording made where it will be played.
+
+**Force a recording only after checking it.** Compare RAM at a matched game
+frame, or watch it, before trusting a forced playback as a measurement. A
+game that waits for vertical blank and does not read its own leftovers
+usually lines up exactly. One timed to the cycle may not.
+
 ## Text in a tile-based game is not ASCII, and greps for it come back empty
 
 A day-one check recorded a real anomaly: unlike its sibling cartridges, this

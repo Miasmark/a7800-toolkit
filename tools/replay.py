@@ -54,7 +54,7 @@ def replay(mame, rom, inp, log, seconds, rompath, loop=None, skip=None):
            "-cart", os.path.abspath(rom),
            "-autoboot_script", PROBE,
            "-input_directory", os.path.dirname(inp),
-           "-playback", os.path.basename(inp),
+           "-playback", os.path.basename(inp)] + capture.playback_args() + [
            "-video", "none", "-sound", "none", "-nothrottle",
            "-skip_gameinfo"]
     if seconds:
