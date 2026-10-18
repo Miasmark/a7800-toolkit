@@ -4741,6 +4741,48 @@ def t_mame_palette():
     return "MAME's $17 gold and $0D grey; A7800_PALETTE=mame switches ntsc7800()"
 
 
+def t_colortest():
+    """colortest.py: the committed test cartridges are what it builds, the NTSC
+    7800 one is signed, and compare reads known colours back out of a picture
+    of the grid at an awkward scale with a border round it."""
+    import colortest
+    import sign7800
+    d = tempfile.mkdtemp(prefix="colortest-")
+    colortest.build(d)
+    for name in ("colortest-2600-ntsc.a26", "colortest-2600-pal.a26",
+                 "colortest-7800-ntsc.a78", "colortest-7800-pal.a78"):
+        built = io.open(os.path.join(d, name), "rb").read()
+        committed = os.path.join(ROOT, "tests", "carts", name)
+        assert io.open(committed, "rb").read() == built, (
+            "tests/carts/%s is stale: python tools/colortest.py build -o tests/carts" % name)
+    assert sign7800.verify(io.open(os.path.join(d, "colortest-7800-ntsc.bin"), "rb").read())
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return "cartridges match (compare not checked: needs Pillow)"
+    # draw the grid as a renderer would, 2.6 pixels a line, 3 a 7800 pixel, inside a border
+    g = colortest.GEOMETRY
+    sy, sx, x0, y0 = 2.6, 3.0, 37, 51
+    img = Image.new("RGB", (int(160 * sx) + 2 * x0, int(g["total"] * sy) + 2 * y0), (0, 0, 0))
+    dr = ImageDraw.Draw(img)
+    want = {}
+    for line in list(range(g["bar"])) + list(range(g["total"] - g["bar"], g["total"])):
+        dr.rectangle([x0, y0 + line * sy, x0 + 160 * sx - 1, y0 + (line + 1) * sy - 1],
+                     fill=(236, 236, 236))
+    for row in range(16):
+        for col in range(16):
+            rgb = ((row * 16 + col) % 251, (row * 37) % 256, (col * 53) % 256)
+            want[(row << 4) | col] = rgb
+            top = y0 + (g["row_first"] + g["row_pitch"] * row) * sy
+            dr.rectangle([x0 + (10 * col + 1) * sx, top, x0 + (10 * col + 9) * sx - 1,
+                          top + g["row_lines"] * sy - 1], fill=rgb)
+    assert colortest.guess_columns(img) == 16
+    got = colortest.sample(img, 16)
+    wrong = [c for c in want if got[c] != want[c]]
+    assert not wrong, "cells read wrong: %s" % ", ".join("$%02X" % c for c in wrong[:8])
+    return "4 cartridges match a fresh build; 256 cells read back exactly"
+
+
 def t_patchset():
     """The patch-set format, against a cartridge invented for the purpose.
 
@@ -5526,6 +5568,7 @@ def main():
     r.check("zone bills", t_zonebill)
     r.check("regression runner", t_regress)
     r.check("MAME palette", t_mame_palette)
+    r.check("colour test", t_colortest)
     r.check("recipes carry no payload", t_portkit_refuses_payload)
     r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)

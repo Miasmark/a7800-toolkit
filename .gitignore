@@ -11,6 +11,7 @@ __pycache__/
 # dump from this repo. Every tool here takes a ROM path as an argument; none
 # is bundled.
 *.a78
+*.a26
 *.bin
 *.rom
 *.car
@@ -23,6 +24,10 @@ __pycache__/
 # ...except the test cartridge this repo builds from source (tests/synth.py):
 # it is ours, deterministic, and the tests compare a fresh build against it.
 !tests/carts/*.a78
+
+# ...and the colour test cartridges tools/colortest.py builds (2600 ones as .a26),
+# for the same reason.
+!tests/carts/colortest-*.a26
 
 # ...and MAME's own dump of the RIOT test cartridge's timer, which t_sim_machine compares the
 # simulator against (a 4K RAM image, not a cartridge).
