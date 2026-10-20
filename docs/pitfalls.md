@@ -1192,3 +1192,67 @@ CTRL bit 4 had been assumed one-byte characters, which halves every glyph's
 width; the same rebuild showed it. **Before reporting that a format is
 unsupported, reproduce what the machine draws with the format you assumed, and
 look.**
+
+## Writing a recorded state back mid-frame restarts the game's own frame counters
+
+A recording drifts on a newer build of the same game. To keep it in step, a replay can write each
+picture's recorded game state back. Karateka's MARIA Edition was checked that way, at every flip.
+- **What it showed:** the status bar's arrows grey instead of blue in some frames, about one in
+  four at times.
+- **What it was:** the game's DLI handler counts its calls in RAM (`$0F14`), and its colour sets in
+  another (`$0F0E`); it clears both in its vertical blank. The flip comes mid-frame. Writing the
+  recorded state there put the recorded counts back, so the next colour sets landed on the wrong
+  DLIs.
+- **Left alone:** with those two bytes not forced, all 1,957 level 3 frames of the same stretch
+  were right.
+
+**Leave out of a forced state anything counted within the frame**, such as DLI counters, line
+counters or a per-frame phase, or write the state at the frame's start. Before believing a fault
+seen only in a forced replay, look at it with the suspect bytes unforced.
+
+## MAME numbers snapshots from the folder's next free file, so a rerun's pictures don't start at 0000
+
+With `-snapshot_directory` and `video:snapshot()`, MAME names each picture by the next unused
+number in its folder. Run again into the same folder: the new pictures are `0101`... and the first
+run's `0000`-`0100` stay.
+
+A comparison that read `0000`-`0100` after each of six builds compared the first build's
+pictures six times. It led to three wrong conclusions about which build fixed a line of colour
+(Karateka's MARIA Edition, FINDINGS "The flickering arrows", corrected). Empty the folder before
+each run, or count its files before and after and read only the new ones.
+
+## A DLI's handler that runs into the next DLI moves that one's work by lines, in some frames only
+
+The 7800's NMI can't be masked. A game that holds a second DLI off until the first handler is done
+(because both use the same scratch bytes, say) runs the second one late. A game that doesn't
+interrupts its own handler. Either way the second handler's work lands late, but only in the frames
+where the first runs long. A music tick is the usual culprit, every other frame or every fourth,
+so the fault flickers. A machine that leaves the CPU a few per cent fewer cycles than MAME shows it
+where MAME doesn't.
+
+Measured on Karateka's MARIA Edition:
+- The music DLI's handler ended as late as line 213.6, and the status bar's colour DLI arrived at
+  line 214.4. That left 0.9 lines of margin in MAME.
+- On an FPGA core the arrows' colour flickered.
+- `probes/dlimargin.lua` lists every handler's end and margin, and the frames where one overran.
+
+The fix there was to write the colours in the NMI itself, before the game's handler, in the frames
+where that handler couldn't come on time. Two timings matter when doing that (MAME, with the
+a7800 fork's MARIA timing):
+- A palette write made at once, or after one `WSYNC`, still reached the last line of the zone the
+  DLI flagged: that line is on screen during the line after the NMI's.
+- After two `WSYNC`s it didn't. In 101 pictures the zone's last line changed in 50 with none or
+  one, and in none with two or more.
+- Writing every frame, not only when late, delays the game's own handler by those lines.
+
+## On Windows, MAME's Left Alt button sends the keys to the window's menu
+
+MAME's default for a 7800 joystick's button 2 is Left Alt. In a window, Windows takes a lone tap of
+Left Alt for the window's menu, and the keys go there, not to MAME, until the next tap. The button
+seems to lock up, and the recording has no presses for that stretch. A recording holds only what
+MAME received, so nothing in the game is wrong.
+
+Seen on a Karateka session: a fight with punches and no button-2 press for 190 frames.
+`tools/session.py` now passes `templates/mame-ctrlr/a7800-keys.cfg` on Windows, which puts button 2
+on Space or Left Shift (`--alt-ok` keeps MAME's keys). Recordings store buttons, not keys, so old
+and new recordings play back the same.

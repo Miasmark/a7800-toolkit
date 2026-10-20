@@ -214,6 +214,31 @@ SuperGame if it does. So `2x32K` is two linear 32K ROMs and `2x128K` is two
 SuperGame 128K ones, and every other flag — POKEY at `$4000` or `$0800`, banked
 RAM — applies per side as usual.
 
+**One form outside the spec: the SuperGame RAM bit without bank RAM** (`$2006`:
+Bankset, SuperGame, RAM at `$4000`).
+- The openFPGA 7800 core for the Analogue Pocket (`cart.sv`) maps bit 2 as 16K of
+  RAM at `$4000` whatever else is set. It splits that RAM by chip only for bank
+  RAM (bit 14), so here both chips see one RAM: the CPU writes it and MARIA draws
+  from it. Karateka's MARIA Edition v1 is built this way (each scene's graphics
+  written there as the scene loads).
+- a7800's `bankset.cpp` ignores bit 2 on a bankset and fixes the second-last bank
+  at `$4000`. MAME has no such board either, stock or with the Atari fork's 11
+  bankset forms.
+- `Cart` lays the form out as the core does, sets `sharedram` and warns.
+  `--low bank6` gives a7800's layout.
+- The simulator lets MARIA read the CPU's RAM there (`Bus.maria_ram`), so
+  `firstlook.py` rebuilds such a game's screens. Before, they showed bank 6's
+  bytes where the game's graphics were.
+
+**Checked against the Bankset Test Suite v1** (2026-10-20). Its ten test
+cartridges: 2x32K, 2x48K and 2x52K flat, each with and without POKEY at `$4000`;
+2x32K RAM with POKEY at `$0800`; 2x128K; 2x128K RAM; and 2x128K RAM with POKEY at
+`$0800`.
+- `firstlook.py --engine sim` rebuilds each one's screens. Every one shows what
+  the suite's README says a correct implementation shows: its title, and on the
+  2x128K forms `BANKSET 1`, `BANK 0` / `BANK 1`, and `BANK 6` or `BANKRAM 1`.
+- `cart.py` describes all ten the same before and after the `sharedram` change.
+
 This is worth knowing when hunting for artwork: on a bankset cartridge the
 graphics are not hiding in an unreached corner of the CPU's ROM. They are in
 the other half, at addresses the CPU never reads.

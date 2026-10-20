@@ -108,8 +108,9 @@ class Collector(sim.Observer):
         frame, start, writes, bank0 = self._cur
         self.snaps[frame] = {"ram": ram_bytes(self.bus), "bank": self.bus.bank,
                              "regs": regs_text(frame, self.bus, start, writes)}
-        if self.bus.mram is not None:
-            self.snaps[frame]["mram"] = bytes(self.bus.mram)     # MARIA's bank RAM at $4000
+        mram = self.bus.maria_ram()
+        if mram is not None:
+            self.snaps[frame]["mram"] = mram     # the cartridge RAM MARIA sees at $4000
         self._cur = None
 
     def finish(self):

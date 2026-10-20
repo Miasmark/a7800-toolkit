@@ -28,6 +28,12 @@ run a probe over it with `-playback` (probes/reclength.lua first, with
 MAME and the BIOS are found the way tools/capture.py finds them:
 --mame / A7800_MAME and --rompath / A7800_ROMPATH. Set A7800_BIOS=a7800pr to
 use the open BIOS in that slot (docs/bios.md).
+
+On Windows, button 2 is Space or Left Shift instead of MAME's Left Alt
+(templates/mame-ctrlr/a7800-keys.cfg): in a window, a lone Left Alt tap opens
+the window's menu and the keys stop reaching MAME until the next tap, so the
+button seems to lock up and the recording has no presses there
+(docs/pitfalls.md). --alt-ok keeps MAME's own keys.
 """
 import argparse
 import glob
@@ -68,6 +74,18 @@ def machine_for(rom):
     return "a7800p" if str(region).lower() == "pal" else "a7800"
 
 
+CTRLR = os.path.join(HERE, "..", "templates", "mame-ctrlr")
+
+
+def keys_args(args):
+    """Button 2 off Left Alt, on Windows (the module docstring), unless --alt-ok."""
+    if getattr(args, "alt_ok", False) or os.name != "nt":
+        return []
+    if not os.path.exists(os.path.join(CTRLR, "a7800-keys.cfg")):
+        return []
+    return ["-ctrlrpath", os.path.abspath(CTRLR), "-ctrlr", "a7800-keys"]
+
+
 def launch(args, extra):
     mame = capture.find_mame(args.mame)
     if not mame:
@@ -83,7 +101,7 @@ def launch(args, extra):
     cmd = [mame, machine] + bios + [
            "-rompath", rompath,
            "-cart", os.path.abspath(args.rom), "-skip_gameinfo", "-window",
-           "-input_directory", folder] + extra
+           "-input_directory", folder] + keys_args(args) + extra
     print(" ".join('"%s"' % c if " " in c else c for c in cmd))
     subprocess.call(cmd)
 
@@ -132,6 +150,8 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mame", help="MAME executable (or A7800_MAME)")
     ap.add_argument("--rompath", help="folder with the BIOS (or A7800_ROMPATH)")
+    ap.add_argument("--alt-ok", action="store_true",
+                    help="keep MAME's own keys (button 2 on Left Alt) on Windows too")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("record", help="record a session")
     r.add_argument("rom")

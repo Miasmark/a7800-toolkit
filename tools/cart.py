@@ -342,11 +342,15 @@ def pick_mapper(size, header=None, mapper=None, low=None, bankset=False):
         elif flags & 0x0002:
             mapper = "supergame"
             if low is None and bankset:
-                # as the a7800 fork's bankset.cpp does it, whatever the SuperGame low-memory
-                # bits say: with bank RAM ($4000) the 16K at $4000 is RAM, with POKEY at $800
-                # and no RAM it reads $FF, and otherwise the second-last bank is fixed there
+                # as the a7800 fork's bankset.cpp does it: with bank RAM ($4000) the 16K at
+                # $4000 is RAM, with POKEY at $800 and no RAM it reads $FF, and otherwise the
+                # second-last bank is fixed there. One exception: the SuperGame RAM bit ($0004)
+                # without bank RAM is one 16K of RAM both chips see, as the openFPGA 7800 core
+                # maps it (not in the BankSet spec; the fork maps the bank there instead, so
+                # Cart warns: `sharedram`)
                 low = ("ram" if flags & 0x4000 else
-                       "none" if flags & 0x8000 else "bank6")
+                       "none" if flags & 0x8000 else
+                       "ram" if flags & 0x0004 else "bank6")
             elif low is None:
                 low = ("bank6" if flags & 0x0010 else
                        "ram" if flags & 0x0004 else
@@ -431,7 +435,20 @@ class Cart(object):
             # register: only $8000-$BFFF selects (a store there is `STA $E000,Y` filling MARIA's RAM,
             # which the disassembler used to list as an unresolved bank switch)
             self.map.switch = (self.map.switch[0], 0xBFFF)
+        # a bankset with the SuperGame RAM bit and no bank RAM: one 16K at $4000 that the
+        # CPU and MARIA share (pick_mapper)
+        ct = (self.info or {}).get("cart_type", 0)
+        self.sharedram = bool(self.bankset and not self.bankram and ct & 0x0004
+                              and self.map.name == "supergame" and self._mapper_arg is None
+                              and self._low_arg is None)
         self.warnings = []
+        if self.sharedram:
+            self.warnings.append(
+                "bankset with the SuperGame RAM bit ($0004) and no bank RAM ($4000): laid out "
+                "as one 16K of RAM at $4000 that both chips see, as the openFPGA 7800 core maps "
+                "it. This form is not in the BankSet spec: the a7800 emulator puts the "
+                "second-last bank at $4000 instead (--low bank6 to see that layout), and MAME "
+                "has no such board")
         self._check_pokey()
         self._check_activision()
 

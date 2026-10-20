@@ -711,7 +711,7 @@ class SimEngine(object):
         if bus.dpph is None or (bus.ctrl & 0x60) != 0x40:
             return
         d = parse_regs_text(self._simprobe.regs_text(bus.frame, bus, {}, []))
-        scr = Screen(self.c, self._simprobe.ram_bytes(bus), d, bus.mram)
+        scr = Screen(self.c, self._simprobe.ram_bytes(bus), d, bus.maria_ram())
         try:
             objs = scr.objects()
         except Exception:                                    # noqa: BLE001

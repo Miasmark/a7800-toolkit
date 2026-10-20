@@ -626,6 +626,15 @@ class Bus(object):
             return 0
         return self.mem(a)
 
+    def maria_ram(self):
+        """The 16K of cartridge RAM MARIA sees at $4000, or None: her own bank RAM, or (a
+        bankset with the SuperGame RAM bit, cart.sharedram) the RAM the CPU writes there."""
+        if self.mram is not None:
+            return bytes(self.mram)
+        if self.mcart is not None and getattr(self.cart, "sharedram", False):
+            return bytes(self.ram[0x4000:0x8000])
+        return None
+
     def mem(self, a):
         """A byte as MARIA reads it: RAM (through its mirrors), or the cartridge."""
         f = fold(a & 0xFFFF)
@@ -634,6 +643,9 @@ class Bus(object):
         if self.mcart is not None and a >= self.rom_low:
             if self.mram is not None and 0x4000 <= a < 0x8000:
                 return self.mram[a - 0x4000]
+            for lo, hi in self.cart_ram:            # RAM both chips share (cart.sharedram)
+                if lo <= a < hi:
+                    return self.ram[a]
             sp = self.mcart.space_of(a, self.bank)
             if sp is not None:
                 try:
