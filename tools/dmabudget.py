@@ -5,7 +5,7 @@ What MARIA leaves you: the 7800's cycle budget, for a given screen.
     python tools/dmabudget.py --uniform 12,16,4,8
     python tools/dmabudget.py --zone 16:2@8 --zone 16:6@16 --zone 16:0@0
     python tools/dmabudget.py --uniform 12,16,4,8 --afford
-    python tools/dmabudget.py --uniform 12,16,4,8 --timing mame0264
+    python tools/dmabudget.py --uniform 12,16,4,8 --timing fork
 
 MARIA draws by DMA and halts the 6502 while it does, so on the 7800 "how much
 can my game compute" is a question about how much it is drawing. Every other
@@ -65,12 +65,17 @@ ACCURACY
     by PREDICTING four shapes it had never seen. All four landed within 0.3%.
     Worst residual anywhere: 56 cycles, which is 0.2% of a frame.
 
-    TWO TIMINGS. The numbers above were measured on MAME 0.264. The a7800 fork (and now MAME
+    THREE TIMINGS. The numbers above were measured on MAME 0.264. The a7800 fork (and now MAME
     built with its MARIA work, see docs/emulation.md) changed MARIA's DMA: a 430-clock limit
     (was 426), a 3-clock penalty for the first hole in each object's graphics, 8 clocks of
     last-line shutdown (was 6), and DMA that is billed per scanline in whole CPU cycles.
-    `--timing fork` (the default) is that machine, measured with tools/dmameasure.py over 45
+    `--timing fork` is that machine, measured with tools/dmameasure.py over 45
     display shapes: worst residual 0.85%. `--timing mame0264` is the model as first fitted.
+    `--timing guide` (the default) is the 7800 Software Guide's DMA timing as revised in
+    October 2026 from hardware measurements, which the patched MAME now follows: a display
+    interrupt costs no DMA time (12.75 cycles here, the 6502's own entry and exit, where the
+    fork charges 17.4), a holey character object costs 6 or 9 colour clocks where a direct
+    one costs 3 (HOLE_CHAR), and a frame's first DMA 8 colour clocks more.
     The two agree to within 1% on plain screens; they differ where it matters:
         holey zones   the first fetch of each object still costs a hole penalty, so a holey
                       zone is no longer "exactly the byte cost": +0.99 cycles a line and
@@ -106,12 +111,24 @@ TIMINGS = {
                      DLI_COST=16.6,     # one display interrupt: MARIA's signal plus the 6502's
                                         # own entry and exit (24 zones and 12 agreed, 16.9, 16.3)
                      HOLE_LINE=0.0,     # holey zones: free pixels and nothing else
-                     HOLE_OBJ=0.0),
-    # the a7800 fork's MARIA (and MAME built with it): tools/dmameasure.py --fit, 45 shapes
+                     HOLE_OBJ=0.0, HOLE_CHAR=0.0),
+    # the 7800 Software Guide's DMA timing as revised in October 2026, which the patched MAME
+    # (master, atari-dev and atari-0.289 on Miasmark/mame-Atari8bit7800) follows: no DMA time
+    # for a DLI, 6 or 9 colour clocks for a holey character object, 8 more on a frame's first
+    # DMA (2 CPU cycles a frame, inside PER_LINE's rounding). tools/dmameasure.py --fit, 49
+    # shapes, worst residual 3.1% (single-wide holey characters, where MAME rounds each line
+    # to whole CPU cycles), every other shape within 1%
+    "guide": dict(PER_LINE=5.642, PER_ZONE=1.711, PER_OBJ=1.997, PER_BYTE=0.755,
+                  FIVE_XTRA=0.483, DLI_COST=12.75,   # the 6502's own entry and exit, no DMA
+                  HOLE_LINE=0.809, HOLE_OBJ=0.567,
+                  HOLE_CHAR=0.756),     # a holey character object: this more, per byte a character
+    # the a7800 fork's MARIA (and MAME built with it until October 2026): tools/dmameasure.py
+    # --fit, 45 shapes
     "fork": dict(PER_LINE=5.624, PER_ZONE=1.888, PER_OBJ=1.990, PER_BYTE=0.755,
                  FIVE_XTRA=0.483, DLI_COST=17.4,
                  HOLE_LINE=0.988,       # a holey zone pays this each scanline ...
-                 HOLE_OBJ=0.510),       # ... and this per object: the first-hole penalty
+                 HOLE_OBJ=0.510,        # ... and this per object: the first-hole penalty
+                 HOLE_CHAR=0.0),        # (a character object pays the same as a direct one)
 }
 LINE_CAP = 108.62    # the most one scanline can cost MARIA: its DMA limit (measured, the same
                      # on both machines; the 6502 keeps the other ~4.9 cycles of the line)
@@ -121,15 +138,15 @@ TIMING = None
 def set_timing(name):
     """Make `name` ("fork" or "mame0264") the constants the model uses."""
     global TIMING, PER_LINE, PER_ZONE, PER_OBJ, PER_BYTE, FIVE_XTRA, DLI_COST
-    global HOLE_LINE, HOLE_OBJ
+    global HOLE_LINE, HOLE_OBJ, HOLE_CHAR
     k = TIMINGS[name]
     TIMING = name
     PER_LINE, PER_ZONE, PER_OBJ, PER_BYTE = k["PER_LINE"], k["PER_ZONE"], k["PER_OBJ"], k["PER_BYTE"]
     FIVE_XTRA, DLI_COST = k["FIVE_XTRA"], k["DLI_COST"]
-    HOLE_LINE, HOLE_OBJ = k["HOLE_LINE"], k["HOLE_OBJ"]
+    HOLE_LINE, HOLE_OBJ, HOLE_CHAR = k["HOLE_LINE"], k["HOLE_OBJ"], k["HOLE_CHAR"]
 
 
-set_timing("fork")
+set_timing("guide")
 
 REGIONS = {                      # lines/frame, CPU Hz, frames/sec
     # 263 x 113.5 = 29,850.5 cycles: measured on MAME (a cartridge that never turns
@@ -165,6 +182,8 @@ class Zone(object):
             per_obj = (PER_OBJ + bytes_per_obj * PER_BYTE
                        + (FIVE_XTRA if self.five else 0))
         hole = (HOLE_LINE + HOLE_OBJ * self.count) if self.holey and self.count else 0.0
+        if self.holey and self.chars:
+            hole += HOLE_CHAR * self.chars * self.count   # a holey character object pays more
         return PER_LINE + per_obj * self.count + hole
 
     def saturated(self):
@@ -310,9 +329,9 @@ def main():
     ap.add_argument("--uniform", metavar="ZONES,LINES,COUNT,WIDTH",
                     help="shorthand for identical zones, e.g. 12,16,4,8")
     ap.add_argument("--region", choices=sorted(REGIONS), default="ntsc")
-    ap.add_argument("--timing", choices=sorted(TIMINGS), default="fork",
-                    help="whose MARIA timing: the a7800 fork's (also current MAME with its work "
-                         "ported), or MAME 0.264's")
+    ap.add_argument("--timing", choices=sorted(TIMINGS), default="guide",
+                    help="whose MARIA timing: the 7800 Software Guide's (October 2026, the "
+                         "patched MAME's), the a7800 fork's, or MAME 0.264's")
     ap.add_argument("--afford", action="store_true",
                     help="also report how many more objects the leftover fits")
     args = ap.parse_args()

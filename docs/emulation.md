@@ -253,7 +253,10 @@ what the fork cannot give: the Lua taps every probe here uses. The port is a pat
 repository (all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-clock first-hole penalty,
 8 clocks of last-line shutdown, and each line shown a pixel at a time so a mid-scanline register write
 appears mid-scanline; and two rules the Bankset spec sets, which warn once and refuse: a display list fetched from the
-cartridge (ROM or RAM) reads as empty, and an opcode fetched from bank RAM reads `$FF` -- docs/cartridges.md); current MAME's POKEY already has the fork's POKEY work. Run with
+cartridge (ROM or RAM) reads as empty, and an opcode fetched from bank RAM reads `$FF` -- docs/cartridges.md); current MAME's POKEY already has the fork's POKEY work.
+Since October 2026 its MARIA follows the 7800 Software Guide's revised DMA timing instead of the fork's
+where the two differ: no DMA time for a display interrupt, 6 or 9 colour clocks for a holey character
+object, and 8 more for a frame's first DMA (docs/hardware.md, "Three timings"). Run with
 `-bios a7800pr -rompath <folder>` like any MAME here (0.289 wants `7800.u7` for the plain `a7800` BIOS),
 or with `-bios skip`, which needs no BIOS file at all (below).
 

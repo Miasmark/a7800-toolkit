@@ -286,9 +286,55 @@ def t_dmabudget():
     heavy = sum(d.Zone(16, 8, 16).cycles() for _ in range(12))
     if abs(heavy - (1960 - 472) * 14.0156) / ((1960 - 472) * 14.0156) > 0.02 or not d.Zone(16, 8, 16).saturated():
         raise AssertionError("a saturated screen: model %.0f" % heavy)
-    d.set_timing("fork")
-    return ("12 measured configurations reproduced (MAME 0.264, worst %.1f%%), and %d for the "
-            "fork's timing (worst %.1f%%)" % (100 * worst, len(fork), 100 * fworst))
+    # the 7800 Software Guide's timing (revised October 2026), as the patched MAME follows it:
+    # iteration counts off the counting cartridge by tools/dmameasure.py, as above
+    d.set_timing("guide")
+    guide = [
+        (12, 16, 0, 1, 4, {}, 1882),
+        (12, 16, 12, 1, 4, {}, 1813),
+        (12, 16, 12, 2, 4, {}, 1744),
+        (12, 16, 12, 2, 12, {}, 1579),
+        (12, 16, 12, 4, 8, {}, 1441),
+        (12, 16, 12, 3, 16, {}, 1303),
+        (12, 16, 12, 2, 8, {'holey': True}, 1799),
+        (12, 16, 12, 2, 8, {'dli': True}, 1650),
+        (12, 16, 12, 2, 20, {'holey': True}, 1799),
+        (12, 16, 12, 2, 20, {'dli': True}, 1403),
+        (12, 16, 12, 4, 8, {'holey': True}, 1730),
+        (12, 16, 12, 4, 8, {'dli': True}, 1430),
+        (24, 8, 24, 2, 8, {'holey': True}, 1797),
+        (24, 8, 24, 2, 8, {'dli': True}, 1638),
+        (24, 8, 24, 2, 20, {'holey': True}, 1797),
+        (24, 8, 24, 2, 20, {'dli': True}, 1390),
+        (24, 8, 24, 4, 8, {'holey': True}, 1729),
+        (24, 8, 24, 4, 8, {'dli': True}, 1417),
+        (24, 8, 24, 2, 4, {'holey': True, 'chars': 1}, 1770),
+        (24, 8, 24, 2, 4, {'holey': True, 'chars': 2}, 1743),
+        (24, 8, 24, 4, 4, {'holey': True, 'chars': 1}, 1660),
+        (24, 8, 24, 4, 4, {'holey': True, 'chars': 2}, 1618),
+    ]
+    gworst = 0.0
+    for nz, zl, used, nobj, width, ex, iters in guide:
+        chars = ex.get("chars", 0)
+        zones = [d.Zone(zl, nobj if z < used else 0, width, five=bool(chars), chars=chars,
+                        holey=ex.get("holey", False), dli=ex.get("dli", False)) for z in range(nz)]
+        model = sum(z.cycles() for z in zones)
+        measured = (1960 - iters) * 14.0156
+        err = abs(model - measured) / measured
+        gworst = max(gworst, err)
+        if err > 0.035:     # single-wide holey characters reach 3.1%: MAME rounds each line
+            raise AssertionError("guide timing, %s: model %.0f vs measured %.0f (%.1f%%)"
+                                 % ((nz, zl, used, nobj, width, ex), model, measured, 100 * err))
+    dli_fork = d.TIMINGS["fork"]["DLI_COST"]
+    if not d.DLI_COST < dli_fork - 4:
+        raise AssertionError("the guide's DLI costs no DMA time: %.2f, the fork's %.2f"
+                             % (d.DLI_COST, dli_fork))
+    if d.Zone(8, 2, 4, chars=2, holey=True).cycles() <= d.Zone(8, 2, 4, chars=1, holey=True).cycles():
+        raise AssertionError("a holey double-wide character object costs more than a single-wide one")
+    d.set_timing("guide")
+    return ("12 measured configurations reproduced (MAME 0.264, worst %.1f%%), %d for the "
+            "fork's timing (worst %.1f%%) and %d for the guide's (worst %.1f%%)"
+            % (100 * worst, len(fork), 100 * fworst, len(guide), 100 * gworst))
 
 
 def t_dmameasure():

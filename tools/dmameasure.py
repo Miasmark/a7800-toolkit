@@ -14,9 +14,11 @@ fork), prints the cost of each in CPU cycles, and the difference between emulato
 
 With `--fit` it also fits `tools/dmabudget.py`'s constants (cycles per line, per zone, per
 object, per graphics byte) to each emulator's numbers by least squares and prints them beside
-the model's, which is how the model was re-derived when MARIA's timing changed (the a7800
-fork's, now in MAME: a 430-clock DMA limit, a first-hole penalty, an 8-clock last-line
-shutdown). The BIOS folder comes from --rompath or A7800_ROMPATH.
+the model's, which is how the model was re-derived when MARIA's timing changed: the a7800
+fork's (a 430-clock DMA limit, a first-hole penalty, an 8-clock last-line shutdown), and then
+the 7800 Software Guide's revision of October 2026 (no DMA time for a DLI, 6 or 9 clocks for a
+holey character object, 8 more at the start of a frame), which the patched MAME follows. The
+BIOS folder comes from --rompath or A7800_ROMPATH.
 
 The ceiling (DMA off) is 1,960 iterations of a 14.0156-cycle loop on every emulator tried.
 """
@@ -31,6 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 LOOP = 14.0156          # cycles per iteration, calibrated with the `nops` parameter
 CEILING = 1960          # iterations per frame with DMA off (12 zones of 16 lines)
+FIVE_XTRA = 0.483       # a 5-byte entry over a 4-byte one, per scanline: the same in every timing
 
 # (name, build kwargs, zones, lines) -- the shapes the model was fitted to, plus the ones
 # the fork's timing changes: holey fetches, display interrupts, and a line heavy enough to
@@ -112,12 +115,19 @@ def fit_shapes():
         for nobj, width in ((2, 8), (2, 20), (4, 8)):
             out.append((nz, zl, nz, nobj, width, {"holey": True}))
             out.append((nz, zl, nz, nobj, width, {"dli": True}))
+    # holey character objects: the Software Guide's 2026 timing charges them 6 or 9 colour
+    # clocks where a direct one pays 3 (HOLE_CHAR below is the extra, per byte per character)
+    for nobj, width in ((2, 4), (4, 4)):
+        out.append((24, 8, 24, nobj, width, {"holey": True, "indirect": True}))
+        out.append((24, 8, 24, nobj, width, {"holey": True, "indirect": True, "charwidth1": True}))
     return out
 
 
 def run_fit(emu, rompath):
-    """Fit PER_LINE, PER_ZONE, PER_OBJ, PER_BYTE, HOLE (per object-line, holey) and DLI to one
-    emulator by least squares. Needs numpy. Returns (constants, worst relative residual)."""
+    """Fit PER_LINE, PER_ZONE, PER_OBJ, PER_BYTE, HOLE_LINE and HOLE_OBJ (a holey zone, per
+    scanline and per object-line), HOLE_CHAR (more per object-line and byte per character, holey
+    character objects) and DLI to one emulator by least squares: the same terms as
+    tools/dmabudget.py's model. Needs numpy. Returns (constants, worst relative residual)."""
     import numpy as np
     cc = costcart()
     work = tempfile.mkdtemp(prefix="dmafit-")
@@ -132,13 +142,18 @@ def run_fit(emu, rompath):
         cost = (CEILING - it) * LOOP
         ol = used * zl * nobj                    # object-lines
         holey = ex.get("holey", False)
-        A.append([192, nz, ol, 0 if holey else ol * width, ol if holey else 0,
+        chars = (2 if ex.get("charwidth1") else 1) if ex.get("indirect") else 0
+        A.append([192, nz, ol,
+                  0 if holey else ol * width * ((1 + chars) if chars else 1),
+                  used * zl if holey else 0, ol if holey else 0, ol * chars if holey else 0,
                   nz if ex.get("dli") else 0])
-        b.append(cost)
+        # character objects have 5-byte entries: their known extra comes off first
+        b.append(cost - (FIVE_XTRA * ol if chars else 0))
     A, b = np.array(A, float), np.array(b, float)
     sol = np.linalg.lstsq(A, b, rcond=None)[0]
     res = np.abs(A @ sol - b) / b
-    names = ("PER_LINE", "PER_ZONE", "PER_OBJ", "PER_BYTE", "HOLE", "DLI_COST")
+    names = ("PER_LINE", "PER_ZONE", "PER_OBJ", "PER_BYTE", "HOLE_LINE", "HOLE_OBJ", "HOLE_CHAR",
+             "DLI_COST")
     sol = dict(zip(names, sol))
     sol["PER_LINE"] = sol["PER_LINE"]            # (192 lines were drawn in every shape)
     return sol, float(res.max()), len(b)
@@ -184,15 +199,14 @@ def main(argv=None):
     if args.fit:
         import dmabudget as d
         print("\nfitted constants, CPU cycles")
-        print("  %-8s %8s %8s %8s %8s %8s %8s   worst  runs" % (
-            "", "PER_LINE", "PER_ZONE", "PER_OBJ", "PER_BYTE", "HOLE", "DLI"))
+        cols = ("PER_LINE", "PER_ZONE", "PER_OBJ", "PER_BYTE", "HOLE_LINE", "HOLE_OBJ", "HOLE_CHAR",
+                "DLI_COST")
+        print("  %-8s" % "" + "".join("%10s" % c for c in cols) + "   worst  runs")
         for l in labels:
             sol, worst, n = run_fit(emus[l], args.rompath)
-            print("  %-8s %8.3f %8.3f %8.3f %8.3f %8.3f %8.2f  %5.2f%%  %d" % (
-                l, sol["PER_LINE"], sol["PER_ZONE"], sol["PER_OBJ"], sol["PER_BYTE"],
-                sol["HOLE"], sol["DLI_COST"], 100 * worst, n))
-        print("  %-8s %8.3f %8.3f %8.3f %8.3f %8s %8.2f" % (
-            "model", d.PER_LINE, d.PER_ZONE, d.PER_OBJ, d.PER_BYTE, "-", d.DLI_COST))
+            print("  %-8s" % l + "".join("%10.3f" % sol[c] for c in cols)
+                  + "  %5.2f%%  %d" % (100 * worst, n))
+        print("  %-8s" % ("model, " + d.TIMING)[:8] + "".join("%10.3f" % getattr(d, c) for c in cols))
     return 0
 
 

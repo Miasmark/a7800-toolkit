@@ -132,7 +132,7 @@ Two more costs, measured later and now in `dmabudget.py`:
 | one display interrupt (MARIA's signal plus the 6502's entry and exit) | 16.6 |
 | a graphics byte in a region **holey DMA** suppresses | 0 |
 
-**Two timings.** The table above is MAME 0.264's. The a7800 fork's MARIA (current MAME has it
+**Three timings.** The table above is MAME 0.264's. The a7800 fork's MARIA (current MAME has it
 once its work is ported, docs/emulation.md) charges slightly differently, and
 `tools/dmameasure.py` re-measures it on any emulator you point it at: 45 display shapes, fitted
 by least squares, worst residual 0.85%.
@@ -155,6 +155,25 @@ says 22,583 -- past the limit the 6502 keeps about 4.9 cycles of the line and th
 asked MARIA to draw is not drawn. `dmabudget.py` applies the cap per scanline and says which zones
 reach it. MAME with the fork's MARIA work and the fork itself agree on all 14 shapes compared,
 holey and interrupt shapes included. (`dmabudget.py --timing mame0264` is the first set.)
+
+**The 7800 Software Guide's timing, revised in October 2026** from hardware measurements
+(Appendix 3, "DMA Timing"), is the third set and `dmabudget.py`'s default (`--timing guide`).
+The patched MAME (Miasmark/mame-Atari8bit7800: `master`, `atari-dev`, `atari-0.289`) follows it,
+and `dmameasure.py --fit` measured it there over 49 shapes: every one within 1% but single-wide
+holey characters, 3.1%, where MAME rounds each line's DMA to whole CPU cycles. Three things
+changed from the fork's:
+
+| what | the fork | the Guide, 2026 |
+|---|---|---|
+| one display interrupt | 17.4 cycles (17 colour clocks of DMA, then the 6502's entry and exit) | 12.75 (the 6502's entry and exit only: a DLI costs no DMA time) |
+| a holey character object, per scanline | the same as a direct one (3 colour clocks) | 6 colour clocks single-wide, 9 double-wide: `HOLE_CHAR`, 0.756 cycles more per byte a character |
+| the first DMA of a frame | -- | 8 colour clocks (2 CPU cycles) more, every frame with DMA on |
+
+The 2 cycles a frame are inside the rounding of the per-line constant and are not modelled
+separately. The other constants came out within a few hundredths of the fork's (per scanline
+5.64, per zone 1.71, per 4-byte entry 2.00, per graphics byte 0.755; a holey zone 0.81 a scanline
+and 0.57 per object). Re-fitting the old build the same way gave the fork's set back (worst
+residual 0.70%), which is what says the method holds.
 
 Holey DMA is a large saving, not a rounding error -- two 20-byte objects over
 192 scanlines went from 1,412 iterations a frame to 1,825 -- and it is exactly

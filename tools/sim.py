@@ -558,13 +558,15 @@ class Bus(object):
     MAX_ZONES = 32
     MAX_LINES = 250
 
-    # Measured DMA costs, in CPU cycles. Same numbers as tools/dmabudget.py (its "fork"
-    # timing: the a7800 fork's MARIA, which current MAME now has) and docs/hardware.md; see
-    # probes/dma-costcart.py and tools/dmameasure.py for how they were got.
-    DMA_LINE, DMA_ZONE = 5.624, 1.888
-    DMA_OBJ, DMA_BYTE, DMA_FIVE = 1.990, 0.755, 0.483
-    DMA_DLI = 17.4
-    DMA_HOLE_LINE, DMA_HOLE_OBJ = 0.988, 0.510     # a holey zone: the first-hole penalty
+    # Measured DMA costs, in CPU cycles. Same numbers as tools/dmabudget.py (its "guide"
+    # timing: the 7800 Software Guide's, revised October 2026, which the patched MAME follows)
+    # and docs/hardware.md; see probes/dma-costcart.py and tools/dmameasure.py for how they
+    # were got.
+    DMA_LINE, DMA_ZONE = 5.642, 1.711
+    DMA_OBJ, DMA_BYTE, DMA_FIVE = 1.997, 0.755, 0.483
+    DMA_DLI = 12.75                                # the 6502's own entry and exit: no DMA time
+    DMA_HOLE_LINE, DMA_HOLE_OBJ = 0.809, 0.567     # a holey zone: the hole penalty
+    DMA_HOLE_CHAR = 0.756                          # a holey character object: this more, per byte a character
     DMA_LINE_CAP = 108.62                          # MARIA's DMA limit: no scanline costs more
 
     def zone_cost(self, dl, lines, flags=0):
@@ -579,6 +581,7 @@ class Bus(object):
         holey16 = bool(flags & 0x40)
         per_line = self.DMA_LINE
         holes = 0
+        hole_chars = 0                                # bytes per character, over holey character objects
         i = 0
         for _ in range(32):
             b1 = self.mem_dl((dl + i + 1) & 0xFFFF)
@@ -598,18 +601,20 @@ class Bus(object):
             # Holey DMA drops the graphics fetch when address bit 12 is set,
             # measured; the entry is still read, so the object costs its
             # header and no pixels. See docs/hardware.md.
+            bpc = 2 if (self.ctrl & 0x10) else 1
             if holey16 and (((hi << 8) | lo) & 0x1000):
                 w = 0
                 holes += 1
+                if chars:
+                    hole_chars += bpc
             if chars:
-                bpc = 2 if (self.ctrl & 0x10) else 1
                 per_line += (self.DMA_OBJ + self.DMA_FIVE
                              + w * (1 + bpc) * self.DMA_BYTE)
             else:
                 per_line += (self.DMA_OBJ + w * self.DMA_BYTE
                              + (self.DMA_FIVE if five else 0))
         if holes:
-            per_line += self.DMA_HOLE_LINE + self.DMA_HOLE_OBJ * holes
+            per_line += self.DMA_HOLE_LINE + self.DMA_HOLE_OBJ * holes + self.DMA_HOLE_CHAR * hole_chars
         return (lines * min(per_line, self.DMA_LINE_CAP) + self.DMA_ZONE
                 + (self.DMA_DLI if (flags & 0x80) else 0))
 
