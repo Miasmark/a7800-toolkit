@@ -622,6 +622,10 @@ class Bus(object):
         except that a bankset cartridge may not hold one, in its ROM or its RAM: they belong in
         console RAM."""
         if self.mcart is not None and (a & 0xFFFF) >= self.rom_low:
+            if getattr(self.cart, "sharedram", False) and \
+                    any(lo <= (a & 0xFFFF) < hi for lo, hi in self.cart_ram):
+                return self.mem(a)      # RAM both chips share: read like console RAM (the cores,
+                                        # and the Atari MAME fork's a78_bankset_sg_ram)
             self.break_rule("dl", a & 0xFFFF)
             return 0
         return self.mem(a)

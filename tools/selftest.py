@@ -2003,6 +2003,9 @@ def t_bankset_shared_ram():
         assert bus.mem(0x4123) == 0x77, "MARIA did not see the CPU's RAM"   # ... MARIA sees it
         bus.write(0x8000, 3)
         assert bus.bank == 3 and bus.mem(0x8000) == m.byte("b3", 0x8000), "MARIA's half, bank 3"
+        # a display list in the shared RAM is read like console RAM; one in the ROM is refused
+        assert bus.mem_dl(0x4123) == 0x77 and "dl" not in bus.rule_breaks, bus.rule_breaks
+        assert bus.mem_dl(0x8000) == 0 and bus.rule_breaks["dl"][0] == 1
         # what the a7800 emulator does with the same header: bank 6 at $4000, no warning
         f = cart_module.Cart(path, low="bank6")
         assert not f.sharedram and f.space_of(0x4000, None) is not None

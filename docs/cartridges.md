@@ -221,14 +221,22 @@ Bankset, SuperGame, RAM at `$4000`).
   RAM (bit 14), so here both chips see one RAM: the CPU writes it and MARIA draws
   from it. Karateka's MARIA Edition v1 is built this way (each scene's graphics
   written there as the scene loads).
+- MAME's Atari fork has it since `430ed00` (2026-10-21):
+  [Miasmark/mame-Atari8bit7800](https://github.com/Miasmark/mame-Atari8bit7800),
+  boards `a78_bankset_sg_ram` and `a78_bankset_sg_ram_p800` (`$A006`).
+  - There MARIA may take display lists from the shared RAM, which is read like
+    console RAM, and the CPU may run code in it. The rule against lists in the
+    cartridge covers only the ROM above it.
 - a7800's `bankset.cpp` ignores bit 2 on a bankset and fixes the second-last bank
-  at `$4000`. MAME has no such board either, stock or with the Atari fork's 11
-  bankset forms.
+  at `$4000`. Stock MAME takes the header for a plain SuperGame RAM cart and drops
+  the bankset bit, so the image starts in 2600 mode.
 - `Cart` lays the form out as the core does, sets `sharedram` and warns.
   `--low bank6` gives a7800's layout.
 - The simulator lets MARIA read the CPU's RAM there (`Bus.maria_ram`), so
   `firstlook.py` rebuilds such a game's screens. Before, they showed bank 6's
   bytes where the game's graphics were.
+- Display lists in the shared RAM are read as the fork reads them (not refused
+  as a rule break); in the ROM above it they are refused as on any bankset.
 
 **Checked against the Bankset Test Suite v1** (2026-10-20). Its ten test
 cartridges: 2x32K, 2x48K and 2x52K flat, each with and without POKEY at `$4000`;

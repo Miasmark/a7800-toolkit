@@ -446,9 +446,10 @@ class Cart(object):
             self.warnings.append(
                 "bankset with the SuperGame RAM bit ($0004) and no bank RAM ($4000): laid out "
                 "as one 16K of RAM at $4000 that both chips see, as the openFPGA 7800 core maps "
-                "it. This form is not in the BankSet spec: the a7800 emulator puts the "
-                "second-last bank at $4000 instead (--low bank6 to see that layout), and MAME "
-                "has no such board")
+                "it, and as the Atari MAME fork does (a78_bankset_sg_ram). This form is not in "
+                "the BankSet spec: the a7800 emulator puts the second-last bank at $4000 instead "
+                "(--low bank6 to see that layout), and stock MAME takes it for a plain SuperGame "
+                "RAM cart")
         self._check_pokey()
         self._check_activision()
 

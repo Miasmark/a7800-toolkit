@@ -337,6 +337,8 @@ class Screen(object):
         self.dl_in_cart_ram = 0
         starts = [r[0] for r in getattr(c, "_region", []) if r[2] != "ram"]
         self.list_floor = min([0x4000] + starts) if c.bankset else None
+        if c.bankset and getattr(c, "sharedram", False):
+            self.list_floor = min(starts or [0x8000])   # the shared RAM holds lists like console RAM
         self.lsrc = type("Mem", (), {"byte": staticmethod(self.list_byte)})
 
     def byte(self, addr):
