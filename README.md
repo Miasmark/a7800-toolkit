@@ -130,12 +130,23 @@ emulator section is worth reading before you write any probe.
 | `annotations.py` | Check an annotations file the way `disasm.py` reads it, before it quietly ignores half of it: a typo'd key (`label` for `labels`, with the nearest real one suggested), a key repeated in the JSON, a name given to two places or to a hardware register, a bad location or block, a bank-switch pin that is not a bank. With `--rom`, also entries that sit inside a data block you declared (a block wins, so the code is never traced), locations outside the image, and labels that point into the middle of an instruction. A block that starts inside another is a warning: the disassembler never reaches its start, so its name and note vanish. Checked against the 11 real annotation files in the sibling game repositories: all pass; Ball Blazer's one overlap is real, documented in its own note, and reported as the warning it is. |
 | `pcmap.py` | Name the routines a profile spent its time in. `probes/pcprof.lua` samples the program counter each time MARIA starts a zone -- about thirty evenly spaced samples a frame, no timer needed -- and this groups them under the nearest label below each address, using your annotations' names, a disassembly listing's, or a symbols file. A ranking, not a cost: the labels decide where a routine ends, and only the visible frame is sampled. |
 | `session.py` | Record and play back a MAME input session for any cartridge (`record`, `play`, `list`), saved beside it in `recordings/` and never overwritten. A recording replays exactly, so two replays give identical profiles; it is what `probes/reclength.lua`, `replay.py` and `regress.py` run over. `Record a session.bat` and `Play a recording.bat` are the drag-and-drop forms. |
+| `romscan.py` | **Before you publish: is any of the cartridge in there?** Finds every run of 16 (`--min`) of the cartridge's bytes, in order, in a tree (default: the git repository here): binaries byte for byte, text as `$A9`, `0xA9`, `A9h`, hex dumps and hex strings, a run spanning lines. Runs of one value are skipped. `--trace -- build.py ARGS` runs a Python build under an audit hook and lists every file it opened outside the tree, so you see that it read only the cartridge you gave it. Exit status 1 if anything was found. |
 | `inpoffset.py` | How far to shift a recording so it plays on a game that starts on another frame: another BIOS, `-bios skip`, a re-signed or patched build. Runs both sides with `probes/handover.lua` and prints the `-playback_offset` (MAME with the a7800 patch; the tools pass it from `A7800_PLAYBACK_OFFSET`); `--inp` then plays the recording shifted. A shifted recording can still drift on a game timed to the cycle ([`docs/pitfalls.md`](docs/pitfalls.md)). |
 | `regress.py` | Asks every build the same questions: a JSON list of MAME probe jobs (probe, recording, environment, expanded over lists of values), each reduced to one verdict line, run in parallel, saved as a baseline and compared against it. Built from Pole Position II's regression set, which it reproduces verdict for verdict. |
 | `sign7800.py` | Cartridge signatures. An NTSC 7800 hashes the cartridge and checks a signature over that hash at `$FF80`-`$FFF7`; a cartridge that fails is not refused, it is started in **2600 mode**, which looks like a black screen rather than an error. PAL consoles do not check and no emulator does, so a patched ROM works everywhere it gets tested and nowhere it gets played. Verifies, and signs -- the scheme is Rabin with public exponent 2, so a signature is a square root of the hash mod `n`, found by stepping the hash's one don't-care byte until a root exists. A port of Bruce Tomlin's `sign7800.c`, checked against stock dumps of two different games. Every build path here signs; the patch-set has to do it at apply time, since the signature covers the whole image and every combination of options has a different one. |
 | `spritedump.py` | Renders one direct-mode MARIA display-list object -- a real sprite at a known base/width/height/palette, optionally stacked from several zone-sized segments -- rather than a fixed 256-entry character sheet. Reads the palette straight out of a `dumpgfx.lua` register dump so the colours are the ones the game actually used. |
 
 ### Shipping a patch, and making it boot
+
+**Before publishing anything built from a cartridge, `romscan.py`** checks that
+none of the cartridge went in. It finds any run of 16 of its bytes, in order:
+- in the repository's files: binaries byte for byte, and text as `$A9`, `0xA9`,
+  `A9h`, hex dumps and hex strings, across lines;
+- in what a Python build opens: `--trace -- build.py ...` lists every file the
+  build opened outside the tree, so you can see it read only the cartridge you
+  gave it.
+
+The exit status is 1 if anything was found.
 
 Two things a 7800 patch needs that a diff does not give you.
 
@@ -212,7 +223,10 @@ reads, counting from the moment the game locks INPTCTRL so the BIOS's
 signature pass is not mistaken for use. `probes/snapwhen.lua` takes
 screenshots when a RAM byte says the moment has come.
 `probes/rendersurvey.lua` counts DLIs and WSYNCs per frame and dumps RAM for
-`zonebill.py`. All four come from the Pole Position II VS mod, where the
+`zonebill.py`. `probes/dlimargin.lua` measures how close each display
+interrupt's handler comes to the next one, and lists the frames where one ran
+into the next. That is how a colour that flickers only on slower hardware is
+found. All four come from the Pole Position II VS mod, where the
 wild-fetch trap ran against every build. `probes/handover.lua` records the moment a
 cartridge's reset code first runs (frame, registers, flags, INPTCTRL, RAM),
 which is how the two BIOSes in `docs/bios.md` were compared.

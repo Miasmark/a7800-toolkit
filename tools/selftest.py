@@ -1967,6 +1967,115 @@ def t_bankset_ram():
     return "bank RAM per chip, CPU writes through $C000, MARIA's half and bank, ROM over POKEY at $4000"
 
 
+
+def t_bankset_shared_ram():
+    """A bankset with the SuperGame RAM bit and no bank RAM (cart type $2006): one 16K of RAM
+    at $4000 that the CPU and MARIA both see, as the openFPGA 7800 core maps it (its cart.sv
+    takes bit 2 as RAM at $4000 whatever else is set, and splits RAM by chip only for bit 14).
+    Not in the BankSet spec, so Cart says so, and `--low bank6` still gives the fork's layout.
+    Karateka's MARIA Edition (v1) is this form: the CPU writes each scene's graphics there
+    and MARIA draws them."""
+    import random
+    import cart as cart_module
+    import sim
+    rng = random.Random(5)
+    work = tempfile.mkdtemp(prefix="selftest-bsshared-")
+    try:
+        body = bytes(rng.randrange(256) for _ in range(0x40000))
+        hdr = bytearray(128)
+        hdr[0] = 1
+        hdr[1:10] = b"ATARI7800"
+        hdr[49:53] = len(body).to_bytes(4, "big")
+        hdr[53], hdr[54] = 0x20, 0x06
+        hdr[55] = 1
+        path = os.path.join(work, "shared.a78")
+        io.open(path, "wb").write(bytes(hdr) + body)
+        c = cart_module.Cart(path)
+        assert c.bankset and c.sharedram and not c.bankram
+        assert c.space_of(0x4000, None) is None, "ROM laid out where the RAM is"
+        assert any("openFPGA" in w for w in c.warnings), c.warnings
+        m = c.for_maria()
+        assert m.space_of(0x4000, None) is None and m.sharedram
+        bus = sim.Bus(c)
+        assert bus.mram is None and bus.mcart is not None
+        bus.write(0x4123, 0x77)                                # the CPU writes the RAM ...
+        assert bus.read(0x4123) == 0x77
+        assert bus.mem(0x4123) == 0x77, "MARIA did not see the CPU's RAM"   # ... MARIA sees it
+        bus.write(0x8000, 3)
+        assert bus.bank == 3 and bus.mem(0x8000) == m.byte("b3", 0x8000), "MARIA's half, bank 3"
+        # a display list in the shared RAM is read like console RAM; one in the ROM is refused
+        assert bus.mem_dl(0x4123) == 0x77 and "dl" not in bus.rule_breaks, bus.rule_breaks
+        assert bus.mem_dl(0x8000) == 0 and bus.rule_breaks["dl"][0] == 1
+        # what the a7800 emulator does with the same header: bank 6 at $4000, no warning
+        f = cart_module.Cart(path, low="bank6")
+        assert not f.sharedram and f.space_of(0x4000, None) is not None
+        assert not any("openFPGA" in w for w in f.warnings)
+        # the spec's forms are unchanged
+        hdr[53], hdr[54] = 0x20, 0x02
+        io.open(path, "wb").write(bytes(hdr) + body)
+        assert not cart_module.Cart(path).sharedram and cart_module.Cart(path).space_of(0x4000, None)
+        hdr[53], hdr[54] = 0x60, 0x06
+        io.open(path, "wb").write(bytes(hdr) + body)
+        b = cart_module.Cart(path)
+        assert b.bankram and not b.sharedram
+    finally:
+        shutil.rmtree(work, True)
+    return "one RAM at $4000 for both chips, with a warning; --low bank6 and the spec's forms as before"
+
+def t_romscan():
+    """romscan.py finds a cartridge's bytes pasted into a tree: a .byte table across lines, a hex
+    dump, a hex string, a binary; and passes what only looks like data (an opcode set, a run of
+    one value). Its --trace lists what a Python script opened outside the tree."""
+    import random
+    import romscan
+    rng = random.Random(11)
+    work = tempfile.mkdtemp(prefix="selftest-romscan-")
+    try:
+        rom = bytes(rng.randrange(256) for _ in range(0x8000))
+        rom = rom[:0x3000] + bytes(64) + rom[0x3040:]           # a stretch of $00s
+        cart = os.path.join(work, "game.bin")
+        io.open(cart, "wb").write(rom)
+        tree = os.path.join(work, "tree")
+        os.makedirs(tree)
+        chunk = rom[0x1234:0x1234 + 24]
+        io.open(os.path.join(tree, "table.asm"), "w").write(
+            "Table:\n" + "".join("    .byte " + ", ".join("$%02X" % b for b in chunk[i:i + 8]) + "  ; row\n"
+                                  for i in range(0, 24, 8)))
+        io.open(os.path.join(tree, "dump.txt"), "w").write(
+            "2000: " + " ".join("%02x" % b for b in rom[0x2000:0x2010]) + "\n")
+        io.open(os.path.join(tree, "blob.py"), "w").write('B = "%s"\n' % rom[0x5000:0x5014].hex())
+        io.open(os.path.join(tree, "data.bin"), "wb").write(bytes(9) + rom[0x7000:0x7020] + bytes(9))
+        io.open(os.path.join(tree, "clean.py"), "w").write(
+            "STORE = {0x81, 0x85, 0x8D, 0x91, 0x95, 0x99, 0x9D, 0x84, 0x8C, 0x94, 0x86, 0x8E}\n"
+            "ZEROS = [" + ", ".join(["0x00"] * 40) + "]\n")
+        index = romscan.Index(romscan.rom_bytes(cart), 16)
+        found = {}
+        for f in sorted(os.listdir(tree)):
+            found[f] = romscan.scan_file(index, os.path.join(tree, f))
+        assert [(k, r) for _, k, r in found["table.asm"]] == [(24, 0x1234)], found["table.asm"]
+        assert [r for _, _, r in found["dump.txt"]] == [0x2000], found["dump.txt"]
+        assert [r for _, _, r in found["blob.py"]] == [0x5000], found["blob.py"]
+        assert [(w, k, r) for w, k, r in found["data.bin"]] == [("offset $9", 32, 0x7000)], found["data.bin"]
+        assert found["clean.py"] == [], found["clean.py"]
+        assert romscan.main([cart, tree]) == 1
+        os.remove(os.path.join(tree, "table.asm"))
+        for f in ("dump.txt", "blob.py", "data.bin"):
+            os.remove(os.path.join(tree, f))
+        assert romscan.main([cart, tree]) == 0
+        # --trace: a "build" that reads the cartridge and a file beside the tree
+        beside = os.path.join(work, "beside.txt")
+        io.open(beside, "w").write("x")
+        script = os.path.join(tree, "build.py")
+        io.open(script, "w").write("open(%r, 'rb').read()\nopen(%r).read()\nopen(%r).read()\n"
+                                   % (cart, beside, os.path.join(tree, "clean.py")))
+        rc, reads, writes = romscan.trace([script], tree)
+        norm = lambda ps: sorted(os.path.normcase(os.path.abspath(p)) for p in ps)
+        assert rc == 0 and norm(reads) == norm([cart, beside]) and not writes, (rc, reads, writes)
+    finally:
+        shutil.rmtree(work, True)
+    return "a table across lines, a dump, a hex string and a binary found; opcode sets and zeros not; --trace"
+
+
 def t_bankset_rules():
     """The two things the Bankset spec rules out for a bank-RAM cartridge are refused as the
     a7800 port of MAME refuses them, and said so: a display list in the cartridge, RAM or ROM
@@ -3332,7 +3441,7 @@ def t_probes_mame(rom):
     out = run("reclength.lua", 60,
               ["-input_directory", os.path.join(work, "rec"),
                "-playback", "t.inp", "-exit_after_playback"])
-    m = re.search(r"recording length: (\d+) frames\n", out)
+    m = re.search(r"recording length: (\d+) frames\r?\n", out)      # (\r\n on Windows)
     assert m and 175 <= int(m.group(1)) <= 185 and "CAP" not in out, out[-300:]
     # the banked synthetic cartridge: every fact it was built with, observed
     synth = _synth()
@@ -5549,6 +5658,8 @@ def main():
     r.check("bankset round trip", t_bankset_roundtrip)
     r.check("bankset vs a7800 source", t_bankset_fork_model)
     r.check("bankset RAM", t_bankset_ram)
+    r.check("bankset shared RAM", t_bankset_shared_ram)
+    r.check("romscan", t_romscan)
     r.check("bankset rules", t_bankset_rules)
     r.check("pokey chip", t_pokeychip)
     r.check("MCP server", t_mamemcp)

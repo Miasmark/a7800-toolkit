@@ -249,8 +249,10 @@ before trusting any of this: `python tools/mamecheck.py /path/to/roms --sample 6
 ### MAME with the fork's work: bankset, POKEY at $0800, and the fork's MARIA timing
 
 The fork's cartridge and MARIA work can be ported onto a current MAME (0.289 development here), which keeps
-what the fork cannot give: the Lua taps every probe here uses. The port is a patch kept outside this
-repository (all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-clock first-hole penalty,
+what the fork cannot give: the Lua taps every probe here uses. The port is public: the `atari-0.289`
+branch of [Miasmark/mame-Atari8bit7800](https://github.com/Miasmark/mame-Atari8bit7800) is MAME 0.289
+plus an Atari patch set, listed and with build steps in its `README-atari.md`. ("The a7800 patch" and
+`bankset-full.patch` in these notes are its earlier form.) It has all 11 bankset forms, POKEY at `$0800`, a 430-clock DMA limit, a 3-clock first-hole penalty,
 8 clocks of last-line shutdown, and each line shown a pixel at a time so a mid-scanline register write
 appears mid-scanline; and two rules the Bankset spec sets, which warn once and refuse: a display list fetched from the
 cartridge (ROM or RAM) reads as empty, and an opcode fetched from bank RAM reads `$FF` -- docs/cartridges.md); current MAME's POKEY already has the fork's POKEY work. Run with
@@ -497,6 +499,7 @@ proved goes here once its addresses have become parameters.
 | `wildfetch.lua` | Stop at the first instruction fetched from where no code should be. |
 | `hangsnap.lua` | PC, SP, the stack and chosen bytes at chosen frames, with the interrupt count since the last one: for 'the clock froze'. Compare frames either side of the symptom. |
 | `cyclebudget.lua` | Where a frame's CPU cycles go and how many MARIA took: executed cycles (with branch and page-crossing extras), the part inside the NMI, the TIA/RIOT slow-access penalty, `dma` as what is left of the frame, and executed cycles per named PC range. Compare `dma` with `dmabudget.py`'s model of the same display list. Measured first in the Karateka XE port; see its header for what it does not count. |
+| `dlimargin.lua` | How close each display interrupt's handler comes to the next one. Every NMI, named by the line it arrives on: its arrival, when its handler returns (the fetch at the pushed address with the stack restored, in lines from the top of the frame it arrived in, so a handler that runs into the next frame ends past the last line), and the margin to the next NMI's arrival. Margins under 2 lines are marked *tight*. Negative ones are marked *OVERRUN* (the next NMI came while this one ran), with the frames listed. A handler that runs into the next DLI moves that DLI's work (a colour change) lines late, in the frames where it runs long. That is a flicker a slower machine shows and MAME may not: docs/pitfalls.md. |
 | `dlitimes.lua` | On which raster line each display interrupt arrives, beside the display list list's zones (start line, height, DLI bit), and the lines at which MSTAT's VBLANK bit rises and falls. How the DLI timing and the 263-line frame were measured; MAME 0.264 has no `screen:vpos()`, so the beam position is worked out from `time_until_pos`. |
 | `addrorigin.lua` | Which ROM bytes are addresses: follows each value the CPU uses as a pointer (`(zp),Y`, `JMP (vector)`, RTS-as-jump, self-modified operands) back to the byte it was loaded from, through transfers, stores and pushes. Slow (a few seconds per emulated second). `tools/origins.py` turns the log into address tables and immediates; arithmetic keeps the accumulator's origin, so a pointer plus an offset traces to the pointer's byte. |
 | `rates.lua` | How often chosen instructions run, and the gap in frames between reads of a controller port. A game answers no faster than it asks. |
