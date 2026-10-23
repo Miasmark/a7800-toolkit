@@ -1128,6 +1128,74 @@ Other voices are untouched, which is checked in the self-test rather than
 asserted here -- importing a part beside one you already have is the whole
 point, and quietly overwriting the rest would ruin it.
 
+## Music for a game: `pokeymusic.py`
+
+`tracker.py export` is nine bytes a frame: right for a cue, and for checking a
+song on the machine, but 32K a minute. `pokeymusic.py` writes what a game wants:
+
+```
+python tools/pokeymusic.py build music.json -o music.asm --wav music.wav
+python tools/pokeymusic.py check music.json
+```
+
+`music.json` names the channels the player owns, the instruments (a distortion
+and a volume envelope) and, per song, one MIDI file per voice with its
+instrument and transpose. The notes go onto a musical grid (the coarsest every
+note lands on), each voice is cut into one-bar patterns, and a pattern is
+stored once however often it plays. Each voice loops on its own, so a 4-bar
+lead over a 16-bar bass costs four bars. A 17-second three-voice loop from a
+loop pack came to 268 bytes of patterns.
+
+What you hear from `--wav` is not a second reading of the MIDI. A Python model of
+the player runs over the compiled bytes and its register writes go through
+`tracker.render`. `check` then runs the 6502 player itself in `sim.py` over the
+same bytes and requires the same writes, every frame. On that loop: 1,049
+frames, all identical. A frame took 277 cycles at the median and 321 on
+average; the worst was 961, when all three voices started new patterns on one row.
+The player is 369 bytes.
+
+For sound effects, `MU_MUTE` has a bit a voice. Set, the player leaves that
+channel's registers alone and the effect can have it. The music keeps time
+underneath and takes the channel back the frame the bit clears.
+
+## Distortion 6: the bass, and its three timbres
+
+On the 64 kHz clock a pure tone gets no lower than 125 Hz (B2). Distortion 6
+($Cx, the 4-bit polynomial alone) goes down to about 17 Hz on the same 8-bit
+channel, which is the classic Atari bass. Its pitch is not a formula in AUDF.
+The polynomial free-runs at 1.79 MHz and the channel samples it every
+28 * (AUDF+1) clocks, so the pattern it plays repeats every 15, 5 or 3 ticks
+depending on that step modulo 15, or is a constant level (silence) when the step
+is a multiple of 15. `tracker.pokey_tone` plays the pattern out tick by tick, by
+the renderer's own rule, and measures its period. It agrees with pitches
+measured from rendered audio: A1 is AUDF $4C (period 15), B1 $CE (period 5).
+
+The three periods do not sound alike. Period 15 is the full 15-step pattern,
+with its energy spread evenly over the harmonics: a buzz with little
+fundamental, but the only one that reaches C1. Period 5 reaches G#1 and has more
+body. Period 3, from E2 up, is a thin pulse. The AUDF nearest a note can be any of
+the three, so a bass line tuned note by note changes timbre on every note.
+`pokey_best_audf(..., dist=6, period=N)` keeps to one, and `pokeymusic.py` picks
+for each part the period that plays all its notes with the smallest worst
+error. Over C1-E3, period 15 is median 10 cents out and worst 38. A part that
+stays above G#1 does better on period 5: one loop-pack bass, G#1-D#3, came out
+worst 26.
+
+`tracker.py import --part FILE,dist=6,period=15` does the same in the tracker.
+It takes one `--part` per voice, so a song that comes as `bass.mid`, `lead.mid` and
+`arp.mid` imports in one go, the bass in its own distortion.
+
+## The minimal players, fixed
+
+Both players `tracker.py export` writes used to index the song with Y alone.
+That reaches 256 bytes, which is 28 POKEY rows or 42 TIA rows; past that, the
+index wrapped and replayed the start over the rest. They now walk a two-byte
+zero-page pointer, `song_ptr`. The POKEY export also ended the song with a lone
+`$FF`, where the player looks for the end in the ninth byte of a row, so it read
+on past the data. The end is now a whole row. And `--label` renamed only the
+data, not the player that reads it. The self-test runs both players through 300
+rows in the simulator.
+
 # Opening a cartridge in the tracker: read it, do not record it
 
 ```

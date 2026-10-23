@@ -5580,6 +5580,228 @@ def synthetic_cart(root):
     return path if r.returncode == 0 and os.path.exists(path) else None
 
 
+
+def _midi_file(path, tracks, div=480, bpm=120):
+    """A format-1 MIDI file: `tracks` is [[(start_tick, end_tick, note)]]."""
+    import struct
+
+    def vlq(n):
+        out = [n & 0x7F]
+        n >>= 7
+        while n:
+            out.append((n & 0x7F) | 0x80)
+            n >>= 7
+        return bytes(reversed(out))
+
+    tempo = int(round(60e6 / bpm))
+    body0 = vlq(0) + bytes([0xFF, 0x51, 3]) + tempo.to_bytes(3, "big") + vlq(0) + bytes([0xFF, 0x2F, 0])
+    chunks = [b"MTrk" + struct.pack(">I", len(body0)) + body0]
+    for notes in tracks:
+        evs = []
+        for a, b, n in notes:
+            evs.append((a, 1, bytes([0x90, n, 100])))
+            evs.append((b, 0, bytes([0x80, n, 0])))
+        evs.sort(key=lambda e: (e[0], e[1]))
+        body, t = b"", 0
+        for tick, _k, data in evs:
+            body += vlq(tick - t) + data
+            t = tick
+        body += vlq(0) + bytes([0xFF, 0x2F, 0])
+        chunks.append(b"MTrk" + struct.pack(">I", len(body)) + body)
+    with open(path, "wb") as f:
+        f.write(b"MThd" + struct.pack(">IHHh", 6, 1, len(chunks), div) + b"".join(chunks))
+
+
+def t_pokey_tone():
+    """Pitch for the poly distortions: distortion 6 (the 4-bit poly, the classic bass)
+    repeats every 15, 5 or 3 ticks depending on AUDF, or not at all; measured from the
+    rendered audio, A1 is AUDF $4C (period 15) and B1 $CE (period 5)."""
+    import tracker as T
+    for f in (0, 17, 100, 255):
+        if abs(T.pokey_tone(0, 5, f) - T.pokey_frequency(0, f)) > 1e-9:
+            raise AssertionError("pure tone at AUDF %d is not the formula" % f)
+    rate = T.pokey_rate(0, [0x4C, 0, 0, 0], 0)
+    if abs(T.pokey_tone(0, 6, 0x4C) - rate / 15) > 1e-6 or T.pokey_tone_period(0, 6, 0x4C) != 15:
+        raise AssertionError("distortion 6 at $4C is not a period-15 pattern")
+    if T.pokey_tone_period(0, 6, 0xCE) != 5:
+        raise AssertionError("distortion 6 at $CE is not a period-5 pattern")
+    # 28 * (AUDF+1) a multiple of 15: the poly is sampled at the same place every tick
+    if T.pokey_tone(0, 6, 14) is not None:
+        raise AssertionError("distortion 6 at AUDF 14 should be silent (a constant level)")
+    if T.pokey_tone(0, 0, 100) is not None or T.pokey_tone(0, 4, 100) is not None:
+        raise AssertionError("the 17-bit noise was given a pitch")
+    if T.pokey_best_audf(0, 33, dist=6)[0] != 0x4C or \
+            T.pokey_best_audf(0, 35, dist=6, period=5)[0] != 0xCE:
+        raise AssertionError("best AUDF by distortion and period disagrees with the measurement")
+    f, c = T.pokey_best_audf(0, 33, dist=6, period=3)
+    if f is not None and abs(c) < 100:
+        raise AssertionError("period 3 cannot reach A1 on 64 kHz, but was given it")
+    return "distortion 6: $4C A1 period 15, $CE B1 period 5, AUDF 14 silent"
+
+
+class _LogBus(object):
+    def __init__(self):
+        self.mem = bytearray(0x10000)
+        self.mram = None
+        self.writes = []
+
+    def read(self, a):
+        return self.mem[a & 0xFFFF]
+
+    def write(self, a, v):
+        self.writes.append((a & 0xFFFF, v & 0xFF))
+        self.mem[a & 0xFFFF] = v & 0xFF
+
+
+def _run_6502(code, org, sym):
+    import sim
+    bus = _LogBus()
+    bus.mem[org:org + len(code)] = code
+    bus.mem[0xFFFC], bus.mem[0xFFFD] = org & 0xFF, org >> 8
+    cpu = sim.CPU(bus)
+
+    def call(name, a=0):
+        ret = 0xFFF0 - 1
+        cpu.push(ret >> 8)
+        cpu.push(ret & 0xFF)
+        cpu.a, cpu.pc = a, sym[name]
+        for _ in range(50000):
+            if cpu.pc == 0xFFF0:
+                return
+            cpu.step()
+        raise AssertionError("%s ran away at $%04X" % (name, cpu.pc))
+    return bus, call
+
+
+def t_minimal_players():
+    """tracker.py export: both players walk a pointer, so a song is not cut at 256
+    bytes (28 POKEY rows, 42 TIA rows) and wrapped; the POKEY end is a whole row (its
+    end mark is read from the AUDCTL slot); --label reaches the player."""
+    import asm
+    import tracker as T
+    for chip, regs, stride in (("pokey", list(range(0x4000, 0x4008)), 8),
+                               ("tia", [0x15, 0x17, 0x19, 0x16, 0x18, 0x1A], 6)):
+        song = T.Song(chip=chip, region="ntsc")
+        n = 300
+        for i in range(n):
+            if chip == "pokey":
+                song.add([(5, (i + 7 * c) & 0xFF, (i + c) % 16) for c in range(4)])
+            else:
+                song.add([(4 + c, (i + c) % 32, (i + 3 * c) % 16) for c in range(2)])
+        src = ".org $8000\nsong_ptr = $80\n" + T.export_asm(song, label="Tune")
+        a = asm.Assembler()
+        code = bytes(a.assemble(src.split("\n")))
+        bus, call = _run_6502(code, 0x8000, a.sym)
+        call("PlayInit")
+        for i in range(n):
+            bus.writes = []
+            call("PlayTick")
+            got = dict((ad, v) for ad, v in bus.writes if ad in regs)
+            st = list(song.states())[i]
+            if chip == "pokey":
+                want = {}
+                for c in range(4):
+                    want[0x4000 + 2 * c] = st[c][1]
+                    want[0x4001 + 2 * c] = song.audc_byte(st[c])
+            else:
+                want = {}
+                for c, (ac, fa, vo) in ((0, st[0]), (1, st[1])):
+                    want[[0x15, 0x16][c]] = ac
+                    want[[0x17, 0x18][c]] = fa
+                    want[[0x19, 0x1A][c]] = vo
+            if got != want:
+                raise AssertionError("%s row %d: the player wrote %s, the song says %s"
+                                     % (chip, i, got, want))
+        bus.writes = []
+        call("PlayTick")
+        stopped = [v for ad, v in bus.writes if ad in regs]
+        if not stopped or any(stopped):
+            raise AssertionError("%s: the song's end did not silence it" % chip)
+    return "POKEY and TIA: 300 rows each played in the simulator, then the end"
+
+
+def t_pokeymusic():
+    """MIDI parts to patterns, data and a player: shared patterns stored once, ties
+    across a pattern's end, a lead and a distortion-6 bass, and the 6502 player run in
+    the simulator writing what the model writes, every frame; the mute bit lends a
+    channel out; a prefix other than MU assembles."""
+    import json
+    import pokeymusic as PM
+    import tracker as T
+    tmp = tempfile.mkdtemp(prefix="selftest-pm-")
+    q = 120                               # a sixteenth at 480 ticks a quarter
+    bar = []
+    for k, n in enumerate((60, 64, 67, 72)):
+        bar.append((k * 4 * q, k * 4 * q + 3 * q, n))
+    lead = bar + [(a + 16 * q, b + 16 * q, n) for a, b, n in bar]        # bar 2 = bar 1
+    lead += [(46 * q, 52 * q, 74), (49 * q, 51 * q, 76)]                  # a tie, an overlap
+    bass = [(k * 2 * q, k * 2 * q + q, (33, 40)[k % 2]) for k in range(24)]
+    _midi_file(os.path.join(tmp, "lead.mid"), [lead])
+    _midi_file(os.path.join(tmp, "bass.mid"), [bass])
+    doc = {"player": {"prefix": "ZQ", "zp": "$F0", "ram": "$2400", "channels": [2, 4]},
+           "instruments": {"lead": {"dist": 5, "volume": [12, 10, 8, 6]},
+                           "bass": {"dist": 6, "volume": [9, 8]}},
+           "songs": [{"name": "t", "voices": [
+               {"channel": 2, "file": "lead.mid", "instrument": "lead"},
+               {"channel": 4, "file": "bass.mid", "instrument": "bass"}]}]}
+    path = os.path.join(tmp, "m.json")
+    with open(path, "w") as f:
+        json.dump(doc, f)
+    mus = PM.compile_music(PM.load(path))
+    s = mus["songs"][0]
+    if s["grid"] != 16 or s["bar"] != 16:
+        raise AssertionError("grid %d, bar %d: expected sixteenths, 16 rows a bar"
+                             % (s["grid"], s["bar"]))
+    lead_orders = s["voices"][0]["orders"]
+    if lead_orders[0] != lead_orders[1]:
+        raise AssertionError("two identical bars were stored as two patterns")
+    if not any(b & 0xC0 == 0x40 for b in mus["patterns"][lead_orders[3]][:-1]):
+        raise AssertionError("the note across the bar line was not carried as a tie")
+    n, bad, worst = PM.check(mus, frames=600)
+    if bad:
+        raise AssertionError(bad)
+    # the player's own bytes, rendered
+    PM_trk = PM.to_song(mus, 0, 300)
+    T.render(PM_trk, os.path.join(tmp, "m.wav"))
+    # the mute bit: voice 0 (channel 2) lent out, channel 4 still played
+    import asm
+    a = asm.Assembler()
+    code = bytes(a.assemble((".org $8000\n" + PM.asm(mus)).split("\n")))
+    bus, call = _run_6502(code, 0x8000, a.sym)
+    call("ZQ_START", 0)
+    bus.mem[a.sym["ZQ_MUTE"]] = 1
+    seen = set()
+    for _ in range(120):
+        bus.writes = []
+        call("ZQ_TICK")
+        seen.update(ad for ad, _v in bus.writes if 0x4000 <= ad < 0x4008)
+    if seen & {0x4002, 0x4003} or not seen & {0x4006, 0x4007}:
+        raise AssertionError("with the mute bit set the player wrote %s"
+                             % sorted("$%04X" % x for x in seen))
+    return "%d frames identical to the model (worst %d cycles); patterns shared; mute works" \
+        % (n, worst)
+
+
+def t_import_parts():
+    """tracker.py import --part: a file per voice, each with its own distortion."""
+    tmp = tempfile.mkdtemp(prefix="selftest-parts-")
+    _midi_file(os.path.join(tmp, "a.mid"), [[(0, 480, 64), (480, 960, 67)]])
+    _midi_file(os.path.join(tmp, "b.mid"), [[(0, 960, 33)]])
+    out = os.path.join(tmp, "ab.trk")
+    p = subprocess.run([sys.executable, os.path.join(HERE, "tracker.py"), "import",
+                        "--chip", "pokey", "--part", os.path.join(tmp, "a.mid"),
+                        "--part", os.path.join(tmp, "b.mid") + ",dist=6,period=15",
+                        "-o", out], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if p.returncode != 0:
+        raise AssertionError(p.stdout.decode(errors="replace"))
+    import tracker as T
+    song = T.load(out)
+    first = list(song.states())[1]
+    if first[0][0] != 5 or first[1][0] != 6 or first[1][1] != 0x4C:
+        raise AssertionError("voices came out as %s" % (first[:2],))
+    return "two files into two voices; the bass in distortion 6 at $4C (A1)"
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__.strip().split("\n")[0],
@@ -5618,6 +5840,10 @@ def main():
     r.check("two POKEYs", t_dualpokey)
     r.check("tracker UI", t_trackeredit)
     r.check("midi import", t_midi)
+    r.check("POKEY poly pitch", t_pokey_tone)
+    r.check("minimal players", t_minimal_players)
+    r.check("pokeymusic", t_pokeymusic)
+    r.check("import --part", t_import_parts)
     r.check("format guesser", t_explore)
     r.check("browser page scripts", t_browser_js)
     r.check("click handlers", t_handler_attributes)

@@ -58,7 +58,12 @@ def read(path):
     """Parse a .mid into {"division", "format", "tracks": [...]}.
 
     Each track is {"name", "channels", "programs", "notes": [...]} and each note
-    is a dict with `start`, `end` (seconds), `note` (MIDI number), `velocity`.
+    is a dict with `start`, `end` (seconds), `note` (MIDI number), `velocity`,
+    and `tick`/`end_tick`, the same times in the file's own ticks. Seconds are
+    for hearing; ticks are for a musical grid, where a sixteenth is exactly
+    division/4 ticks and nothing has been rounded to a frame yet.
+
+    `tempo_map` is [(tick, microseconds per quarter note)], from tick 0.
     """
     raw = open(path, "rb").read()
     head = None
@@ -93,7 +98,7 @@ def read(path):
     for evs in parsed:
         tracks.append(_notes(evs, division, tempo_map))
     return {"format": fmt, "division": division, "tracks": tracks,
-            "tempo_changes": len(tempo_map),
+            "tempo_changes": len(tempo_map), "tempo_map": tempo_map,
             "path": os.path.basename(path)}
 
 
@@ -178,11 +183,13 @@ def _notes(evs, division, tempo_map):
                 notes.append({
                     "start": _seconds(start_tick, division, tempo_map),
                     "end": _seconds(tick, division, tempo_map),
+                    "tick": start_tick, "end_tick": tick,
                     "note": note, "velocity": v, "channel": chan})
     for (chan, note), stack in open_notes.items():
         for start_tick, v in stack:                # never released
             notes.append({"start": _seconds(start_tick, division, tempo_map),
                           "end": _seconds(start_tick, division, tempo_map) + 0.25,
+                          "tick": start_tick, "end_tick": start_tick + division // 2,
                           "note": note, "velocity": v, "channel": chan})
     notes.sort(key=lambda n: (n["start"], n["note"]))
     return {"name": name, "channels": sorted(channels),
