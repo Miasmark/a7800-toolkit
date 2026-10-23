@@ -361,6 +361,39 @@ def t_dmameasure():
     return "%d shapes build distinct cartridges; %d shapes to fit from" % (len(dm.SHAPES), len(shapes))
 
 
+def t_dmacart():
+    """tools/dmacart.py's on-screen counting cartridges: one per shape and a baseline, every one
+    distinct and signed for an NTSC console, the font draws the glyphs it was given, and every
+    digit object of the RAM display list is the same size whatever digit it shows (so the
+    number costs the same DMA in every build)."""
+    import dmacart
+    import sign7800
+    cc = dmacart.dmameasure.costcart()
+    work = tempfile.mkdtemp(prefix="selftest-dmacart-")
+    try:
+        made = dmacart.build(work)
+        assert len(made) == len(dmacart.shapes()) == len(dmacart.dmameasure.SHAPES) + 1
+        roms = [io.open(p, "rb").read() for p in made]
+        assert len(set(roms)) == len(roms), "two shapes built the same cartridge"
+        for rom in roms:
+            assert sign7800.verify(rom[128:]), "a cartridge is not signed"
+        # the font: row r of digit d, read back out of its page, is the glyph's row
+        for row in range(16):
+            page = cc.font_page(row)
+            for d, glyph in cc.GLYPHS.items():
+                v = (page[2 * d] << 8) | page[2 * d + 1]
+                bits = "".join("1" if (v >> (14 - 2 * i)) & 3 else "0" for i in range(8))
+                want = (glyph[row // 2] + "000") if row // 2 < 7 else "0" * 8
+                assert bits == want, "digit %d row %d drawn wrong" % (d, row)
+        # the RAM display list's template: twelve 2-byte objects in the font, then the end
+        rom = roms[0][128:]
+        tmpl = bytes([0x00, 0x1E, cc.FONT])
+        assert rom.count(tmpl) >= len(cc.DIGIT_X), "the digit display list is not in the ROM"
+    finally:
+        shutil.rmtree(work, True)
+    return "%d cartridges, all distinct and signed; 10 digits x 16 rows of font read back" % len(roms)
+
+
 def t_mksprite():
     """Packing must invert, and must come out bottom-first.
 
@@ -5628,6 +5661,7 @@ def main():
     r.check("(OM) file offsets", t_om_file_offsets)
     r.check("RAM vector runs", t_ram_vector_runs)
     r.check("dmameasure", t_dmameasure)
+    r.check("dmacart", t_dmacart)
     r.check("workbench in a browser", t_workbench_browser)
     r.check("simulator probe", t_simprobe)
     r.check("simulated address origins", t_simorigins)

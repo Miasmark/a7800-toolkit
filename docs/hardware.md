@@ -175,6 +175,16 @@ separately. The other constants came out within a few hundredths of the fork's (
 and 0.57 per object). Re-fitting the old build the same way gave the fork's set back (worst
 residual 0.70%), which is what says the method holds.
 
+**On hardware.** The counting cartridge reports through RAM, which only an emulator's Lua can
+read. `tools/dmacart.py build` makes the same shapes as cartridges that draw the count on screen,
+signed for an NTSC console: a 16-line zone under the measured area holds the count now, the
+lowest and the highest seen. The digits are 2-byte objects into a fixed font, and the cartridge
+only changes which glyph each points at, so the zone costs the same whatever it shows: 46 loop
+passes in every shape, checked against the plain cartridge (character mode, holey and DLI shapes
+included), so costs against the empty baseline are the plain cartridge's to within a pass. Read
+the numbers off the screen (a photo will do), put them in a file, and `dmacart.py compare`
+prints them beside MAME's (`dmacart.py mame`).
+
 Holey DMA is a large saving, not a rounding error -- two 20-byte objects over
 192 scanlines went from 1,412 iterations a frame to 1,825 -- and it is exactly
 the byte cost that disappears: the objects still pay for their display-list
