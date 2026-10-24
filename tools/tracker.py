@@ -445,12 +445,101 @@ def pokey_frequency(ch, audf, audctl=0, region="ntsc"):
     return clk / (2.0 * (audf + off))
 
 
-def pokey_best_audf(ch, midi, audctl=0, region="ntsc"):
-    """The AUDF closest to a note, and the error in cents."""
+_TONE_CACHE = {}
+
+
+def pokey_tone(ch, dist, audf, audctl=0, region="ntsc"):
+    """The pitch one channel setting sounds, in Hz: None for noise or silence.
+
+    For the pure tones this is `pokey_frequency`. The others are worth having
+    because one of them is the classic Atari bass: distortion 6 ($Cx, the 4-bit
+    polynomial alone) plays a buzzy note far below what a pure tone reaches on
+    the same clock. Its pitch is not a formula in AUDF. The polynomial free-runs
+    at 1.79 MHz and the channel samples it every 28 * (AUDF+1) clocks (see
+    `pokey_poly_step`), so the bit pattern it plays repeats every 15, 5 or 3
+    ticks depending on how that step falls modulo 15, and on some AUDFs not at
+    all. So the pattern is played out tick by tick, by the same rule
+    `pokey_channel` renders with, and its period measured: the pitch is the tick
+    rate over that period.
+
+    The 4-bit poly and the 5-bit gate are covered; the 17- and 9-bit ones are
+    noise at any pitch a tune would use, and give None.
+    """
+    key = (ch % 4, dist & 7, audf, audctl, region)
+    if key in _TONE_CACHE:
+        return _TONE_CACHE[key]
+    _name, gate, stage = POKEY_DISTORTION[dist & 7]
+    audfs = [0, 0, 0, 0]
+    audfs[ch % 4] = audf
+    rate = pokey_rate(ch % 4, audfs, audctl, region)
+    if stage == "17":
+        hz = None
+    elif not gate and stage is None:
+        hz = rate / 2.0
+    else:
+        pstep = pokey_poly_step(ch % 4, audfs, audctl, region)
+        t4, t5 = poly4(), poly5()
+        span = 2 * len(t4) * len(t5)          # the state (p4, p5, out) repeats in this
+        p4 = p5 = 0
+        out, seq = 1, []
+        for _ in range(3 * span):
+            p4 = (p4 + pstep) % len(t4)
+            p5 = (p5 + pstep) % len(t5)
+            if gate and not t5[p5]:
+                pass
+            elif stage == "4":
+                out = t4[p4]
+            else:
+                out ^= 1
+            seq.append(out)
+        tail = seq[span:]                    # past any start-up
+        hz = None
+        if 0 < sum(tail) < len(tail):        # a constant level is silence
+            for period in range(1, span + 1):
+                if all(tail[i] == tail[i + period] for i in range(len(tail) - period)):
+                    hz = rate / period
+                    break
+    _TONE_CACHE[key] = hz
+    return hz
+
+
+def pokey_tone_period(ch, dist, audf, audctl=0, region="ntsc"):
+    """How many divider ticks the setting's pattern takes to repeat (2 for a pure
+    tone), or None. In distortion 6 it is 15, 5 or 3, and each sounds different:
+    15 is the buzzy bass, 3 a thin pulse."""
+    hz = pokey_tone(ch, dist, audf, audctl, region)
+    if not hz:
+        return None
+    audfs = [0, 0, 0, 0]
+    audfs[ch % 4] = audf
+    return int(round(pokey_rate(ch % 4, audfs, audctl, region) / hz))
+
+
+def pokey_best_audf(ch, midi, audctl=0, region="ntsc", dist=5, period=None):
+    """The AUDF closest to a note, and the error in cents.
+
+    `dist` is the distortion (AUDC bits 7-5): a pure tone by default, or one of
+    the polynomial ones that still has a pitch -- see `pokey_tone`. (None, None)
+    when that distortion plays no note at all on this clock.
+
+    `period` keeps to settings whose pattern repeats in that many ticks
+    (`pokey_tone_period`). For a bass line in distortion 6 that is the point:
+    the nearest AUDF for one note may be a period-15 buzz and for the next a
+    period-3 pulse, and a line that changes timbre on every note does not sound
+    like one instrument. Measured over C1-E3: period 15 alone is median 10 cents
+    out, worst 38; the best of all three is worst 25 but changes sound.
+    """
     want = A4 * (2.0 ** ((midi - 69) / 12.0))
     best, err = None, None
     for f in range(256):
-        got = pokey_frequency(ch, f, audctl, region)
+        if dist in (5, 7):
+            got = pokey_frequency(ch, f, audctl, region)
+        else:
+            got = pokey_tone(ch, dist, f, audctl, region)
+            if not got:
+                continue
+            if period and pokey_tone_period(ch, dist, f, audctl, region) != period:
+                continue
         c = 1200.0 * math.log(got / want, 2)
         if err is None or abs(c) < abs(err):
             best, err = f, c
@@ -1066,9 +1155,12 @@ def read_capture(path, region="ntsc", fold=True, chip=None):
 
 # --------------------------------------------------------------- 6502 export
 TIA_PLAYER = """; --- a minimal TIA player ------------------------------------------------
-; One row per frame. Call PlayTick once from your vertical-blank code.
-; Six bytes a row, already masked to what the registers keep.
-; A $FF in the first AUDC slot ends the song.
+; One row per frame. Call PlayInit once, then PlayTick once a frame from your
+; vertical-blank code. Six bytes a row, already masked to what the registers
+; keep. A $FF in the first AUDC slot ends the song.
+;
+; song_ptr is two bytes of zero page, yours to place. The song is walked with
+; it, not with an index register: Y alone reaches 256 bytes, which is 42 rows.
 
 AUDC0 = $15
 AUDC1 = $16
@@ -1077,26 +1169,41 @@ AUDF1 = $18
 AUDV0 = $19
 AUDV1 = $1A
 
+PlayInit:
+        LDA #<SongData
+        STA song_ptr
+        LDA #>SongData
+        STA song_ptr+1
+        RTS
+
 PlayTick:
-        LDY song_row
-        LDA SongData,Y
+        LDY #0
+        LDA (song_ptr),Y
         CMP #$FF
         BEQ SongDone
         STA AUDC0
-        LDA SongData+1,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDF0
-        LDA SongData+2,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDV0
-        LDA SongData+3,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDC1
-        LDA SongData+4,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDF1
-        LDA SongData+5,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDV1
-        TYA
+        LDA song_ptr
         CLC
         ADC #6
-        STA song_row
+        STA song_ptr
+        BCC PlayNext
+        INC song_ptr+1
+PlayNext:
         RTS
 SongDone:
         LDA #0
@@ -1106,12 +1213,16 @@ SongDone:
 """
 
 POKEY_PLAYER = """; --- a minimal POKEY player ----------------------------------------------
-; One row per frame. Call PlayTick once from your vertical-blank code.
-; Nine bytes a row: AUDF/AUDC for each of the four channels, then AUDCTL.
-; A $FF in the AUDCTL slot ends the song.
+; One row per frame. Call PlayInit once, then PlayTick once a frame from your
+; vertical-blank code. Nine bytes a row: AUDF/AUDC for each of the four
+; channels, then AUDCTL. A $FF in the AUDCTL slot ends the song.
 ;
 ; POKEY_BASE has to match the cartridge header: $4000, $0450 or $0800.
-; Write SKCTL once at startup to take the chip out of reset.
+; song_ptr is two bytes of zero page, yours to place. The song is walked with
+; it, not with an index register: Y alone reaches 256 bytes, which is 28 rows.
+;
+; Nine bytes a frame is 32K a minute: this is for short cues and for checking
+; a song on the machine. pokeymusic.py writes the compact form a game wants.
 
 POKEY_BASE = $4000
 AUDF1  = POKEY_BASE+0
@@ -1128,34 +1239,49 @@ SKCTL  = POKEY_BASE+15
 PlayInit:
         LDA #$03
         STA SKCTL                     ; release POKEY from reset
+        LDA #<SongData
+        STA song_ptr
+        LDA #>SongData
+        STA song_ptr+1
         RTS
 
 PlayTick:
-        LDY song_row
-        LDA SongData+8,Y
+        LDY #8
+        LDA (song_ptr),Y
         CMP #$FF
         BEQ SongDone
         STA AUDCTL
-        LDA SongData,Y
+        LDY #0
+        LDA (song_ptr),Y
         STA AUDF1
-        LDA SongData+1,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDC1
-        LDA SongData+2,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDF2
-        LDA SongData+3,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDC2
-        LDA SongData+4,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDF3
-        LDA SongData+5,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDC3
-        LDA SongData+6,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDF4
-        LDA SongData+7,Y
+        INY
+        LDA (song_ptr),Y
         STA AUDC4
-        TYA
+        LDA song_ptr
         CLC
         ADC #9
-        STA song_row
+        STA song_ptr
+        BCC PlayNext
+        INC song_ptr+1
+PlayNext:
         RTS
 SongDone:
         LDA #0
@@ -1186,11 +1312,15 @@ def export_asm(song, label="SongData"):
             "  four-voice songs and exporting each with its own "
             "POKEY_BASE is the way round it.")
     stride = 9 if is_pokey(song.chip) else 6
+    player = POKEY_PLAYER if is_pokey(song.chip) else TIA_PLAYER
+    # The player reads the data by its label; --label used to rename only the
+    # data, which then failed to assemble.
+    player = player.replace("SongData", label)
     lines = ["; %s -- %d rows at %g/s (%s, %s), %d bytes"
              % (song.title or "song", len(song), song.rate,
                 song.chip.upper(), song.region.upper(),
                 len(song) * stride + 1),
-             POKEY_PLAYER if is_pokey(song.chip) else TIA_PLAYER,
+             player,
              "%s:" % label]
     for i, row in enumerate(song.states()):
         if is_pokey(song.chip):
@@ -1208,7 +1338,12 @@ def export_asm(song, label="SongData"):
                 out += ["$%02X" % (a & 0x0F), "$%02X" % (f & AUDF_MAX),
                         "$%02X" % (v & 0x0F)]
             lines.append("        .byte " + ",".join(out))
-    lines.append("        .byte $FF                     ; end")
+    if is_pokey(song.chip):
+        # the player looks for the end in the AUDCTL slot, so the end is a whole
+        # row (a lone $FF here left it reading past the data)
+        lines.append("        .byte $00,$00,$00,$00,$00,$00,$00,$00,$FF  ; end")
+    else:
+        lines.append("        .byte $FF                     ; end")
     return "\n".join(lines) + "\n"
 
 
@@ -1309,52 +1444,113 @@ def midi_voice(notes, rows, rate, pick="high"):
     return out, dropped
 
 
+def parse_part(spec):
+    """One --part: `FILE[,track=N][,dist=N][,transpose=N][,volume=N][,period=N]
+    [,pick=high|low|first]`. Commas, not colons, because a Windows path has one."""
+    bits = spec.split(",")
+    part = {"file": bits[0], "track": None, "dist": None, "transpose": 0,
+            "volume": None, "period": None, "pick": None}
+    for kv in bits[1:]:
+        if "=" not in kv:
+            raise ValueError("--part %r: %r is not key=value" % (spec, kv))
+        k, v = [x.strip() for x in kv.split("=", 1)]
+        if k not in part or k == "file":
+            raise ValueError("--part %r: no option %r (track, dist, transpose, "
+                             "volume, period, pick)" % (spec, k))
+        if k == "pick":
+            if v not in ("high", "low", "first"):
+                raise ValueError("--part %r: pick is high, low or first" % spec)
+            part[k] = v
+        elif k == "dist":
+            part[k] = int(v, 16)
+        else:
+            part[k] = int(v)
+    return part
+
+
 def cmd_import(args):
-    """A MIDI file onto a chip that has far fewer notes than MIDI assumes."""
+    """MIDI onto a chip that has far fewer notes than MIDI assumes.
+
+    Either one file whose tracks fill the voices in order (`file`, `--track`),
+    or one `--part` per voice, each a file of its own with its own settings --
+    which is the shape loop packs come in: a song split into bass.mid, lead.mid
+    and arp.mid, the bass wanting a different distortion from the rest.
+    """
     import midi as midi_mod
+    nch = CHANNELS[args.chip]
+    lanes_src = []                      # one per voice: (notes, label, settings)
     try:
-        doc = midi_mod.read(args.file)
-    except (midi_mod.MidiError, IOError) as e:
+        if args.part:
+            if args.file or args.track:
+                sys.stderr.write("give either a file (with --track) or --part, "
+                                 "not both\n")
+                return 2
+            for spec in args.part:
+                part = parse_part(spec)
+                doc = midi_mod.read(part["file"])
+                playable = [i for i, t in enumerate(doc["tracks"]) if t["notes"]]
+                if not playable:
+                    sys.stderr.write("no notes in %s\n" % part["file"])
+                    return 2
+                t = part["track"] if part["track"] is not None else playable[0]
+                if not 0 <= t < len(doc["tracks"]):
+                    sys.stderr.write("no track %d in %s; it has %d\n"
+                                     % (t, part["file"], len(doc["tracks"])))
+                    return 2
+                label = "%s track %d" % (os.path.basename(part["file"]), t)
+                lanes_src.append((doc["tracks"][t]["notes"], label, part))
+        else:
+            if not args.file:
+                sys.stderr.write("a MIDI file, or one --part per voice\n")
+                return 2
+            doc = midi_mod.read(args.file)
+            playable = [i for i, t in enumerate(doc["tracks"]) if t["notes"]]
+            if not playable:
+                sys.stderr.write("no notes in %s\n" % os.path.basename(args.file))
+                return 2
+            chosen = args.track or playable[:nch]
+            for t in chosen:
+                if not 0 <= t < len(doc["tracks"]):
+                    sys.stderr.write("no track %d; the file has %d\n"
+                                     % (t, len(doc["tracks"])))
+                    return 2
+                name = doc["tracks"][t]["name"] or "(unnamed)"
+                lanes_src.append((doc["tracks"][t]["notes"],
+                                  "track %d %s" % (t, name[:20]),
+                                  {"file": args.file, "track": t, "dist": None,
+                                   "transpose": 0, "volume": None,
+                                   "period": None, "pick": None}))
+    except (midi_mod.MidiError, IOError, ValueError) as e:
         sys.stderr.write("%s\n" % e)
         return 2
-
-    playable = [i for i, t in enumerate(doc["tracks"]) if t["notes"]]
-    if not playable:
-        sys.stderr.write("no notes in %s\n" % os.path.basename(args.file))
-        return 2
-    chosen = args.track or playable[:CHANNELS[args.chip]]
-    for t in chosen:
-        if not 0 <= t < len(doc["tracks"]):
-            sys.stderr.write("no track %d; the file has %d\n"
-                             % (t, len(doc["tracks"])))
-            return 2
-    nch = CHANNELS[args.chip]
-    if len(chosen) > nch:
+    if len(lanes_src) > nch:
         sys.stderr.write(
-            "%d tracks named but %s has %d voices. Pick which ones matter -- "
+            "%d parts named but %s has %d voices. Pick which ones matter -- "
             "there is no arrangement this tool can invent for you.\n"
-            % (len(chosen), args.chip, nch))
+            % (len(lanes_src), args.chip, nch))
         return 2
 
-    song = Song(title=os.path.basename(args.file), region=args.region,
-                chip=args.chip)
+    title = os.path.basename(args.file) if args.file else \
+        " + ".join(os.path.basename(p["file"]) for _n, _l, p in lanes_src)
+    song = Song(title=title, region=args.region, chip=args.chip)
     rate = song.rate
-    end = max(n["end"] for t in chosen for n in doc["tracks"][t]["notes"])
+    end = max(n["end"] for notes, _l, _p in lanes_src for n in notes)
     rows = int(end * rate) + 1
     if args.rows:
         rows = min(rows, args.rows)
 
-    lanes, drops, stats = [], [], []
-    for t in chosen:
-        lane, dropped = midi_voice(doc["tracks"][t]["notes"], rows, rate,
-                                   args.pick)
-        lanes.append(lane)
-        drops.append(dropped)
-
     if args.audc is None:
         # a tone you can write a melody with, on each chip
         args.audc = 5 if is_pokey(args.chip) else 0x0C
-    vol = max(0, min(15, args.volume))
+    lanes, drops, stats = [], [], []
+    for notes, _label, part in lanes_src:
+        part["dist"] = args.audc if part["dist"] is None else part["dist"]
+        part["volume"] = max(0, min(15, args.volume if part["volume"] is None
+                                    else part["volume"]))
+        lane, dropped = midi_voice(notes, rows, rate, part["pick"] or args.pick)
+        lanes.append(lane)
+        drops.append(dropped)
+
     for i in range(rows):
         cells = []
         for ch in range(nch):
@@ -1362,13 +1558,18 @@ def cmd_import(args):
             if n is None:
                 cells.append((0, 0, 0))
                 continue
+            part = lanes_src[ch][2]
+            note = n["note"] + part["transpose"]
             if is_pokey(args.chip):
-                f, cents = pokey_best_audf(ch % 4, n["note"], 0, args.region)
-                cells.append((args.audc, f, vol))
+                f, cents = pokey_best_audf(ch % 4, note, 0, args.region,
+                                           dist=part["dist"], period=part["period"])
+                if f is None:
+                    raise SystemExit("voice %d: distortion %d plays no note on "
+                                     "this clock" % (ch + 1, part["dist"]))
             else:
-                f, cents = best_audf(args.audc, n["note"], args.region)
-                cells.append((args.audc, f, vol))
-            stats.append((abs(cents), n["note"]))
+                f, cents = best_audf(part["dist"], note, args.region)
+            cells.append((part["dist"], f, part["volume"]))
+            stats.append((abs(cents), note))
         song.add(cells)
 
     # Fold repeats so the file shows changes rather than a wall of identical
@@ -1382,7 +1583,8 @@ def cmd_import(args):
             last[ch] = cells[ch]
         folded.add(row)
 
-    out = args.out or (os.path.splitext(args.file)[0] + ".trk")
+    out = args.out or (os.path.splitext(args.file or lanes_src[0][2]["file"])[0]
+                       + ".trk")
     with open(out, "w", encoding="utf-8") as f:
         f.write(dump(folded))
 
@@ -1391,12 +1593,16 @@ def cmd_import(args):
     print("%s -- %d rows, %.1f s, %s %s"
           % (out, len(folded), len(folded) / rate, args.chip.upper(),
              args.region.upper()))
-    for k, t in enumerate(chosen):
-        name = doc["tracks"][t]["name"] or "(unnamed)"
-        print("  voice %d  <- track %d %-20s %d notes%s"
-              % (k + 1, t, name[:20], len(doc["tracks"][t]["notes"]),
-                 "" if not drops[k] else
-                 ", %d overlapping dropped" % drops[k]))
+    for k, (notes, label, part) in enumerate(lanes_src):
+        extra = []
+        if part["transpose"]:
+            extra.append("transposed %+d" % part["transpose"])
+        if is_pokey(args.chip) and part["dist"] not in (5, 7):
+            extra.append("distortion %d" % part["dist"])
+        print("  voice %d  <- %-32s %d notes%s%s"
+              % (k + 1, label[:32], len(notes),
+                 "" if not drops[k] else ", %d overlapping dropped" % drops[k],
+                 "" if not extra else " (%s)" % ", ".join(extra)))
     if placed:
         cents = sorted(c for c, _n in stats)
         med = cents[len(cents) // 2]
@@ -1487,7 +1693,13 @@ def main():
     n.set_defaults(func=cmd_notes)
 
     m = sub.add_parser("import", help="a MIDI file onto the chip's voices")
-    m.add_argument("file", help="a .mid")
+    m.add_argument("file", nargs="?", help="a .mid (or use --part)")
+    m.add_argument("--part", action="append",
+                   help="FILE[,track=N][,dist=N][,transpose=N][,volume=N]"
+                        "[,period=N][,pick=...]: one per voice, in order, each "
+                        "its own file. dist is the waveform (POKEY 5 pure, 6 the "
+                        "4-bit-poly bass); period 15/5/3 keeps that bass to one "
+                        "timbre")
     m.add_argument("-o", "--out")
     m.add_argument("--chip", default="tia", choices=sorted(CHANNELS))
     m.add_argument("--region", default="ntsc", choices=sorted(CLOCK))
