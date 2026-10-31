@@ -185,6 +185,50 @@ included), so costs against the empty baseline are the plain cartridge's to with
 the numbers off the screen (a photo will do), put them in a file, and `dmacart.py compare`
 prints them beside MAME's (`dmacart.py mame`).
 
+**Measured on a real NTSC 7800 (October 2026),** started through Atari's BIOS from a flash
+cartridge, against the openFPGA 7800 core on an Analogue Pocket and MAME before and after the
+two fixes these numbers led to. The count is the one on screen, or its lowest and highest where
+they differ; the cost is the baseline's count less the shape's, times 14.0156:
+
+| # | shape | 7800 | Pocket | MAME before | MAME after | cost on the 7800 |
+|---|---|---|---|---|---|---|
+| 00 | empty zones (baseline) | 1837 | 1836 | 1836 | 1835-1836 | -- |
+| 01 | 2 x 8b | 1618 | 1617 | 1615-1616 | 1616-1617 | 3,069 |
+| 02 | 2 x 1b | 1756 | 1755 | 1753-1754 | 1754 | 1,135 |
+| 03 | 2 x 16b | 1453-1454 | 1452-1453 | 1450-1451 | 1452 | 5,375 |
+| 04 | 2 x 8b, 5-byte | 1604 | 1603 | 1602 | 1603 | 3,266 |
+| 05 | 2 x 4 chars, 1 b/char | 1604 | 1603 | 1602 | 1603 | 3,266 |
+| 06 | 2 x 4 chars, 2 b/char | 1522 | 1521 | 1519-1520 | 1521 | 4,415 |
+| 07 | 2 x 20b, 8-line zones | 1369-1370 | 1368-1369 | 1366 | 1368 | 6,552 |
+| 08 | 2 x 8b, 8-line zones | 1616 | 1615 | 1614 | 1615 | 3,097 |
+| 09 | 2 x 20b holey | 1755 | 1754 | 1752 | 1752 | 1,149 |
+| 10 | 2 x 8b holey | 1755 | 1754 | 1752 | 1752 | 1,149 |
+| 11 | 2 x 20b + DLI | 1347-1348 | 1346 | 1343-1344 | 1346 | 6,861 |
+| 12 | 2 x 8b + DLI | 1594 | 1593 | 1591-1592 | 1592-1593 | 3,406 |
+| 13 | 6 x 16b (hits the limit) | 686-687 | 685-686 | 679 | 685 | 16,125 |
+| 14 | 8 x 16b (over the limit) | 426-427 | 418-419 | 426-427 | 426-427 | 19,769 |
+
+What they show:
+
+- **The cost table is right.** Under the limit, the console's cost is the Guide's per-line
+  colour clocks rounded up to whole CPU cycles on each line (cart 01: 3,072 predicted, 3,069
+  read; 07: 6,552 and 6,552; 13: 16,128 and 16,125). Rounding down instead is worse where a
+  line's DMA is not a whole number of CPU cycles (carts 02, 09 and 10).
+- **MAME drew the first zone a line too tall:** it stepped the line counter only from the line
+  after reading the display list list, so the first line of the first zone was drawn twice. That
+  was one line of the shape's DMA a frame too many (14 to 88 cycles), and the picture a line low.
+- **Past the limit the 6502 waits 107 cycles from the start of DMA,** half a cycle into the next
+  line. MAME let it go when the next line started (112 cycles a frame cheap); the Pocket charges
+  about 100 a frame too much here, and matches the console everywhere else.
+- **One pass a frame is unexplained:** the console counts one more than the Pocket and both
+  MAMEs on every shape, the empty baseline too, so it is a fixed 7 to 21 cycles a frame (where
+  the console moves the VBLANK flag within the line, or a small cost once a frame) that these
+  carts cannot place. Costs, which subtract the baseline, are unaffected.
+
+With both fixes MAME's costs are the console's to within 7 cycles a frame on 12 of the 15 shapes
+and 21 on the other three (the two holey ones and the one over the limit). `dmabudget.py`'s
+constants were fitted to MAME before these fixes, not to these numbers.
+
 Holey DMA is a large saving, not a rounding error -- two 20-byte objects over
 192 scanlines went from 1,412 iterations a frame to 1,825 -- and it is exactly
 the byte cost that disappears: the objects still pay for their display-list
