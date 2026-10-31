@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 import asm
 
-HEADER_BIT = {0x4000: 0x0001, 0x0450: 0x0002, 0x0800: 0x8000}
+HEADER_BIT = {0x4000: 0x0001, 0x0450: 0x0040, 0x0800: 0x8000}   # .a78 cart type: bits 0, 6, 15
 
 
 def build(path, audctl=0, audf=(0x20,) * 4, irqen=0x01, base=0x4000, skctl=0x03, poll=False):
