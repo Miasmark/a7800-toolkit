@@ -229,6 +229,21 @@ With both fixes MAME's costs are the console's to within 7 cycles a frame on 12 
 and 21 on the other three (the two holey ones and the one over the limit). `dmabudget.py`'s
 constants were fitted to MAME before these fixes, not to these numbers.
 
+**Where in the line things happen (November 2026).** The openFPGA 7800 core's test carts
+(`sim/mstat/` in that repository), which read the same on a console, place the line's events
+against WSYNC. Counted in MARIA clocks (454 a line, 4 a CPU cycle) from the line reset, where
+WSYNC lets go: MSTAT's vblank bit changes 42 clocks later, on the frame's line 16 and line 258;
+the end of vblank fetches the first zone as 16 clocks of DMA of its own (the Guide's "first DMA
+of a frame"; it is 8 more there); and a line's DMA starts at the start of horizontal blank, 28
+clocks after the reset, the CPU stopping a cycle later. The first line's DMA is the line after the
+zone fetch. A line over the limit holds the CPU 107 cycles, 108 on a zone's last line. And a CPU
+read of a colour register in a visible line puts that register's colour out at the beam for 2
+clocks (a write repeats the previous pixel for 1), so a loop that reads one leaves a trail of
+dots. The patched MAME follows all of it since November 2026: `mstat_test.a78` reads 1960 1960
+/ 21 105 / 242 105 there as on the console, `dma_diff.a78`'s cost of each of the 263 lines is the
+core's on every line, and the series above reads as in the "MAME after" column but for 00 (1836),
+03 (1452-1453), 07 (1368-1369) and 14 (426).
+
 Holey DMA is a large saving, not a rounding error -- two 20-byte objects over
 192 scanlines went from 1,412 iterations a frame to 1,825 -- and it is exactly
 the byte cost that disappears: the objects still pay for their display-list
