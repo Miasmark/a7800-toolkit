@@ -4862,6 +4862,69 @@ def t_colortest():
     return "4 cartridges match a fresh build; 256 cells read back exactly"
 
 
+def t_artifacttest():
+    """artifacttest.py: the committed cartridge is what it builds, it is signed,
+    and its display lists, walked as MARIA walks them in 320A mode, draw every
+    band's pattern on every line of the band, with the band's number beside it."""
+    import artifacttest as at
+    import asm
+    import sign7800
+    d = tempfile.mkdtemp(prefix="artifacttest-")
+    at.build(d)
+    built = io.open(os.path.join(d, "artifacttest-7800.a78"), "rb").read()
+    committed = os.path.join(ROOT, "tests", "carts", "artifacttest-7800.a78")
+    assert io.open(committed, "rb").read() == built, (
+        "tests/carts/artifacttest-7800.a78 is stale: python tools/artifacttest.py build -o tests/carts")
+    rom = io.open(os.path.join(d, "artifacttest-7800.bin"), "rb").read()
+    assert sign7800.verify(rom)
+    a = asm.Assembler()
+    a.assemble(at.source().splitlines())
+    mem = lambda addr: rom[addr - 0xC000] if addr >= 0xC000 else 0
+
+    def lines():
+        """each line's 320 pixels (True: foreground), from the DLL"""
+        p = a.sym["dll"]
+        while p < a.sym["code_end"]:
+            head, dl = mem(p), (mem(p + 1) << 8) | mem(p + 2)
+            p += 3
+            for off in range(head & 0x0F, -1, -1):
+                px = [False] * 320
+                q = dl
+                while mem(q + 1) & 0x5F:
+                    assert mem(q + 1) & 0x1F, "only 4-byte headers are used"
+                    lo, hi, hpos = mem(q), mem(q + 2), mem(q + 3)
+                    pals.add((y_line[0], mem(q + 1) >> 5))
+                    width = ((mem(q + 1) ^ 0xFF) & 0x1F) + 1
+                    for i in range(width):
+                        b = mem(((hi + off) << 8) + lo + i)
+                        for bit in range(8):
+                            x = 2 * (hpos + 4 * i) + bit
+                            if x < 320 and b & (0x80 >> bit):
+                                px[x] = True
+                    q += 4
+                y_line[0] += 1
+                yield px
+
+    pals = set()
+    y_line = [0]
+    rows = list(lines())
+    for k, (pat, pal) in enumerate(at.BANDS):
+        first = at.TOP_LINES + k * (at.BAND_LINES + at.GAP_LINES)
+        for y in range(first - 1, first + at.BAND_LINES + 1):
+            px = rows[y]
+            inside = first <= y < first + at.BAND_LINES
+            want_pat = [inside and bool(pat & (0x80 >> (i % 8))) for i in range(8 * at.PAT_BYTES)]
+            got_pat = px[2 * at.PAT_HPOS:2 * at.PAT_HPOS + 8 * at.PAT_BYTES]
+            assert got_pat == want_pat, "band %d line %d: the pattern is wrong" % (k + 1, y - first)
+            blocks = sum(1 for x in range(320) if px[x] and (x == 0 or not px[x - 1])) - (
+                sum(1 for x in range(2 * at.PAT_HPOS, 320) if px[x] and not px[x - 1]))
+            assert blocks == ((k + 1) if inside else 0), "band %d line %d: %d blocks" % (k + 1, y - first, blocks)
+            assert not any(px[2 * at.PAT_HPOS + 8 * at.PAT_BYTES:]), "band %d: drawn past the pattern" % (k + 1)
+            if inside:
+                assert (y, pal) in pals, "band %d: not in palette %d" % (k + 1, pal)
+    return "the cartridge matches a fresh build; %d bands drawn right on every line" % len(at.BANDS)
+
+
 def t_patchset():
     """The patch-set format, against a cartridge invented for the purpose.
 
@@ -5648,6 +5711,7 @@ def main():
     r.check("regression runner", t_regress)
     r.check("MAME palette", t_mame_palette)
     r.check("colour test", t_colortest)
+    r.check("artifact colour test", t_artifacttest)
     r.check("recipes carry no payload", t_portkit_refuses_payload)
     r.check("published patches carry no ROM", t_dist_carries_no_rom)
     r.check("tool --help", t_helps)
