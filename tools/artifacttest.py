@@ -62,6 +62,17 @@ $0's row is grey, the plain pattern colours for reference. Photograph it
 straight on, with the TV's tint, colour and brightness controls where they
 were for artifacttest, and the whole screen in the picture.
 
+Results (an NTSC console over composite, November 2026): artifacttest's band
+1 is purple and band 2 green, so the artifact phase is 1, MiSTer's and MAME's
+default. On artifacthues the patterns in a colour turn the other way from
+MiSTer's model at luminance 4 (blue $AA: nearly the solid blue; $55: magenta)
+and agree more as the luminance rises. A level on the COLOR pin while a
+colour is selected (0.08 V above none) explains that: switched every pixel it
+is a carrier-rate step past the chroma resonator. It brings the patterns'
+hues, against each row's solid block, from a median 23 degrees off to 9 at
+luminance 4 and from 30 to 14 at luminance 8; it is MAME's Composite Colour
+Pin Offset, on by default.
+
 `shoot` takes MAME's pictures of both cartridges with Composite Video off,
 then on at each artifact phase, as PNGs in the output folder.
 """

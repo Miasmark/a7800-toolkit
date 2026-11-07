@@ -229,6 +229,19 @@ With both fixes MAME's costs are the console's to within 7 cycles a frame on 12 
 and 21 on the other three (the two holey ones and the one over the limit). `dmabudget.py`'s
 constants were fitted to MAME before these fixes, not to these numbers.
 
+**Artifact colour (November 2026).** A 320 pixel is half a cycle of the colour carrier, so through composite
+or RF a 320-mode pattern shows colour no palette entry has (Tower Toppler's tower). `tools/artifacttest.py` builds
+two test cartridges. On a console, `artifacttest.a78`'s alternate-pixel `$AA` in white is purple and `$55` green:
+MARIA's pixels sit at artifact phase 1 against the carrier, MiSTer's core's and MAME's default. `artifacthues.a78`
+shows every hue's `$AA` and `$55` at luminance 4, 8 and C. Patterns in a colour do not decode as MiSTer's composite
+model has them: at luminance 4 they turn the other way from it (`$AA` in blue `$84` nearly the solid blue, `$55`
+magenta, where the model gives dark violet and dark teal), and they agree more as the luminance rises. A level on
+the COLOR pin while a colour is selected, 0.08 V above none, fits that: a solid colour's chroma resonator removes
+it, but switched every pixel it is a carrier-rate step. Fitted to two photos, it brings the patterns' hues
+(measured against each row's solid block, so the camera's colour cast cancels) from a median 23 degrees off to
+9 at luminance 4 and from 30 to 14 at luminance 8. Luminance C could not be judged: the photos wash its solid
+colours out. MAME's Composite Video has it as Composite Colour Pin Offset, on by default.
+
 **Where in the line things happen (November 2026).** The openFPGA 7800 core's test carts
 (`sim/mstat/` in that repository), which read the same on a console, place the line's events
 against WSYNC. Counted in MARIA clocks (454 a line, 4 a CPU cycle) from the line reset, where
