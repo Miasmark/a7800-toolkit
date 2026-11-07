@@ -4871,10 +4871,12 @@ def t_artifacttest():
     import sign7800
     d = tempfile.mkdtemp(prefix="artifacttest-")
     at.build(d)
-    built = io.open(os.path.join(d, "artifacttest-7800.a78"), "rb").read()
-    committed = os.path.join(ROOT, "tests", "carts", "artifacttest-7800.a78")
-    assert io.open(committed, "rb").read() == built, (
-        "tests/carts/artifacttest-7800.a78 is stale: python tools/artifacttest.py build -o tests/carts")
+    for name in ("artifacttest-7800.a78", "artifacthues-7800.a78"):
+        built = io.open(os.path.join(d, name), "rb").read()
+        committed = os.path.join(ROOT, "tests", "carts", name)
+        assert io.open(committed, "rb").read() == built, (
+            "tests/carts/%s is stale: python tools/artifacttest.py build -o tests/carts" % name)
+        assert sign7800.verify(built[128:])
     rom = io.open(os.path.join(d, "artifacttest-7800.bin"), "rb").read()
     assert sign7800.verify(rom)
     a = asm.Assembler()
@@ -4922,7 +4924,55 @@ def t_artifacttest():
             assert not any(px[2 * at.PAT_HPOS + 8 * at.PAT_BYTES:]), "band %d: drawn past the pattern" % (k + 1)
             if inside:
                 assert (y, pal) in pals, "band %d: not in palette %d" % (k + 1, pal)
-    return "the cartridge matches a fresh build; %d bands drawn right on every line" % len(at.BANDS)
+
+    # the hue rows: every row zone after 3 black lines (the interrupt on the middle), nine blocks in the right
+    # palettes and patterns, the tick on rows 0, 4, 8 and 12, and the interrupt's colours
+    hrom = io.open(os.path.join(d, "artifacthues-7800.bin"), "rb").read()
+    h = asm.Assembler()
+    h.assemble(at.source_hues().splitlines())
+    hm = lambda addr: hrom[addr - 0xC000] if addr >= 0xC000 else 0
+    p = h.sym["dll"]
+    rows = []
+    while p < h.sym["code_end"]:
+        head, dl = hm(p), (hm(p + 1) << 8) | hm(p + 2)
+        if dl != h.sym["dl_empty"]:
+            assert (hm(p - 9), hm(p - 6), hm(p - 3)) == (0x00, 0x80, 0x00), (
+                "row %d: not 3 black lines with the interrupt on the middle" % len(rows))
+            assert head == at.HUE_ROW_LINES - 1
+            objs = []
+            q = dl
+            while hm(q + 1) & 0x5F:
+                objs.append((hm(q), hm(q + 1) >> 5, ((hm(q + 1) ^ 0xFF) & 0x1F) + 1, hm(q + 2), hm(q + 3)))
+                q += 4
+            rows.append(objs)
+        p += 3
+    assert len(rows) == 16, len(rows)
+    for r, objs in enumerate(rows):
+        tick = [o for o in objs if o[1] == 7]
+        assert len(tick) == (1 if r % 4 == 0 else 0), "row %d: tick" % r
+        blocks = [o for o in objs if o[1] != 7]
+        assert len(blocks) == 9
+        for i in range(3):
+            for j, pat in enumerate(at.HUE_PATS):
+                lo, pal, width, hi, hpos = blocks[3 * i + j]
+                assert (pal, width, hpos) == (i, at.HUE_BLOCK_BYTES, at.HUE_HPOS0 + at.HUE_PITCH * (3 * i + j))
+                for line in range(at.HUE_ROW_LINES):
+                    assert all(hm(((hi + line) << 8) + lo + k) == pat for k in range(width)), (
+                        "row %d block %d: not $%02X" % (r, 3 * i + j, pat))
+    src = at.source_hues()
+    lines = [l.split(";")[0].strip() for l in src.splitlines()]
+    i = lines.index("nmi:")
+    body = lines[i:lines.index("irq:")]
+    w = body.index("STA WSYNC")
+    assert body[w + 1:w + 4] == ["STA P0C2", "STX P1C2", "STY P2C2"], "the colours are not written straight after WSYNC"
+    # the three values: ROW << 4 | 8 in X, then | C in Y, then | 4 in A
+    for row in range(16):
+        x = (row << 4) | at.HUE_LUMS[1]
+        y = x ^ int(body[body.index("TAX") + 1].split("#$")[1], 16)
+        acc = y ^ int(body[body.index("TAY") + 1].split("#$")[1], 16)
+        assert (acc, x, y) == tuple((row << 4) | l for l in at.HUE_LUMS), "row %d's colours" % row
+    return ("the cartridges match a fresh build; %d bands drawn right on every line; "
+            "16 hue rows of 9 blocks" % len(at.BANDS))
 
 
 def t_patchset():
