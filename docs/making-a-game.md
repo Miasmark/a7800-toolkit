@@ -71,9 +71,14 @@ in the low -- and **every bit is active low**: a clear bit means pushed. Player
 button is `INPT4` (player 1) or `INPT5` (player 2), bit 7 clear while held. A
 two-button controller needs `SWCHB`'s direction register set up first (the Guide:
 `LDA #$14 / STA $0283 / LDA #0 / STA $0282`); its buttons are then `INPT0-INPT3`, and
-the Guide says they read bit 7 *set* while held -- the opposite sense, not checked
-here. A game should detect a one-button stick from `INPT4/5` and not run in
-two-button mode, which the Guide warns can harm one. Testing any of these the obvious way round is the
+the Guide says they read bit 7 *set* while held -- the opposite sense. *Checked
+2026-11-08, in MAME only:* bit 7 is set while a button is held. MAME's a7800 driver
+wires the buttons active high to bit 7 (player 1: `INPT1` button 1, `INPT0` button 2),
+Midnight Mutants sets the mode at `f6:$4A2A` and latches `INPT1`/`INPT0 AND #$80` at
+`f7:$D0B1`, and Karateka MARIA Edition's two-button test read both buttons that way.
+It has not been checked on hardware. A game should detect a one-button stick from
+`INPT4/5` and not run in two-button mode: never drive port B low for a one-button
+stick, which the Guide warns can harm one. Testing any of these the obvious way round is the
 classic first input bug, and it fails silently: the game simply behaves as
 though the stick is held in the opposite direction constantly.
 
@@ -82,8 +87,14 @@ edit rather than a register table to interpret.
 
 ## Splitting the screen with a DLI
 
-Set bit 7 of a zone's DLL entry and MARIA raises an interrupt at the end of
-that zone. Two things about it catch people out:
+Set bit 7 of a zone's DLL entry and MARIA raises an interrupt when she finishes
+the DMA for the last line of the zone *before* it, which is a raster before that
+line is on screen. (*Corrected 2026-11-08:* this said "at the end of that zone";
+the Guide and MAME with the fork's MARIA work both put it a zone earlier.) A colour the
+handler writes at once, or after one `WSYNC`, still shows on the earlier zone's
+last line. After two `WSYNC`s it starts on the flagged zone. `docs/hardware.md`,
+"When a display interrupt fires", has the details. Two more things about it
+catch people out:
 
 * **It arrives as NMI, not IRQ.** `SEI` does not protect you. The handler has
   to exist and be correct before you turn DMA on, not merely before you first

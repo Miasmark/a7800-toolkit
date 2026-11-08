@@ -36,7 +36,13 @@ HOLEY DMA, and what it is worth
     the 16K bit set, a fetch is dropped when **address bit 12 is set**
     ($D000 and $F000 free; $C000 and $E000 pay in full). The 8K bit made no
     difference anywhere in $C000-$FFFF, so this tool does not model it, and
-    does not pretend to know what it does.
+    does not pretend to know what it does. (Corrected 2026-11-08: MARIA's
+    source in MAME (0.264, and 0.289 with the fork's work), and the Guide,
+    drop a fetch under the 8K bit when address bits 15 and 11 are set,
+    $C800-$CFFF for one, so that result most likely came from test
+    graphics where bit 11 was clear. See
+    docs/hardware.md. `h` still just means "this zone's fetches fall in a
+    hole", whichever bit made it one.)
 
 WHAT DOES NOT COST WHAT YOU MIGHT THINK
     Zone height does not matter: the same objects in 8-scanline and
