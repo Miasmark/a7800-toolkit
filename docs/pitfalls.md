@@ -63,6 +63,16 @@ RAM-indexed operations that cannot have produced a read of a ROM address
 elsewhere on the map. One batch of hits was even attributed to a PC that was
 itself a RAM address, which cannot be a real 6502 program counter.
 
+*Corrected 2026-11-08:* a PC in RAM **can** be real. The 7800 BIOS copies its
+cartridge-checksum code into RAM and runs it there while the cartridge is
+mapped in, every boot. In Ms. Pac-Man a read tap on four orphan ROM blocks
+reported PC `$2404` for every hit, early in each run (about frames 14-160). It
+was not DMA: the return address on the stack led to live code at `$23FF`,
+called from a dispatcher also in RAM (`$238F`, `$23B7`), and those bytes match
+the BIOS ROM (that repo's FINDINGS, "The orphan blocks, actually resolved").
+Games run code from RAM too. So a RAM PC is a reason to look at what is in
+RAM at that moment (dump it, or peek the stack), not proof of DMA.
+
 MARIA's own graphics DMA shares the same bus the 6502 does, and it runs
 constantly during normal play -- scanning display-list entries, including empty
 ones, every frame. A tap installed on the shared address space cannot tell a
@@ -1144,6 +1154,15 @@ and writing the bank register only once the raster has passed; it also keeps
 the current bank in RAM so interrupt handlers can restore it. A routine that
 switches banks without that wait works in a test and tears the picture in play.
 
+*Corrected 2026-11-08:* the spin is not foreground code; it runs inside the
+NMI. The display interrupt's handler (`f6:$4104`) pages bank 0 in (`$410F`),
+points the RAM NMI vector (`$2135/$2136`) at a one-instruction handler
+(`f6:$416F`, `DEC $1E68 / RTI`), sets `$1E68` to zero and spins on it
+(`$4152-$4155`). The next zone's display interrupt nests, bumps the flag and
+returns. Only then does the outer handler restore the game's bank from `$BF`
+(`$4157`) and put the vector back. MARIA's own next interrupt says when the
+zone is done.
+
 
 ## A batch file's `%~dp0` ends in a backslash, and `"...\"` swallows the quote
 
@@ -1244,6 +1263,11 @@ a7800 fork's MARIA timing):
 - After two `WSYNC`s it didn't. In 101 pictures the zone's last line changed in 50 with none or
   one, and in none with two or more.
 - Writing every frame, not only when late, delays the game's own handler by those lines.
+
+*Corrected 2026-11-08:* "the zone the DLI flagged" is wrong if "flagged" means the zone whose DLL
+entry has bit 7 set. The line these writes reached is the last line of the zone **before** the
+flagged one: MARIA fetches zone N's entry, and raises the NMI, right after the DMA for zone N-1's
+last line. See `hardware.md`, "When a display interrupt fires".
 
 ## On Windows, MAME's Left Alt button sends the keys to the window's menu
 

@@ -544,6 +544,12 @@ class Emitter:
             return self.note(src[0], a7800.sym_for(tgt, ct, write), tgt)
         # hardware register?
         hw = a7800.HW.get(tgt)
+        # $01 is INPTCTRL only until the cartridge locks it; a store to it
+        # anywhere else reaches the TIA's VBLANK (see find_lock_writes)
+        if (hw and (tgt & 0xFF) in a7800.TIA_LOCKED and mn in m6502.STORES
+                and getattr(self.an, "lock_found", False)
+                and src not in self.an.inptctrl_writes):
+            hw = a7800.TIA_LOCKED[tgt & 0xFF] + hw[len(a7800.TIA[tgt & 0xFF]):]
         if hw and tgt < 0x0400:
             return self.note(src[0], hw, tgt)
         if tgt in self.cfg.ram:
@@ -817,6 +823,54 @@ class Emitter:
         return end
 
 
+def find_lock_writes(an, cart, res, limit=64):
+    """Find the reset code's INPTCTRL writes, up to and including the lock.
+
+    INPTCTRL answers at $01 only until a write sets its lock bit (bit 0); after
+    that a store to $01 reaches the TIA, where $01 is VBLANK. A cartridge locks
+    it in its first few instructions after RESET (`LDA #$17 / STA $01`), so walk
+    straight on from the reset vector, following JMPs and keeping the immediates
+    loaded into A, X and Y, until a store to $01 locks it. Sets
+    `an.inptctrl_writes` (the locations of the stores to $01 on the way, the
+    lock included) and `an.lock_found`. If the walk meets a branch, a call or a
+    return first, or stores a value it cannot see, nothing is found and every
+    store keeps the name INPTCTRL, as before.
+    """
+    an.inptctrl_writes, an.lock_found = set(), False
+    sp = cart.space_of(res, None)
+    if not sp:
+        return
+    loc = (sp, res)
+    regs = {"A": None, "X": None, "Y": None}
+    keep = {"SEI", "CLD", "CLI", "SED", "CLC", "SEC", "CLV", "NOP", "TXS",
+            "STA", "STX", "STY"}
+    for _ in range(limit):
+        ins = an.insn.get(loc)
+        if ins is None:
+            return
+        mn, mode, operand, length = ins
+        if mn in ("LDA", "LDX", "LDY") and mode == "imm":
+            regs[mn[2]] = operand
+        elif mn in ("STA", "STX", "STY") and mode in ("zp", "abs") \
+                and operand in (0x01, 0x0101, 0x0201):
+            an.inptctrl_writes.add(loc)
+            v = regs[mn[2]]
+            if v is None:
+                return
+            if v & 1:
+                an.lock_found = True
+                return
+        elif mn == "JMP" and mode == "abs":
+            nsp = cart.space_of(operand, None)
+            if not nsp:
+                return
+            loc = (nsp, operand)
+            continue
+        elif mn not in keep:
+            return
+        loc = (loc[0], loc[1] + length)
+
+
 # ----------------------------------------------------------------------- main
 def analyse(cart, cfg):
     """Trace a cartridge from its vectors and the config's entries.
@@ -901,6 +955,7 @@ def analyse(cart, cfg):
                 an.mark((sp, tgt), "sub")
             an.run(new)
     an.name_all()
+    find_lock_writes(an, cart, res)
     for name, v in (("NMI", nmi), ("RESET", res), ("IRQ", irq)):
         sp = cart.space_of(v, None)
         if sp:

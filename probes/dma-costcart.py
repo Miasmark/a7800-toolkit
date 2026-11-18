@@ -38,13 +38,13 @@ def build(path, nobj, width, zones_used=ZONES, dma_on=True, five_byte=False, nop
     L=[]; a=L.append
     a("MSTAT = $28"); a("DPPH = $2C"); a("DPPL = $30"); a("CTRL = $3C")
     a("OFFSET = $38"); a("BACKGRND = $20"); a("P0C1 = $21"); a("P0C2 = $22")
-    a("P0C3 = $23"); a("INPTCTRL = $01")
+    a("P0C3 = $23"); a("INPTCTRL = $01"); a("VBLANK = $01")   # the TIA's, once INPTCTRL is locked
     a("cnt_lo = $80"); a("cnt_hi = $81"); a("res_lo = $90"); a("res_hi = $91")
     a("    .org $C000")
     a("reset:")
     a("    SEI"); a("    CLD"); a("    LDX #$FF"); a("    TXS")
     a("    LDA #$17"); a("    STA INPTCTRL")
-    a("    LDA #$00"); a("    STA OFFSET"); a("    STA INPTCTRL")
+    a("    LDA #$00"); a("    STA OFFSET"); a("    STA VBLANK")
     a("    LDA #$60"); a("    STA CTRL")          # DMA off while we set up
     a("    LDA #$00"); a("    STA BACKGRND")
     a("    LDA #$0F"); a("    STA P0C1")

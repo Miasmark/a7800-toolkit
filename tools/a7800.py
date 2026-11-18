@@ -2,13 +2,19 @@
 
 # --- TIA (7800 only uses a handful of the 2600 TIA registers) -----------------
 TIA = {
-    0x01: "INPTCTRL",   # write: bit0 2600/7800 mode, bit1 BIOS/cart map, bit2 MARIA en
+    0x01: "INPTCTRL",   # write: bit0 lock, bit1 MARIA en, bit2 cart (BIOS off), bit3 TIA video
     0x08: "INPT0", 0x09: "INPT1", 0x0A: "INPT2", 0x0B: "INPT3",
     0x0C: "INPT4", 0x0D: "INPT5",
     0x15: "AUDC0", 0x16: "AUDC1",
     0x17: "AUDF0", 0x18: "AUDF1",
     0x19: "AUDV0", 0x1A: "AUDV1",
 }
+# INPTCTRL answers only until the lock bit is set. After that a write to $01
+# reaches the TIA, where $01 is VBLANK (bit 7 grounds INPT0-3, bit 6 latches
+# INPT4/5). disasm.py uses this name for every store to $01 except those in
+# the reset code up to and including the lock (Centipede's DLIs write $80 and
+# $00 to it; the listing used to read as if they rewrote the lock register).
+TIA_LOCKED = {0x01: "VBLANK"}
 
 # --- MARIA -------------------------------------------------------------------
 MARIA = {

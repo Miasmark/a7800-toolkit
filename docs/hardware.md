@@ -33,8 +33,7 @@ to draw, which is why 7800 code is so often written around a scanline budget.
 
 ```
 byte 0:  bit 7    display interrupt (DLI): it fires after DMA on the last line of
-                  the PREVIOUS zone, so the handler runs before this zone is
-                  drawn and its register writes apply to this zone
+                  the PREVIOUS zone (see "When a display interrupt fires" below)
          bit 6    holey DMA for 16-line zones (odd 4K blocks read as zero)
          bit 5    holey DMA for 8-line zones (odd 2K blocks read as zero)
          bits 3-0 offset: scanlines in this zone, minus one
@@ -64,6 +63,41 @@ byte 4:  horizontal position
 
 A byte 1 of zero ends the list. See `pitfalls.md`: the four/five ambiguity is
 the single most reliable way to get a confident wrong answer out of a 7800 ROM.
+
+### When a display interrupt fires
+
+Bit 7 of zone N's DLL entry raises the NMI when MARIA finishes its DMA for the
+**last line of zone N-1**: it is at that point that she fetches zone N's entry,
+and the Guide puts the interrupt one 7.16 MHz clock after DMA shuts down
+(Appendix 3; the DLL section says the same, "Interrupt after DMA on last line of
+previous zone"). For the first zone the fetch, and so the interrupt, comes at
+the end of vertical blank (raster 16). MAME with the fork's MARIA work
+(Miasmark/mame-Atari8bit7800, `atari-0.289`: `src/mame/atari/maria.cpp`,
+`startdma` and `vblank_edge`) does exactly this.
+
+Line RAM is double-buffered: the DMA at the start of one raster builds the line
+shown on the next. So, in raster terms, if zone N-1's last line is on screen at
+raster R:
+
+- the DMA for that line runs at the start of raster R-1, and the NMI arrives
+  right after it, still in raster R-1;
+- zone N's first line is built in raster R and shown in raster R+1.
+
+What the handler writes then lands at different places:
+
+- **Colours** apply the moment they are written, mid-line included. Written at
+  once, or after one `WSYNC`, they still reach zone N-1's last line. After two
+  `WSYNC`s they start on zone N's first. This was measured in MAME with the
+  fork's MARIA timing (`pitfalls.md`, "A DLI's handler that runs into the next DLI").
+- **What DMA reads** (`CHARBASE`, `CTRL`'s character width, and the like) has to
+  be in place before zone N's first DMA. That DMA starts 8 cycles into raster R
+  (the Guide says 7). A write made at once does that, and so does a write right
+  after one `WSYNC`. This comes from that MAME's model; it has not been measured.
+
+*Corrected 2026-11-08:* this table used to say the handler "runs before this
+zone is drawn and its register writes apply to this zone". `making-a-game.md`
+said the interrupt comes "at the end of that zone". Both are now replaced by the
+account above.
 
 ### Registers
 
@@ -164,6 +198,24 @@ entries. Which addresses are suppressed was measured, not looked up: with the
 `$F000` free, `$C000` and `$E000` charged in full). The 8K bit made no
 measurable difference anywhere in `$C000-$FFFF`.
 
+*Corrected 2026-11-08:* that last sentence does not hold, at least in the
+emulators the measurement ran on. MARIA's source in MAME 0.264 and in MAME with
+the fork's MARIA work (`is_holey`, the same in both) decides each graphics fetch
+from its address:
+
+- with bit 6 (H16) set, a fetch is dropped when A15 and A12 are both set;
+- with bit 5 (H8) set, a fetch is dropped when A15 and A11 are both set;
+- with both bits set, either rule drops it.
+
+The address checked is the one fetched, the graphics address plus the zone's
+offset times 256. The Guide gives the same rules ("A12 high => data=0",
+"A11 high => data=0"). So H8 drops `$C800-$CFFF`, `$D800-$DFFF`, `$E800-$EFFF`
+and `$F800-$FFFF`. Centipede counts on that: its 8-line zones all set H8 (in
+its DLL template at `$C198` they are `$27` headers, `$A7` with a DLI). The
+measuring cartridge (`probes/dma-costcart.py`) keeps its graphics at
+`$D000`. An 8-line zone there fetches only from `$D000-$D7FF`, where A11 is clear, which would explain why
+nothing changed. H8 has not been re-measured since.
+
 Two things that cost nothing extra, also measured, because both looked like
 plausible suspects for a discrepancy that turned out not to exist: **zone
 height** (8-scanline and 16-scanline zones with the same objects agree to
@@ -220,6 +272,17 @@ first few instructions after RESET, which is how the reset probe in
 | 1 | MARIA enable | enables MARIA and the system RAM |
 | 2 | EXT | 0 = the BIOS is mapped at `$8000-$FFFF`, 1 = the cartridge is |
 | 3 | TIA-EN | 1 = TIA video and two-button mode off, 0 = MARIA video |
+
+**After the lock, `$01` is the TIA's `VBLANK`.** INPTCTRL decodes the whole
+TIA range `$00-$1F` until bit 0 is set (the Guide; MAME's `tia_w` does the
+same), and writes go on to the TIA as well. Once it is locked, a write to `$01`
+reaches only the TIA, where it is `VBLANK`: bit 7 grounds the paddle inputs
+`INPT0-3`, bit 6 latches `INPT4/5`. So the zero most games write to `$01` right
+after locking (`LDA #$17 / STA $01 / ... / LDA #0 / STA $01`), and Centipede's
+display interrupts writing `$80` and `$00` there, set VBLANK; they do not
+rewrite INPTCTRL. `disasm.py` names a store to `$01` `INPTCTRL` only in the
+reset code, up to and including the lock, and `VBLANK` everywhere else.
+(*Corrected 2026-11-08:* it used to name every one `INPTCTRL`.)
 
 The tools use bit 0 as the sign that the BIOS has handed over (`exectrace.lua`,
 `romcoverage.lua`). Accesses to the TIA (`$00-$1F`) and the RIOT (`$280-$2FF`) slow

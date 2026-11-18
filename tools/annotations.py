@@ -117,7 +117,7 @@ def _no_dupes(pairs):
 def hardware_names():
     import a7800
     names = set()
-    for table in (a7800.TIA, a7800.MARIA, a7800.RIOT):
+    for table in (a7800.TIA, a7800.TIA_LOCKED, a7800.MARIA, a7800.RIOT):
         names |= set(table.values())
     for table in (a7800.POKEY_WRITE, a7800.POKEY_READ):
         names |= set(table.values())
