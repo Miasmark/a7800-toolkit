@@ -48,7 +48,8 @@ class Cart(cart.Cart):
 # ------------------------------------------------------------------ analysis
 CLOBBER_ON_JSR = True        # registers are unknown after a JSR (False: the old behaviour)
 AUTO_RAM_VECTORS = True      # every JMP (RAM) operand is a vector worth following
-AUTO_DISPATCH = True         # `LDA tbl,X / STA zp / LDA tbl2,X / STA zp+1 / JMP (zp)` tables
+AUTO_DISPATCH = True         # `LDA tbl,X / STA zp / LDA tbl2,X / STA zp+1 / JMP (zp)` tables,
+                             # and `LDA hi,X / PHA / LDA lo,X / PHA / RTS` ones (scan_dispatch)
 
 
 class Analyzer:
@@ -372,17 +373,62 @@ class Analyzer:
         return None
 
     def scan_dispatch(self, limit=96):
-        """Targets of table-driven `JMP (zp)` dispatch.
+        """Targets of table-driven dispatch, in its two shapes.
 
-        The shape is a pointer in zero page loaded from a table and jumped through:
+        A pointer in zero page loaded from a table and jumped through:
 
             LDA tbl_lo,X ; STA zp ; LDA tbl_hi,X ; STA zp+1 ; JMP (zp)
 
-        (the table may also be interleaved, `tbl` and `tbl+1`). The table is read from the
+        and the RTS trick, the address less one pushed high byte first and returned to:
+
+            LDA tbl_hi,X ; PHA ; LDA tbl_lo,X ; PHA ; RTS
+
+        (either table may also be interleaved, `tbl` and `tbl+1`). The table is read from the
         ROM, entry by entry, for as long as each entry points at plausible code (documented
         opcodes, no BRK) in the ROM. Its extent is not known from the code, so it ends at the
         first entry that is not plausible. Returns [(space, target, site)]."""
         found = []
+        # the RTS trick: the five instructions exactly, nothing between them. A table in two
+        # halves is read up to the distance between the halves (256 at most: Planet
+        # Smashers' zone placers are a table of 256); an interleaved one up to `limit` words
+        for (space, addr), (mn, mode, operand, n) in sorted(self.insn.items()):
+            if mn != "RTS":
+                continue
+            srcs, cur = [], addr                    # the low byte's table, then the high's
+            for want in ("PHA", "LDA", "PHA", "LDA"):
+                prev = self._before(space, cur)
+                if prev is None:
+                    break
+                pmn, pmode, pop, _pn = self.insn[prev]
+                if pmn != want or (want == "LDA" and (pmode not in ("abx", "aby") or pop is None)):
+                    break
+                if want == "LDA":
+                    srcs.append(pop)
+                cur = prev[1]
+            if len(srcs) != 2:
+                continue
+            lo_src, hi_src = srcs
+            lsp = self.target_space(space, lo_src, None)
+            hsp = self.target_space(space, hi_src, None)
+            if not lsp or not hsp or lo_src < 0x4000 or hi_src < 0x4000:
+                continue
+            interleaved = hi_src == lo_src + 1
+            for i in range(limit if interleaved else min(256, abs(hi_src - lo_src))):
+                try:
+                    if interleaved:
+                        lo = self.cart.byte(lsp, lo_src + 2 * i)
+                        hi = self.cart.byte(lsp, lo_src + 2 * i + 1)
+                    else:
+                        lo = self.cart.byte(lsp, lo_src + i)
+                        hi = self.cart.byte(hsp, hi_src + i)
+                except Exception:                                # noqa: BLE001
+                    break
+                tgt = ((lo | (hi << 8)) + 1) & 0xFFFF
+                tspace = self.target_space(space, tgt, None)
+                if tgt < 0x4000 or not tspace or not self.cart.in_space(tspace, tgt) \
+                        or not self._plausible(tspace, tgt):
+                    break
+                found.append((tspace, tgt, (space, addr)))
         for (space, addr), (mn, mode, operand, n) in sorted(self.insn.items()):
             if not (mn == "JMP" and mode == "ind" and operand is not None and operand < 0x100):
                 continue

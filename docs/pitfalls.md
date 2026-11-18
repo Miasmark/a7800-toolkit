@@ -1357,3 +1357,21 @@ wave's speeds: the speed tables are indexed by a second byte that only the game'
 code moves. The runs looked healthy and measured the wrong load. Poke the game's own test for the
 event (the bytes its "level over" compare reads) so its code moves everything, or poke every byte
 the event writes.
+
+## A table of addresses less one is a jump table too
+
+The tracer followed `JMP (zp)` through a table and stopped at the other common dispatch, the RTS
+trick: `LDA tbl_hi,X / PHA / LDA tbl_lo,X / PHA / RTS`, each entry a handler's address less one.
+Planet Smashers dispatches its phases, its 35 object types, its hit handlers and its 24 zone
+placers this way, so from the vectors the listing held 2,352 instructions of about 7,860; the rest
+was `.byte` rows, and every handler had to be found and added by hand (a script read the tables
+out of the ROM).
+
+`disasm.py` now follows it (`scan_dispatch`): the five instructions exactly, the table interleaved
+or in two halves, read while each entry points at plausible code. On Planet Smashers it reaches
+7,726 instructions from the vectors alone, none of them outside the listing the hand-added entries
+gave; Desert Falcon, Robotron, Galaga, Asteroids and Food Fight come out as before.
+
+If a game pushes the address some other way (a `JSR` to a routine that does the pushing, the two
+loads far apart), the tables still have to be declared as entries: look for a `PHA / PHA / RTS`
+tail when a listing is mostly `.byte`.
