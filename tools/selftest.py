@@ -3304,6 +3304,45 @@ def t_dynamic_spaces():
     return "RAM code left out and reported; a flat cartridge's bank names read as rom"
 
 
+def t_rts_dispatch():
+    """The tracer follows the RTS trick (`LDA tbl_hi,X / PHA / LDA tbl_lo,X / PHA / RTS`: the
+    address less one pushed and returned to), with the table interleaved or in two halves,
+    as it follows a `JMP (zp)` table."""
+    import disasm
+    synth = _synth()
+    body = bytearray([0xFF]) * 0x8000
+
+    def put(addr, *bs):
+        body[addr - 0x8000:addr - 0x8000 + len(bs)] = bytes(bs)
+
+    put(0xF000, 0x20, 0x60, 0xF0)                        # JSR $F060
+    put(0xF003, 0xA2, 0x00, 0xBD, 0x21, 0xF0, 0x48,      # LDX #0 / LDA $F021,X / PHA
+        0xBD, 0x20, 0xF0, 0x48, 0x60)                    # LDA $F020,X / PHA / RTS
+    put(0xF020, 0x3F, 0xF0, 0x4F, 0xF0)                  # words, each a handler less one
+    put(0xF060, 0xA2, 0x00, 0xBD, 0xA0, 0xF0, 0x48,      # the same, the table in two halves
+        0xBD, 0x90, 0xF0, 0x48, 0x60)
+    put(0xF090, 0xBF, 0xCF)                              # the low bytes
+    put(0xF0A0, 0xF0, 0xF0)                              # the high bytes
+    for h in (0xF040, 0xF050, 0xF0C0, 0xF0D0):
+        put(h, 0xEA, 0xEA, 0xEA, 0xEA, 0x60)
+    put(0xFFFA, 0x00, 0xF0, 0x00, 0xF0, 0x00, 0xF0)
+    head = bytearray(synth.header(len(body), "RtsTrick"))
+    head[53:55] = b"\x00\x00"                             # no mapper bits: a flat cartridge
+    d = tempfile.mkdtemp(prefix="rts-")
+    rom = os.path.join(d, "r.a78")
+    io.open(rom, "wb").write(bytes(head) + bytes(body))
+    an, _g, _w, _v = disasm.analyse(disasm.Cart(rom), disasm.Config(data={}))
+    for h in (0xF040, 0xF050, 0xF0C0, 0xF0D0):
+        assert ("rom", h) in an.code, "handler $%04X not reached" % h
+    assert ("rom", 0xF001) not in an.code and ("rom", 0xF0E0) not in an.code
+    ann = os.path.join(d, "a.json")
+    run_tool("init.py", rom, "-o", ann)
+    src = os.path.join(d, "src")
+    run_tool("disasm.py", rom, "-c", ann, "-o", src)
+    assert "PASSED" in run_tool("verify.py", rom, "-d", src)
+    return "four handlers behind two RTS-trick tables reached (interleaved, and in two halves)"
+
+
 def t_firstlook_static():
     """firstlook's static half names what the cartridge is, with no MAME."""
     import firstlook
@@ -5963,6 +6002,7 @@ def main():
     r.check("profile mapping", t_pcmap)
     r.check("dynamic annotations", t_dynamic)
     r.check("dynamic annotations: RAM code, flat carts", t_dynamic_spaces)
+    r.check("RTS-trick tables", t_rts_dispatch)
     r.check("first look (static)", t_firstlook_static)
 
     print("")
