@@ -1280,3 +1280,80 @@ Seen on a Karateka session: a fight with punches and no button-2 press for 190 f
 `tools/session.py` now passes `templates/mame-ctrlr/a7800-keys.cfg` on Windows, which puts button 2
 on Space or Left Shift (`--alt-ok` keeps MAME's keys). Recordings store buttons, not keys, so old
 and new recordings play back the same.
+
+## A flat cartridge is one space, and code in RAM is not the cartridge's
+
+`probes/exectrace.lua` named every address by bank: `b0:8123`, `f7:C456`. That is right for a
+SuperGame and wrong for a flat 32K or 48K cartridge, whose one space is `rom` everywhere else in
+the toolkit. `dyn.py` then merged entries the disassembler had no space for and stopped with "the
+disassembler failed after merging; nothing kept". The same happened with a log that held code run
+from RAM (`ram:1D30`: a title screen's handler copied there).
+
+Seen on Desert Falcon (48K) and Commando (its title code runs at `$1D00`). Now: the probe writes
+`rom:` when `A7800_XT_BANKS` is 1, which `cart.py`'s `probe_env` gives for a flat cartridge;
+`dyn.py` reads a flat cartridge's bank names as `rom` and leaves out what is not in the cartridge,
+saying how many lines and of which space. On Desert Falcon the old `dyn.py` kept nothing; the new
+one reaches all 2,732 executed instructions (193 were unreached before it).
+
+## An NMI vector can point into RAM
+
+Desert Falcon's NMI vector is `$0040`: a `JMP` the game keeps in zero page and rewrites as each
+display interrupt arms the next. `probes/dlitimes.lua` timed the first fetch at the vector's target
+with a tap on `$4000-$FFFF`, so it printed the zones and no `nmi` line at all. It now puts a tap of
+its own on a vector below `$4000` (90 `nmi` lines in 30 frames there, where there were none).
+
+Do not confuse this with the commoner shape, a ROM handler that begins `JMP (ptr)` through a RAM
+pointer (Robotron `JMP ($59)`, Commando `JMP ($AE)`, Alien Brigade `JMP ($DD)`): there the vector
+is in ROM and the probe always worked.
+
+## A list of lists has no end mark
+
+MARIA walks the display list list until the frame's last scanline; nothing in the list says where
+it ends. `dlwalk.py --dll ADDR --zones 25` decoded 25 entries whatever they were, so after a short
+list it printed the bytes that follow it as two more "zones" (seen on a Robotron RAM dump: 18
+entries, 263 scanlines, then garbage). It now stops where the scanlines reach the frame's
+(`--frame-lines`, 263 by default, 313 for PAL, 0 to show every entry asked for) and says how many
+entries it left out.
+
+## An indexed load's dummy read reaches a read tap; an `INC` reaches a write tap twice
+
+`LDA abs,X` that crosses a page first reads `address - $100` (the 6502's dummy read), and a read
+tap sees it: a tap on a table then names code that only reads the page above. A read-modify-write
+instruction (`INC`, `DEC`, `ASL` on memory) writes the old value back before the new one, so a
+write tap counts it twice. Both seen on Robotron: a read tap on its zone tables named a dozen wrong
+readers, and edit counts came out doubled.
+
+Check a tap's hit against the instruction at its PC before believing it, and count
+read-modify-write stores once.
+
+## A RAM dump at the end of a frame can hold half-built lists
+
+A game that builds its display lists across the frame boundary (Desert Falcon builds every second
+frame, from the HUD's interrupt into the next frame's first lines) is caught mid-build by a dump
+taken in MAME's frame callback. A model of the builder compared against such dumps "failed" on
+frames where nothing was wrong. Sampled at the builder's own last store, Alien Brigade's model went
+from scattered false differences to 16,465 builds of 16,465 byte-exact.
+
+Take the dump where the builder finishes (a tap on its final store or its `RTS`), not where the
+emulator's frame ends.
+
+## A game's random numbers can depend on timing
+
+Three retail generators stir something timing-dependent into their state: Robotron adds a stale
+stack byte its NMI samples, Desert Falcon calls its generator from the idle loop and from an
+interrupt, Planet Smashers lets the caller's carry in and calls a second copy from the NMI. On
+such a cartridge a patch that moves one cycle changes every later draw, so an `.inp` recording
+diverges even when the patch is right ("Patching a ROM desynchronises `.inp` playback from the
+first frame" is the other way a recording is lost).
+
+Read how the generator is seeded and who calls it before trusting a recording as a regression
+test; where timing gets in, validate by forcing state at chosen frames and comparing short
+stretches.
+
+## Poking one state byte can leave its companions behind
+
+Poking Robotron's wave number to reach a late wave gave that wave's enemy counts at an early
+wave's speeds: the speed tables are indexed by a second byte that only the game's own wave-end
+code moves. The runs looked healthy and measured the wrong load. Poke the game's own test for the
+event (the bytes its "level over" compare reads) so its code moves everything, or poke every byte
+the event writes.

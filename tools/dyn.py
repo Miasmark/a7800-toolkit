@@ -287,6 +287,66 @@ def runs(addrs, gap=3):
     return firsts
 
 
+def to_cart_spaces(rom, log, low=None, mapper=None):
+    """The log reduced to what lies in the cartridge, named as cart.py names it; and what
+    was left out or renamed, as lines to print.
+
+    Two things a log can hold that the disassembler cannot take:
+      * code that ran from RAM (`ram:1D30` in mamemcp.py's and other probes' logs: a title
+        screen's handler copied there, a JMP kept in zero page). It is not in the
+        cartridge, so it is no entry point; an `R` line says where such code came from.
+      * a flat cartridge's addresses under bank names (`b0:`, `f7:`: exectrace.lua run
+        with its SuperGame defaults). A flat cartridge has one space, `rom`.
+    """
+    import disasm
+    cart = disasm.Cart(rom, mapper=mapper, low=low) if (mapper or low) else disasm.Cart(rom)
+    spaces = set(cart.spaces())
+    flat = spaces == {"rom"}
+    renamed, dropped = set(), {}
+
+    def fix(loc):
+        sp, _, a = loc.partition(":")
+        if sp in spaces:
+            return loc
+        try:
+            addr = int(a, 16)
+        except ValueError:
+            addr = None
+        if flat and addr is not None and re.match(r"^[bf]\d+$", sp) and cart.in_space("rom", addr):
+            renamed.add(sp)
+            return "rom:%04X" % addr
+        dropped[sp] = dropped.get(sp, 0) + 1
+        return None
+
+    for kind in ("x", "f"):
+        out = {}
+        for sp, addrs in log.get(kind, {}).items():
+            for a in addrs:
+                loc = fix("%s:%04X" % (sp, a))
+                if loc:
+                    out.setdefault(loc.partition(":")[0], set()).add(a)
+        log[kind] = out
+    log["j"] = [(src, fix(dst)) for src, dst in log.get("j", [])]
+    log["j"] = [(src, dst) for src, dst in log["j"] if dst]
+    s = {}
+    for loc, banks in log.get("s", {}).items():
+        new = fix(loc)
+        if new:
+            s.setdefault(new, set()).update(banks)
+    log["s"] = s
+    log["r"] = [(ram, n, fix(src)) for ram, n, src in log.get("r", [])]
+    log["r"] = [(ram, n, src) for ram, n, src in log["r"] if src]
+    lines = []
+    if renamed:
+        lines.append("the log names banks (%s) but this cartridge is flat: read as `rom`"
+                     % ", ".join(sorted(renamed)))
+    for sp, n in sorted(dropped.items()):
+        lines.append("%d line%s of the log in `%s` left out: not in the cartridge%s"
+                     % (n, "" if n == 1 else "s", sp,
+                        " (code run from RAM)" if sp.startswith("ram") else ""))
+    return lines
+
+
 def merge(doc, log, missed=None):
     """Add what the log observed to annotations `doc`; return what was added.
 
@@ -336,7 +396,7 @@ def apply(rom, doc, log, logname, low=None, mapper=None, rounds=4, quiet=False,
     work = _mktemp("dyn-cfg-")
     cfg = os.path.join(work, "a.json")
     total = {"entries": [], "banksw": {}}
-    lines = []
+    lines = to_cart_spaces(rom, log, low, mapper)
 
     def unreached():
         with io.open(cfg, "w", encoding="utf-8") as f:

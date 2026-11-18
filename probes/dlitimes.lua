@@ -27,7 +27,8 @@
 -- instruction was running finished, so it is a few cycles late, not early.
 -- Checked on MAME 0.264. It cannot tell a handler's first fetch from a jump to the
 -- same address; the vector is read each frame because the cartridge is not mapped
--- at boot.
+-- at boot. A vector that points below $4000 (a JMP the game keeps in RAM and
+-- rewrites: Desert Falcon's is $0040) gets a tap of its own on that one address.
 local MACHINE = (type(manager.machine) == "function")
                 and manager:machine() or manager.machine
 local cpu = MACHINE.devices[":maincpu"]
@@ -64,14 +65,16 @@ TAPS[2] = mem:install_write_tap(0x20, 0x3F, "dt-maria", function(offset, data)
   if offset == 0x2C then dpph = data elseif offset == 0x30 then dppl = data end
   return data
 end)
-TAPS[3] = mem:install_read_tap(0x4000, 0xFFFF, "dt-fetch", function(offset, data)
+local function fetched(offset, data)
   if armed and offset == vec and offset == PCs.value and frame >= FROM then
     local line, cyc = beam()
     o:write(string.format("nmi   frame %d  line %.2f  (%d whole lines, %.0f cycles in)\n",
                           frame, line, math.floor(line), cyc))
   end
   return data
-end)
+end
+TAPS[3] = mem:install_read_tap(0x4000, 0xFFFF, "dt-fetch", fetched)
+local lowvec = nil                     -- a vector into RAM: its own one-address tap (below)
 
 -- MSTAT bit 7 (VBLANK) as the game sees it: every change between two reads, with
 -- the raster line of the read. A game polling it in a tight loop gives the edge to
@@ -105,6 +108,11 @@ if emu.add_machine_stop_notifier then STOP_CB = emu.add_machine_stop_notifier(st
 emu.register_frame_done(function()
   frame = frame + 1
   vec = mem:read_u8(0xFFFA) | (mem:read_u8(0xFFFB) << 8)
+  if vec < 0x4000 and armed and lowvec ~= vec then
+    lowvec = vec
+    TAPS[5] = mem:install_read_tap(vec, vec, "dt-fetch-ram", fetched)
+    o:write(string.format("vector $%04X is in RAM: timed at its first fetch there\n", vec))
+  end
   if frame == SHOW then
     o:write(string.format("dll   $%04X  top screen line %d\n", (dpph << 8) | dppl, TOP))
     zones()
