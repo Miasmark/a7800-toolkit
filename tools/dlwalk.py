@@ -182,11 +182,19 @@ def show_dl(entries, indent="    "):
                  e["hpos"], "; ".join(notes)))
 
 
-def show_dll(zones, src=None, follow=False):
+def show_dll(zones, src=None, follow=False, frame=263):
+    """`frame`: the scanlines MARIA draws in a frame (263 NTSC, 313 PAL). A list of lists
+    has no end mark: it ends where the frame does, and entries past that are whatever
+    bytes follow it in memory, so they are not shown as zones."""
     print("%-6s %-4s %-6s %-6s %-6s %s"
           % ("at", "zone", "lines", "DL", "DLI", "holey DMA"))
     line = 0
+    past = 0
     for i, z in enumerate(zones):
+        if frame and line >= frame:
+            past = len(zones) - i
+            zones = zones[:i]
+            break
         holey = ", ".join(n for n, on in (("16K", z["holey16"]),
                                           ("8K", z["holey8"])) if on) or "-"
         print("$%04X %-4d %-6d $%04X  %-6s %s"
@@ -199,6 +207,10 @@ def show_dll(zones, src=None, follow=False):
             except IndexError as e:
                 print("        (cannot follow: %s)" % e)
     print("\n%d zones, %d scanlines total" % (len(zones), line))
+    if past:
+        print("(%d more entr%s asked for start past scanline %d, the frame's end: the bytes "
+              "after the list, not zones; --frame-lines 0 shows them)"
+              % (past, "y" if past == 1 else "ies", frame))
 
 
 # -------------------------------------------------------------------- selftest
@@ -246,7 +258,10 @@ def main():
                     help="CPU address the --raw dump starts at")
     ap.add_argument("--dl", type=address, help="a display list")
     ap.add_argument("--dll", type=address, help="a display list list")
-    ap.add_argument("--zones", type=int, default=25, help="zones in the DLL")
+    ap.add_argument("--zones", type=int, default=25, help="zones in the DLL, at most")
+    ap.add_argument("--frame-lines", type=int, default=263,
+                    help="scanlines in a frame: the list of lists ends there (263 NTSC, "
+                         "313 PAL; 0: show every entry asked for)")
     ap.add_argument("--follow", action="store_true",
                     help="also decode each display list the DLL points at")
     ap.add_argument("--selftest", action="store_true")
@@ -266,7 +281,7 @@ def main():
         ap.error("give a rom with --space, or --raw with --at")
 
     if args.dll is not None:
-        show_dll(walk_dll(src, args.dll, args.zones), src, args.follow)
+        show_dll(walk_dll(src, args.dll, args.zones), src, args.follow, args.frame_lines)
     elif args.dl is not None:
         show_dl(walk_dl(src, args.dl))
     else:

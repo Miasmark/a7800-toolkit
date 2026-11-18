@@ -3256,6 +3256,54 @@ def t_dynamic():
         % len(f["executed_banks"])
 
 
+def t_dynamic_spaces():
+    """dyn.py takes only what lies in the cartridge from a log, named as the cartridge
+    names it: code that ran from RAM (`ram:`) is left out and said so, where it used to
+    stop the disassembler; a flat cartridge's addresses under bank names (exectrace.lua's
+    SuperGame defaults: `b0:`, `f7:`) are read as `rom`."""
+    import dyn
+    synth = _synth()
+    data, f = synth.build()
+    d = tempfile.mkdtemp(prefix="dynsp-")
+    rom = os.path.join(d, "s.a78")
+    io.open(rom, "wb").write(data)
+    ann = os.path.join(d, "a.json")
+    run_tool("init.py", rom, "-o", ann)
+    log = os.path.join(d, "exectrace.log")
+    io.open(log, "w", encoding="utf-8").write("\n".join(
+        ["X f7:%04X" % f["reset"], "X ram:1D30", "X ram:1D32", "J ram:1DEA f7:%04X" % f["handler_a"],
+         "J f7:C0E2 ram:1D30", "S ram:1D40 3 x2"]) + "\n")
+    out = run_tool("dyn.py", rom, log, "-c", ann)
+    assert "Traceback" not in out and "failed" not in out, out
+    assert "`ram` left out" in out and "code run from RAM" in out, out
+    new = json.load(io.open(ann, encoding="utf-8"))
+    assert "f7:%04X" % f["handler_a"] in new["entries"], new["entries"]
+    assert not any(e.startswith("ram") for e in new["entries"]), new["entries"]
+    assert not any(k.startswith("ram") for k in new.get("banksw", {})), new["banksw"]
+    src = os.path.join(d, "src")
+    run_tool("disasm.py", rom, "-c", ann, "-o", src)
+    assert "PASSED" in run_tool("verify.py", rom, "-d", src)
+    # a flat 32K cartridge: reset at $F000 (a JMP to itself), a routine at $F010 only a
+    # RAM vector reaches; the log names them as a SuperGame's banks
+    body = bytearray([0xFF]) * 0x8000
+    body[0x7000:0x7003] = bytes([0x4C, 0x00, 0xF0])
+    body[0x7010:0x7012] = bytes([0xEA, 0x40])
+    body[0x7FFA:0x8000] = bytes([0x10, 0xF0, 0x00, 0xF0, 0x10, 0xF0])
+    head = bytearray(synth.header(len(body), "Flat32"))
+    head[53:55] = b"\x00\x00"                       # no mapper bits: a flat cartridge
+    flat = os.path.join(d, "flat.a78")
+    io.open(flat, "wb").write(bytes(head) + bytes(body))
+    import cart as cartlib
+    assert cartlib.Cart(flat).spaces() == ["rom"], cartlib.Cart(flat).spaces()
+    parsed = dyn.parse_log("X f7:F000\nX b0:8000\nJ f7:F000 f7:F010\nX f7:F010\n")
+    doc, lines = dyn.apply(flat, {}, parsed, "exectrace.log")
+    assert doc is not None, lines
+    assert any("flat: read as `rom`" in l for l in lines), lines
+    assert "rom:F010" in doc["entries"], doc["entries"]
+    assert set(parsed["x"]) == {"rom"}, parsed["x"]
+    return "RAM code left out and reported; a flat cartridge's bank names read as rom"
+
+
 def t_firstlook_static():
     """firstlook's static half names what the cartridge is, with no MAME."""
     import firstlook
@@ -5914,6 +5962,7 @@ def main():
     r.check("address spellings", t_addresses)
     r.check("profile mapping", t_pcmap)
     r.check("dynamic annotations", t_dynamic)
+    r.check("dynamic annotations: RAM code, flat carts", t_dynamic_spaces)
     r.check("first look (static)", t_firstlook_static)
 
     print("")

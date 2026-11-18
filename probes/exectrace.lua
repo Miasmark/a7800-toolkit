@@ -18,13 +18,16 @@
 --     S <space>:<from> <value> xN   a store into the bank-select window, and
 --                                   what it wrote, N times
 -- <space> is `f<bank>` for the fixed upper half and `b<N>` for window bank N,
--- the names every other tool here uses.
+-- the names every other tool here uses; a flat cartridge (A7800_XT_BANKS 1, which
+-- cart.py's probe_env gives for one) is the single space `rom`.
 --
 --   A7800_XT_LOG      output file (default exectrace.log)
 --   A7800_XT_SELECT   bank-select window, hex "lo-hi" (default 8000-BFFF, the
 --                     SuperGame register). Writes there are logged as bank
 --                     switches; the value written, masked, is the bank.
---   A7800_XT_BANKS    number of banks (default 8; the mask is this minus one)
+--   A7800_XT_BANKS    number of banks (default 8; the mask is this minus one). 1 (or 0)
+--                     is a flat cartridge: every address is `rom:`, and no store is
+--                     taken for a bank switch
 --   A7800_XT_FIRST   file bank the window's value 0 selects (default 0; EXROM SuperGame: 1)
 --   A7800_XT_WBANKS  values the window takes before wrapping (default: all banks; EXROM: banks - 1)
 --   A7800_XT_LOWBANK file bank fixed at $4000, if any (EXROM: 0), so it is not labelled as the last
@@ -48,6 +51,9 @@
 --     as "nothing ran".
 --   * Bank tracking assumes a SuperGame-style register. Other mappers
 --     (Activision, Absolute) need their own bank-select rule.
+--   * Only the cartridge ($4000 up). Code a game copies to RAM and runs there (a
+--     title screen's handler, an NMI vector's JMP kept in zero page) is not logged;
+--     mamemcp.py's mame_exectrace logs it as `ram:`, and dyn.py leaves those out.
 --   * Only what the run reaches. Play, or run a recording, to reach more.
 local MACHINE = (type(manager.machine) == "function")
                 and manager:machine() or manager.machine
@@ -69,6 +75,7 @@ local FIRST = tonumber(os.getenv("A7800_XT_FIRST") or "") or 0
 local WBANKS = tonumber(os.getenv("A7800_XT_WBANKS") or "") or NBANKS
 local LOWBANK = tonumber(os.getenv("A7800_XT_LOWBANK") or "")
 local FIXED_BANK = NBANKS - 1          -- the fixed half is the last bank
+local FLAT = NBANKS <= 1               -- no banks: one space, `rom`, as cart.py names it
 
 local bank = 0
 local armed = false
@@ -77,6 +84,7 @@ local seen_x, seen_j, seen_s = {}, {}, {}
 local pending_j = nil                  -- "from" of a JMP (ind) awaiting its target
 
 local function key(addr)
+  if FLAT then return string.format("rom:%04X", addr) end
   if addr >= WIN_LO and addr <= WIN_HI then return string.format("b%d:%04X", bank, addr) end
   if LOWBANK and addr < 0x8000 then return string.format("f%d:%04X", LOWBANK, addr) end
   return string.format("f%d:%04X", FIXED_BANK, addr)
@@ -104,6 +112,7 @@ TAPS[1] = mem:install_write_tap(0x0001, 0x0001, "inptctrl", function(offset, dat
 end)
 TAPS[2] = mem:install_read_tap(0x4000, 0xFFFF, "exectrace", fetch)
 TAPS[3] = mem:install_write_tap(SEL_LO, SEL_HI, "banksel", function(offset, data)
+  if FLAT then return data end                  -- a flat cartridge has no register
   local v = FIRST + (data % WBANKS)
   if armed then
     local k = string.format("%s %d", key(cpu.state["PC"].value), v)
