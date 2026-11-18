@@ -327,6 +327,63 @@ message. Treat every statement about a bankset image that rests on mainline MAME
 void. `capture.py` recognises the fork and uses debugger watchpoints; `mamecheck.py` does not
 yet drive it.
 
+## What retail cartridges do with their banks and their RAM
+
+From a survey of seventeen retail cartridges (2026-11-18; the repositories are listed in the
+README under "Disassembly projects"). Each line says how it is known: **live** (watched in MAME),
+**code** (read from a listing), **measured** (counted on the ROM's bytes).
+
+**Bank switches inside interrupts are the norm.** Seven of the seventeen write the bank register
+from an NMI, so a disassembly cannot assume that the bank in at an interrupt is the bank the main
+program chose:
+
+| Cartridge | Where | What for | How it gets back |
+|---|---|---|---|
+| Planet Smashers | `f7:FE45`, three a frame | the list builder, the stars, the sound | a shadow, `$B7`, written before each switch (live) |
+| Commando | `f7:F00B`, `f7:F018` | the sound drivers in bank 6 | a table by level, `f7:F8F7` (live) |
+| Alien Brigade | `f0:60C4`, `f0:60DE` | the HUD's bank, timed by a nested interrupt | the level's bank from RAM (live) |
+| Tower Toppler | in its NMI | sound | the bank's own number, read at `$BFFF` (live) |
+| Fatal Run | `6:56B6` | the text font's bank; the CPU is held in the interrupt for the whole panel | a shadow, `$F4` (live) |
+| Scrapyard Dog | `7:F084` | queued sound requests | a shadow, `$2223` (live) |
+| Ace of Aces | `f7:F6A5` | its pause | a stack unwind (code) |
+
+Fatal Run and Scrapyard Dog write the register before the shadow in places: an interrupt between
+the two stores restores the old bank (code; not seen to happen).
+
+**A bank can end with its own number.** Tower Toppler and Jinks keep, at `$BFFF` of each
+switched bank, the value that selects it, so a wrapper restores its caller's bank with no shadow
+(live on Tower Toppler, code on Jinks).
+
+**The NMI vector can be in the window.** Summer Games and Winter Games point it at `$8003`: every
+code bank opens `JMP entry` / `JMP nmi`, and Winter Games' data bank 6 opens with jumps that
+forward both to the fixed bank, so it can stay in with the screen on (code, live).
+
+**The same bytes in several banks.** Commando's banks 1 to 5 each hold an identical 1,187-byte
+block at `$B200-$B6A2`; Alien Brigade's level banks hold the same scripts at the same addresses
+(`$9000-$9CB3` is identical in its banks 1 and 2), and its bank 7 is a byte-for-byte copy of bank
+5 that no run selected (measured). A patch to shared code goes in every copy.
+
+**Code where a holey zone reads zeros.** Planet Smashers, Robotron, Desert Falcon and Alien
+Brigade keep sprite art in the even 4K blocks and code and tables in the odd ones, which a zone
+with 16-line holey DMA reads as zero: an object can straddle two zones with no clipping code and
+no padding (live for the zones' flags). Below `$8000`, where there are no holes, Alien Brigade
+puts code in the tails of its tile pages and Planet Smashers pads its sprites with two all-zero 4K
+blocks. Zero bytes there are in use.
+
+**What the five carts with RAM at `$4000` keep in it** (live: every write to and read of
+`$4000-$7FFF` logged by PC):
+
+| Cartridge | In cart RAM |
+|---|---|
+| Tower Toppler | two sets of display lists, a sprite strip only MARIA reads, the unpacked tower map, variables (6.2K used) |
+| Jinks | samples on the title; in play the level's character map and character set, edited in place (8K) |
+| Impossible Mission | a game generated from a seed, the room's list of lists, lists and character map, puzzle buffers, two 4-byte code stubs (6.5K) |
+| Summer Games, Winter Games | a scene's workspace: sprites a line a page, unpacked pictures, a text map |
+
+Tower Toppler, Jinks and Impossible Mission never touch `$4000-$5FFF`. Three of the five put
+display lists in cart RAM, each because a 2K character set had filled console RAM. A bankset
+cartridge may do neither that nor run code there ("Bankset", above).
+
 ## 52K
 
 52K is exactly `$3000-$FFFF` — four kilobytes below where a 48K image starts,

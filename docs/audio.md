@@ -1390,6 +1390,42 @@ level a song describes.
 Eleven songs, 43 patterns, 1,398 notes, and a no-op push that changes zero
 bytes.
 
+### Around the notes: what the driver does at a track's end, on pause, and beside effects
+
+Read from the driver's code and checked against the chip, frame by frame, for all eleven songs
+(25,470 frames; the commando-7800-disassembly repository has the listing notes and the runs).
+
+- **The entry that ends a track is a command.** A track is a list of pattern pointers; an entry
+  with a zero high byte ends it, and its low byte says what follows: 0 restarts the song, `$80`
+  and up stops the music, *n* starts song *n*-1 (`b6:A851`). The death tune chains to a lead-in and
+  that to the level tune with no code in the game. The first voice to reach its end decides for
+  all four, so a track that is longer than the others loses its tail.
+- **One duration table, no tempo.** Sixteen lengths in frames at `b6:A941`; a PAL retime is those
+  sixteen bytes.
+- **AUDCTL per song, never used.** A byte a song at `b6:AA51`, written at the song's start; all
+  eleven are 0, and only distortions `$A0` and `$80` occur.
+- **AUDF is written once, at note-on.** That is why pause has a flaw: the pause code zeroes
+  `$4000-$4008` every frame and skips the driver, and on resume a note that was sounding has its
+  AUDC back but AUDF 0 until that voice's next note (6 and 12 frames lost in the run measured, up
+  to 96 for the longest note). A player that zeroes only AUDC, or rewrites both on resume, does
+  not have it.
+- **What it costs:** 549 bytes of driver, 3,415 of data for 115 seconds of music, 31 bytes of RAM
+  and 16 of zero page; 560 cycles a frame on average with four voices, 1,395 at worst (the
+  cartridge's own code run in `sim.py`'s CPU; MAME's elapsed time agrees).
+- **Effects never touch the POKEY.** Music is POKEY only and effects are TIA only (a write tap
+  naming PC and bank, 7,200 frames). The effects driver (`b6:8ED2`, 67 bytes) keeps all effects
+  end to end in one block with a start offset an id; a request is taken only if its start offset
+  is above the channel's current index, so **the block's order is the priority table**: an idle
+  channel takes anything, and a sound can neither be cut by an earlier one nor restart itself.
+  The stream's bytes are Midnight Mutants' (`$00` end, `$01-$0F` AUDC with no time, `$10-$FF` a
+  frame: AUDF the byte, AUDV its high nibble).
+- **No detection.** The game never reads a POKEY register; with the header's POKEY bit cleared it
+  runs the same, with its effects and no music.
+
+Sampled sound, for comparison: of the seventeen cartridges surveyed only Jinks plays samples
+(`f7:FC91`): 4-bit pairs at 5,245 Hz clocked by WSYNC with the CPU locked, never during play, 24K
+of ROM for about nine seconds.
+
 ## Hunting the engine, not the game
 
 Two format files took a long time each, because each meant reading a player's

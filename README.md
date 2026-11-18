@@ -337,6 +337,31 @@ Activision banking and Bankset are laid out (see
 [`docs/cartridges.md`](docs/cartridges.md)). Bankset images disassemble with MARIA's half as data, rebuild exactly, and the census and the screen rebuild read each half as the chip that uses it; which of MARIA's banks is in view is assumed, not yet confirmed (that doc says how). SOUPER and the 512K flat layout are
 recognised and refused with an explanation rather than laid out wrongly.
 
+## Disassembly projects
+
+Annotations and findings made with these tools; none holds a ROM or a listing.
+
+Long-running, live-verified disassemblies:
+[asteroids](https://github.com/Miasmark/asteroids-7800-disassembly),
+[ballblazer](https://github.com/Miasmark/ballblazer-7800-disassembly),
+[centipede](https://github.com/Miasmark/centipede-7800-disassembly),
+[digdug](https://github.com/Miasmark/digdug-7800-disassembly),
+[galaga](https://github.com/Miasmark/galaga-7800-disassembly),
+[mspacman](https://github.com/Miasmark/mspacman-7800-disassembly).
+
+One research pass each (about half an hour of an automated session, 2026-11-18; each README says
+how far to trust it):
+[planetsmashers](https://github.com/Miasmark/planetsmashers-7800-disassembly),
+[robotron](https://github.com/Miasmark/robotron-7800-disassembly),
+[commando](https://github.com/Miasmark/commando-7800-disassembly),
+[desertfalcon](https://github.com/Miasmark/desertfalcon-7800-disassembly),
+[cockpit sims](https://github.com/Miasmark/cockpit-sims-7800-survey) (Ace of Aces, Super Huey,
+F-18 Hornet, Tomcat),
+[RAM carts](https://github.com/Miasmark/ramcarts-7800-survey) (Tower Toppler, Jinks, Impossible
+Mission, Summer Games, Winter Games),
+[shops](https://github.com/Miasmark/shops-7800-survey) (Fatal Run, Scrapyard Dog),
+[alienbrigade-crossbow](https://github.com/Miasmark/alienbrigade-crossbow-7800-survey).
+
 ## Examples
 
 `examples/exo-annotations.json` — a real annotation file worked out with these
