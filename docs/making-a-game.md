@@ -119,6 +119,28 @@ the background and therefore transparent. To check what you got, render it back
 the way the hardware reads it with `gfx.py --direct`, which is a genuine
 round trip -- it will show you an upside-down sprite as upside-down.
 
+## Text
+
+Text is a byte a letter unless you do something about it, and a game with a story or a shop runs
+out of ROM in its text first. `tools/texttokens.py` takes the strings and gives back tokens: a byte
+`$80-$FE` in a string stands for a run of letters, a pair from a table of pairs or a longer run
+from a list, and its `tk_print` prints them. Measured on one game: 3,902 letters in 2,344 bytes,
+tables included. What was learned doing it:
+
+- **Pairs carry most of it.** With a pair at two bytes (no pointer, no end mark), a pair pays from
+  its third use, and 103 of that game's 121 entries were pairs; whole words alone saved about a
+  quarter of the letters, against 40%.
+- **Cut each string for the fewest bytes** once the entries are chosen (a small dynamic program in
+  the build). Replacing entries in the order they were chosen left 30 bytes on the table.
+- **Rewording to share words barely pays** once tokens are in: the dearest one-off word cost 8
+  bytes, and eight trial rewordings saved 22.
+- **Mind the time.** A page of text is drawn in a frame or two. A decoder that `JSR`s a routine for
+  every letter of a token made one page 30% slower and pushed it into another frame; storing a
+  token's letters inline through `(ptr,X)` made it faster than plain text.
+- **A new-line code** inside a run of lines (the next row, same column) saves the row, the column
+  and the end mark that each line would otherwise carry: leave a token value free for it
+  (`--limit`).
+
 ## The budget
 
 MARIA halts the 6502 while it draws, so "how much can my game compute" is a
