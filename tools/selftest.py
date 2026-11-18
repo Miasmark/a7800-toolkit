@@ -3343,6 +3343,82 @@ def t_rts_dispatch():
     return "four handlers behind two RTS-trick tables reached (interleaved, and in two halves)"
 
 
+def t_texttokens():
+    """texttokens.py: the strings it packs come back letter for letter from its own 6502
+    routine, assembled by asm.py and run in the simulator's CPU; pairs and longer runs are
+    both chosen; the bytes are fewer than a byte a letter."""
+    import asm
+    import sim
+    import texttokens
+    text = """GREET: THE STATION IS OPEN TO TRADERS. THE DOCK IS CLEAR.
+THE STATION IS CLOSED. THE DOCK IS FULL, TRADER.
+PAY THE DOCK FEE AT THE STATION OFFICE.
+THE PIRATES RAID THE TRADERS NEAR THE STATION.
+TRADERS PAY THE PIRATES OR FIGHT THE PIRATES.
+ONE: A
+LAST: THE TRADERS AND THE PIRATES AND THE STATION."""
+    d = tempfile.mkdtemp(prefix="tok-")
+    src, out = os.path.join(d, "s.txt"), os.path.join(d, "t.asm")
+    io.open(src, "w", encoding="utf-8").write(text + "\n")
+    said = run_tool("texttokens.py", src, "-o", out, "--report")
+    assert "Traceback" not in said and "wrote" in said, said
+    rows = texttokens.read_strings(text)
+    assert [l for l, _s in rows][:2] == ["GREET", None] and rows[-2] == ("ONE", "A"), rows
+    lines = ["TKSRC = $40", "TKDST = $42", "TKTMP = $44", "    .org $8000"]
+    lines += io.open(out, encoding="utf-8").read().split("\n")
+    a = asm.Assembler()
+    code = bytes(a.assemble(lines))
+
+    class Bus(object):
+        def __init__(self):
+            self.mem = bytearray(0x10000)
+            self.mem[0x8000:0x8000 + len(code)] = code
+            self.mram = None                     # (no cartridge RAM for sim.CPU to watch)
+
+        def read(self, addr):
+            return self.mem[addr & 0xFFFF]
+
+        def write(self, addr, v):
+            assert (addr & 0xFFFF) < 0x8000, "a store into the ROM at $%04X" % addr
+            self.mem[addr & 0xFFFF] = v & 0xFF
+
+    bus = Bus()
+    cpu = sim.CPU(bus)
+    plain = coded = 0
+    for k, (label, s) in enumerate(rows):
+        at = a.sym[label or "TKS%d" % k]
+        want = [ord(c) - 32 for c in s]
+        n = 0
+        while bus.mem[at + n] != 0xFF:
+            n += 1
+        plain, coded = plain + len(want), coded + n
+        for i in range(0x1800, 0x1900):
+            bus.mem[i] = 0xEE
+        bus.mem[0x40:0x44] = bytes([at & 0xFF, at >> 8, 0x00, 0x18])
+        cpu.s = 0xFD
+        cpu.push(0xFF)
+        cpu.push(0xEF)                           # (RTS comes back to $FFF0)
+        cpu.pc = a.sym["tk_print"]
+        steps = 0
+        while cpu.pc != 0xFFF0:
+            cpu.step()
+            steps += 1
+            assert steps < 20000, "tk_print ran away on %r" % s
+        got = list(bus.mem[0x1800:0x1800 + len(want)])
+        assert got == want, (s, got, want)
+        assert bus.mem[0x1800 + len(want)] == 0xEE, "wrote past the string's end: %r" % s
+        assert bus.mem[0x42] | (bus.mem[0x43] << 8) == 0x1800 + len(want), "TKDST not left after the last letter"
+    tk = texttokens.Tokens(lambda s: [ord(c) - 32 for c in s])
+    for _l, s in rows:
+        tk.collect(s)
+    tk.build()
+    assert tk.pairs and tk.longs, (tk.pairs, tk.longs)
+    p, c, t = tk.saved()
+    assert (p, c) == (plain, coded) and c + t < p, (p, c, t)
+    return "%d strings: %d letters in %d bytes and %d of tables; printed right by the 6502 routine" % (
+        len(rows), p, c, t)
+
+
 def t_firstlook_static():
     """firstlook's static half names what the cartridge is, with no MAME."""
     import firstlook
@@ -6003,6 +6079,7 @@ def main():
     r.check("dynamic annotations", t_dynamic)
     r.check("dynamic annotations: RAM code, flat carts", t_dynamic_spaces)
     r.check("RTS-trick tables", t_rts_dispatch)
+    r.check("text tokens", t_texttokens)
     r.check("first look (static)", t_firstlook_static)
 
     print("")
